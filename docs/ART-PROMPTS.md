@@ -1,63 +1,68 @@
-# 小宿的美术素材：Codex 生成提示词
+# NanaHotel art: image prompts for Codex
 
-在 Codex 里用 `$imagegen` 逐条生成。生成好后，把图片直接拖进和 Claude 的对话里发过去（一次可以发多张），
-裁剪、压缩、放进项目都由 Claude 来做，不用自己存到仓库里。
+Generate these one at a time in Codex with `$imagegen`. When they're done, drag the images straight into the chat
+with Claude (several at once is fine); Claude crops, compresses and adds them to the project, so there's no need to
+save them to the repository yourself. Until then the app draws Nana as SVG and shows tinted placeholders for photos.
 
-## 一、3D 毛绒卡皮巴拉「小宿」（10 张）
+## 1. Nana, the 3D plush capybara (10 images)
 
-先生成第 1 张「基准图」。后面 9 张都**拿第 1 张当参考图**（edit 模式），保持是同一只卡皮巴拉：
-同样的毛色、比例、橘子和画风，只改表情和动作。
+Generate image 1, the **reference image**, first. Make the other 9 **from image 1 as the reference** (edit mode) so it
+stays the same capybara: the same fur color, proportions, orange and style; only the expression and pose change.
 
-**1. 基准图（平常）`idle`**
+**1. Reference (calm) `idle`**
 ```
-$imagegen 3D 渲染的吉祥物角色「小宿」：一只 Q 版卡皮巴拉，毛绒玩具质感（细腻的短绒毛，看起来软软的），
-圆滚滚的身体，大脑袋和身体连在一起，暖焦糖色的毛，大而圆的深棕色鼻头，黑亮的小圆眼睛带高光，
-淡粉色腮红，两只小圆耳朵；头顶顶着一个带一片绿叶的小橘子。
-表情平静、温柔、微微笑（情绪稳定）。正面朝向镜头，坐姿，两只小短爪放在肚子前。
-柔和的摄影棚光，Pixar / 泡泡玛特那种 3D 质感，干净，没有文字。
-透明背景 PNG，1024×1024，角色居中，四周留一点空白。
-```
-
-后面每张都在开头加这句：
-```
-$imagegen 参考上一张图里的卡皮巴拉「小宿」，保持完全相同的角色、毛色、比例、橘子和 3D 毛绒画风，透明背景 PNG，1024×1024，只改表情和动作：
-```
-然后接下面某一行：
-
-2. `listening` 在听：头微微歪向一边，耳朵竖起来，眼睛看向下方，像在认真听你说话。
-3. `thinking` 思考：眼睛往上看，一只小爪子托着下巴，头顶冒出两个小小的白色思考气泡。
-4. `talking` 说话：嘴巴微微张开像在说话，一只小爪子抬起来，像在给你解释。
-5. `happy` 开心：眼睛眯成弯弯的月牙，张嘴大笑，两只小爪子举起来欢呼，腮红更红，身边飘着几颗小星星。
-6. `sleepy` 打盹：闭着眼睛，头微微歪着，鼻子上挂着一个小鼻涕泡，头顶飘着「Zzz」。
-7. `oops` 出错：有点尴尬地笑，额头上挂着一滴蓝色的汗珠，一只小爪子挠挠头。
-8. `poke` 被点了一下：吓了一跳，眼睛紧闭成「> <」，头顶的橘子弹到半空中。
-9. `wave` 打招呼：开心地挥着一只小爪子跟你打招呼，微笑。
-10. `onsen` 泡温泉：泡在冒着热气的温泉池里，只露出头和肩膀，水面上漂着三四个小橘子，闭着眼睛很享受（这张可以带温泉场景，不用透明背景，正方形）。
-
-## 二、酒店照片（15 张）
-
-统一要求，加在每一条后面：
-```
-写实摄影风格，自然光，温暖色调，干净整洁，没有人，没有文字、logo 和招牌，横图 1536×1024。
+$imagegen A 3D-rendered mascot character named "Nana": a chibi capybara with the look of a plush toy (fine, short,
+velvety fur that looks soft to the touch), a round chubby body with the big head and body as one shape, warm caramel
+fur, a big round dark-brown nose, small shiny black eyes with highlights, soft pink blush, two small round ears, and a
+small orange with one green leaf sitting on top of its head.
+A calm, gentle, slight smile (very relaxed and unbothered). Facing the camera, sitting, two little paws resting on its
+tummy. Soft studio lighting, a polished Pixar / designer-toy 3D look, clean, no text.
+Transparent background PNG, 1024×1024, the character centered with a little space around it.
 ```
 
-酒店封面（按档次）：
-1. `cover-economy` 经济型酒店的前台和大堂，明亮、简洁、干净，浅色调。
-2. `cover-comfort` 舒适型酒店大堂，温馨现代，原木色和绿植，休息沙发。
-3. `cover-premium` 高档酒店大堂，有设计感，暖色灯光，艺术装置。
-4. `cover-luxury` 五星级豪华酒店大堂，挑高空间，大理石地面，水晶吊灯。
-5. `cover-lake` 酒店露台望出去的湖景，远处有山和柳树，江南风格的清晨。
-6. `cover-city` 从酒店高层房间的落地窗看出去的江边城市夜景。
-7. `cover-courtyard` 中式庭院风格的精品酒店，青瓦白墙，竹子和石灯。
+Start each of the next prompts with:
+```
+$imagegen Using the capybara "Nana" from the previous image as the reference, keep exactly the same character, fur color, proportions, orange and 3D plush style, transparent background PNG, 1024×1024, and change only the expression and pose:
+```
+then add one of these lines:
 
-房间：
-8. `room-king-economy` 经济型酒店大床房，小巧干净，白色床品。
-9. `room-twin` 双床房，两张单人床，床头柜，窗边有小沙发。
-10. `room-king-comfort` 舒适型大床房，原木色调，温馨的床头灯。
-11. `room-king-deluxe` 豪华大床房，大落地窗，窗外是城市景观，地毯和单人沙发。
-12. `room-family` 亲子家庭房，一张大床加一张小床，有一点童趣装饰。
-13. `room-suite` 酒店套房的客厅，沙发、茶几，门后能看到卧室。
+2. `listening`: head tilted slightly to one side, ears perked up, eyes looking down, as if listening closely to you.
+3. `thinking`: eyes looking up, one little paw on its chin, two small white thought bubbles above its head.
+4. `talking`: mouth slightly open as if speaking, one little paw raised as if explaining something to you.
+5. `happy`: eyes closed into happy crescents, a big open-mouthed laugh, both paws raised in a cheer, brighter blush, a few small stars floating around it.
+6. `sleepy`: eyes closed, head tilted a little, a tiny snot bubble on its nose, "Zzz" floating above its head.
+7. `oops`: an awkward little smile, a blue sweat drop on its forehead, one paw scratching its head.
+8. `poke`: startled, eyes squeezed shut like "> <", the orange on its head bouncing up into the air.
+9. `wave`: happily waving one little paw hello, smiling.
+10. `onsen`: soaking in a steaming hot-spring pool with only its head and shoulders above the water, three or four small oranges floating on the surface, eyes closed, blissful (this one may include the hot-spring scene and doesn't need a transparent background; square).
 
-其他：
-14. `breakfast` 酒店自助早餐台，面包、水果、中式点心和粥。
-15. `pool` 酒店室内恒温泳池，安静，有落地窗。
+## 2. Hotel photos (15 images)
+
+Add this to the end of every prompt:
+```
+Photorealistic photography, natural light, warm tones, clean and tidy, no people, no text, no logos or signs,
+landscape 1536×1024. A contemporary American hotel.
+```
+
+The names are the keys the app looks up (public/cards.js), so keep them exactly as written.
+
+Hotel covers (by category and setting):
+1. `cover-economy` (budget): the front desk and lobby of a bright, simple, spotless limited-service hotel off a US highway or downtown street; light colors, a small coffee station.
+2. `cover-comfort` (midscale): a welcoming modern lobby with light wood, plants and a lounge with sofas and a fireplace.
+3. `cover-premium` (upscale): a design-forward lobby with warm lighting, a lobby bar and an art installation.
+4. `cover-luxury` (luxury): a grand five-star lobby, double-height ceiling, marble floors, a crystal chandelier, fresh flowers.
+5. `cover-lake` (waterfront): the view from a hotel balcony over the ocean at a Florida or Hawaii beach in the early morning, palm trees, loungers below.
+6. `cover-city` (skyline): a big-city skyline at night through the floor-to-ceiling window of a high-floor room, like New York or Chicago.
+7. `cover-courtyard` (boutique inn): the courtyard of a historic boutique inn: brick walls, wrought-iron balconies, ferns, string lights and a small fountain, like the French Quarter.
+
+Rooms:
+8. `room-king-economy`: a compact, clean budget king room, white bedding, a work desk and a TV.
+9. `room-twin`: a two-queen room, two queen beds with a nightstand between them, a small armchair by the window.
+10. `room-king-comfort`: a midscale king room in light wood tones, warm reading lamps, a lounge chair.
+11. `room-king-deluxe`: a deluxe king room with a large floor-to-ceiling window onto the city, a rug and an armchair.
+12. `room-family`: a family room with a king bed plus a bunk bed for kids and a few playful touches.
+13. `room-suite`: the living room of a hotel suite, a sofa and coffee table, the bedroom visible through an open door.
+
+Other:
+14. `breakfast`: a hotel breakfast buffet: a waffle station, scrambled eggs, bacon, pastries, fresh fruit, juice and coffee.
+15. `pool`: a hotel's outdoor pool at golden hour with loungers and umbrellas, calm water.

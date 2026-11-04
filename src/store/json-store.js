@@ -100,7 +100,7 @@ export function createJsonStore({ dir = null, fs = defaultFs, debounceMs = 200, 
         // Keep the unreadable file for inspection instead of crashing the demo server on start.
         const aside = `${file}.corrupt-${Date.now()}`;
         await fs.rename(file, aside);
-        reportError(new Error(`${entry} 无法解析，已移到 ${path.basename(aside)}：${err.message}`));
+        reportError(new Error(`${entry} could not be parsed and was moved to ${path.basename(aside)}: ${err.message}`));
         obj = {};
       }
       const map = mapFor(name);

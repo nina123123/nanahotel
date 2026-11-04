@@ -1,4 +1,4 @@
-package com.nina.xiaosu
+package com.nanahotel.app
 
 import android.content.Context
 import android.content.Intent

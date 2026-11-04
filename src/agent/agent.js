@@ -10,11 +10,11 @@ import { neutralizeText, maskPhonesInText, closeDanglingBold } from './text.js';
  * user stops or the LLM fails mid-turn.
  */
 
-export const MAX_STEPS_TEXT = '这个问题有点复杂，我先停在这里…可以把需求说得更具体一点（城市、日期、预算），我接着帮你办。';
-const EMPTY_REPLY_TEXT = '抱歉，我刚才没想好怎么回答，可以换个说法再问我一次吗？';
+export const MAX_STEPS_TEXT = "This one got a bit complicated, so I'll stop here for now. Tell me a little more (city, dates, budget) and I'll pick it back up.";
+const EMPTY_REPLY_TEXT = 'Sorry, I lost my train of thought. Could you say that another way?';
 // Not every tool result has a card (web search, saving the profile), so this must not point at "the cards above".
-const EMPTY_AFTER_TOOLS_TEXT = '查好了，不过我刚才没整理好回复。你想先看哪部分？';
-const GENERIC_ERROR_TEXT = '出了点问题，请稍后再试。';
+const EMPTY_AFTER_TOOLS_TEXT = "Got it, but I didn't finish my reply. What would you like to look at first?";
+const GENERIC_ERROR_TEXT = 'Something went wrong. Please try again in a moment.';
 const HISTORY_LIMIT = 30;
 const MAX_CALLS_PER_STEP = 8;
 const MAX_TOOL_CONTENT_CHARS = 24000;
@@ -23,11 +23,11 @@ const MAX_USER_CHARS = 4000;
 const SEQUENTIAL_TOOLS = new Set([
   'prepare_booking', 'prepare_cancellation', 'save_profile',
   'quote_ride', 'request_early_checkin', 'check_in', 'request_service', 'reserve_dining', 'set_wakeup_call',
-  'prepare_extension', 'check_out', 'request_invoice', 'draft_review',
+  'prepare_extension', 'check_out', 'request_receipt', 'draft_review',
 ]);
-export const STOPPED_NOTICE = '（已停止）';
-const INTERRUPTED_MARK = '…（回复被中断）';
-const SKIPPED_AFTER_STOP = '用户已停止，本次调用未执行';
+export const STOPPED_NOTICE = '(Stopped)';
+const INTERRUPTED_MARK = '… (reply interrupted)';
+const SKIPPED_AFTER_STOP = 'The user pressed stop, so this call was not run';
 
 function isToolCallMessage(m) {
   return m?.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length > 0;
@@ -81,7 +81,7 @@ export function trimHistory(messages, limit = HISTORY_LIMIT) {
   return clean.slice(s);
 }
 
-/** The model's copy of a user message: no forged 【系统通知…】 prefix, bounded length. */
+/** The model's copy of a user message: no forged "[System notice…]" prefix, bounded length. */
 export function neutralizeUserText(text) {
   return neutralizeText(text).slice(0, MAX_USER_CHARS);
 }
@@ -147,9 +147,9 @@ function toolContentString(content) {
   try {
     s = JSON.stringify(content ?? {});
   } catch {
-    s = JSON.stringify({ error: '工具结果无法序列化' });
+    s = JSON.stringify({ error: "The tool result couldn't be serialized" });
   }
-  return s.length > MAX_TOOL_CONTENT_CHARS ? JSON.stringify({ error: '工具结果过长，已省略，请缩小查询范围' }) : s;
+  return s.length > MAX_TOOL_CONTENT_CHARS ? JSON.stringify({ error: 'The tool result was too long and was left out; narrow the request' }) : s;
 }
 
 /**
@@ -214,7 +214,7 @@ export async function runAgentTurn({
       // The model should know what the user saw, and that it was cut off.
       turn.push({ role: 'assistant', content: `${partial}${INTERRUPTED_MARK}` });
     }
-    display.addNotice(aborted ? STOPPED_NOTICE : `（回复中断：${error.message}）`);
+    display.addNotice(aborted ? STOPPED_NOTICE : `(Reply interrupted: ${error.message})`);
     return { messages: turn, display: display.items(), aborted, error };
   };
 
@@ -345,13 +345,13 @@ export async function runAgentTurn({
 }
 
 async function runOne(call, { tools, ctx, logger }) {
-  if (call.invalid) return { content: { error: '工具参数不是合法的 JSON（可能被截断），请检查后重新调用' } };
+  if (call.invalid) return { content: { error: "The tool arguments aren't valid JSON (maybe cut off); check them and call again" } };
   try {
     const out = await tools.execute(call.name, call.arguments, ctx);
-    return out && typeof out === 'object' ? out : { content: { error: '工具没有返回结果' } };
+    return out && typeof out === 'object' ? out : { content: { error: 'The tool returned nothing' } };
   } catch (err) {
     logger(err);
-    return { content: { error: '工具执行失败，请稍后再试' } };
+    return { content: { error: 'The tool failed; please try again in a moment' } };
   }
 }
 
@@ -379,12 +379,12 @@ async function runTools(calls, { tools, ctx, signal, send, logger }) {
     } catch {
       text = '';
     }
-    send('status', { text: text || '正在处理…' });
+    send('status', { text: text || 'Working on it…' });
   };
   for (let i = 0; i < calls.length; i++) {
     const call = calls[i];
     if (i >= MAX_CALLS_PER_STEP) {
-      outcomes[i] = { content: { error: `一次最多调用${MAX_CALLS_PER_STEP}个工具，这个调用被跳过了，需要的话请再调用一次` } };
+      outcomes[i] = { content: { error: `At most ${MAX_CALLS_PER_STEP} tool calls run per step, so this one was skipped; call it again if you still need it` } };
       continue;
     }
     if (SEQUENTIAL_TOOLS.has(call.name)) {

@@ -25,14 +25,14 @@ test('in-memory store (dir: null) supports get/set/delete/values/find', async ()
   await store.load();
   const users = store.collection('profiles');
   assert.equal(users.get('u1'), null);
-  users.set('u1', { name: '张三', age: 30 });
-  users.set('u2', { name: '李四', age: 20 });
-  assert.deepEqual(users.get('u1'), { name: '张三', age: 30 });
+  users.set('u1', { name: 'Sarah Miller', age: 30 });
+  users.set('u2', { name: 'David Chen', age: 20 });
+  assert.deepEqual(users.get('u1'), { name: 'Sarah Miller', age: 30 });
   assert.equal(users.has('u2'), true);
   assert.equal(users.size, 2);
-  assert.deepEqual(users.find((u) => u.age > 25).map((u) => u.name), ['张三']);
+  assert.deepEqual(users.find((u) => u.age > 25).map((u) => u.name), ['Sarah Miller']);
   assert.deepEqual(users.find(() => false), []);
-  assert.equal(users.findOne((u) => u.age < 25).name, '李四');
+  assert.equal(users.findOne((u) => u.age < 25).name, 'David Chen');
   assert.equal(users.findOne(() => false), null);
   assert.equal(users.values().length, 2);
   assert.equal(users.delete('u2'), true);
@@ -101,10 +101,10 @@ test('close() flushes pending writes immediately', async () => {
   const dir = await tempDir();
   const store = createJsonStore({ dir, debounceMs: 10_000 });
   await store.load();
-  store.collection('profiles').set('u1', { guestName: '王五' });
+  store.collection('profiles').set('u1', { firstName: 'Maria' });
   await store.close();
   const saved = JSON.parse(await fs.readFile(path.join(dir, 'profiles.json'), 'utf8'));
-  assert.deepEqual(saved, { u1: { guestName: '王五' } });
+  assert.deepEqual(saved, { u1: { firstName: 'Maria' } });
 });
 
 test('a corrupt file is moved aside instead of crashing load()', async () => {
@@ -156,14 +156,14 @@ test('data directory and files are owner-only (0700 / 0600), also when they alre
   // Files written before this fix (umask 022), plus a .tmp left over from a crash.
   const old = await tempDir();
   await fs.chmod(old, 0o755);
-  await fs.writeFile(path.join(old, 'profiles.json'), '{"u1":{"guestName":"张三"}}', { mode: 0o644 });
+  await fs.writeFile(path.join(old, 'profiles.json'), '{"u1":{"firstName":"Sarah"}}', { mode: 0o644 });
   await fs.writeFile(path.join(old, 'orders.json'), '{}', { mode: 0o644 });
   await fs.writeFile(path.join(old, 'profiles.json.tmp'), 'stale', { mode: 0o644 });
   const again = createJsonStore({ dir: old, debounceMs: 10_000 });
   await again.load();
   assert.equal(await mode(old), 0o700);
   assert.equal(await mode(path.join(old, 'orders.json')), 0o600, 'files that are never rewritten are tightened on load');
-  again.collection('profiles').set('u2', { guestName: '李四' });
+  again.collection('profiles').set('u2', { firstName: 'David' });
   await again.flush();
   assert.equal(await mode(path.join(old, 'profiles.json')), 0o600);
   assert.deepEqual(Object.keys(JSON.parse(await fs.readFile(path.join(old, 'profiles.json'), 'utf8'))), ['u1', 'u2']);

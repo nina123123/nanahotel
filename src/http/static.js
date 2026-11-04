@@ -57,7 +57,7 @@ function etagOf(stat) {
 }
 
 function sendNotFound(res, head) {
-  const body = '404 页面不存在';
+  const body = '404 Not found';
   res.writeHead(404, {
     'Content-Type': 'text/plain; charset=utf-8',
     'Content-Length': Buffer.byteLength(body),
@@ -108,7 +108,7 @@ export function createStaticHandler({ root, prefix = '/public/', index = 'index.
     const head = req.method === 'HEAD';
     if (req.method !== 'GET' && !head) {
       res.writeHead(405, { Allow: 'GET, HEAD', 'Content-Type': 'text/plain; charset=utf-8' });
-      res.end('405 不支持的请求方法');
+      res.end('405 Method not allowed');
       return true;
     }
     const found = rel ? await resolveFile(rel) : null;

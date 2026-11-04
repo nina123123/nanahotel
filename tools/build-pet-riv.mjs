@@ -1,4 +1,4 @@
-// Builds public/art/xiaosu.riv: 小宿 the capybara for the Rive runtime, from the same drawing as public/pet.js.
+// Builds public/art/nana.riv: Nana the capybara for the Rive runtime, from the same drawing as public/pet.js.
 //   node tools/build-pet-riv.mjs        writes the file (run it after changing the drawing or the animations)
 //   buildPetRiv()                       the bytes (test/pet-riv.test.js checks the committed file is current)
 //
@@ -16,7 +16,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { petMarkup, PET_ARTBOARDS, PET_MOODS } from '../public/pet.js';
 
-const OUT = fileURLToPath(new URL('../public/art/xiaosu.riv', import.meta.url));
+const OUT = fileURLToPath(new URL('../public/art/nana.riv', import.meta.url));
 const FPS = 60;
 const DEG = Math.PI / 180;
 const TAU = Math.PI * 2;
@@ -659,7 +659,7 @@ function pokeAnim(ab) {
   return a;
 }
 
-/** The hot spring: steam rising, the oranges bobbing, 小宿 soaking. */
+/** The hot spring: steam rising, the oranges bobbing, Nana soaking. */
 function soakAnim(ab) {
   const a = new Anim(ab, 'soak', 3.4);
   const head = ab.base('pet-head');

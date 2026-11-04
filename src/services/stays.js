@@ -1,23 +1,28 @@
 import * as defaultIds from '../util/ids.js';
-import { todayCN, addDays, isValidDate, nightsBetween, cnTimeMs, formatDateCN } from '../util/dates.js';
-import { PAYMENT_METHOD_LABELS, maskPhone, normalizeMethod, toPublicOrder } from './bookings.js';
-import { hashString } from './hotels/sim-hotels.js';
+import {
+  todayIn, addDays, isValidDate, nightsBetween, zonedTimeMs, formatDate, formatTime, formatDateTime, dateIn, resolveTimeZone, DEFAULT_TIME_ZONE,
+} from '../util/dates.js';
+import { formatUsd } from '../util/money.js';
+import { PAYMENT_METHOD_LABELS, maskPhone, normalizeMethod, normalizeEmail, toPublicOrder } from './bookings.js';
+import { hashString, BRAND_STEMS } from './hotels/sim-hotels.js';
 import { findCity } from './hotels/sim-cities.js';
-import { buildRoomOffer } from './hotels/pricing.js';
+import { buildRoomOffer, parseFloors, isInn } from './hotels/pricing.js';
 
 /**
- * The guest journey after a booking is paid: rides and airport pickups, early check-in, check-in (room, e-key,
- * Wi-Fi), deliveries to the room, dining reservations, wake-up calls, stay extensions, the check-out bill,
- * invoices, membership points and reviews. All simulated: room numbers, drivers and plates derive from the
- * order id, Wi-Fi, breakfast and facilities from the hotel id, so the same order always gets the same ones.
+ * The guest journey after a booking is paid: rides and airport pickups, early check-in, check-in (room, digital key,
+ * Wi-Fi), deliveries to the room, dining reservations, wake-up calls, stay extensions, the check-out bill, emailed
+ * receipts, Nana Rewards points and reviews. All simulated: room numbers, drivers and plates derive from the order
+ * id, Wi-Fi, breakfast and facilities from the hotel id, so the same order always gets the same ones.
  *
- * Same style as bookings.js: synchronous methods, the injected clock, and statuses worked out whenever a record
- * is read (a delivery is on its way after a minute, a ride quote expires after 15), so there are no timers.
- * Spending money and publishing need the user's own tap: the agent only prepares ride and extension quotes and
- * review drafts; confirmRide, confirmExtension and publishReview are called from the HTTP routes.
+ * Times at the hotel (check-out, pickups, meals, wake-up calls) are in the hotel's own time zone.
  *
- * Every request record and view carries `kind`, its category (ride, early_checkin, service, dining, wakeup,
- * invoice, extension, review); a ride's own type is `rideKind`, a meal's `mealKind`, an invoice's `invoiceKind`.
+ * Same style as bookings.js: synchronous methods, the injected clock, and statuses worked out whenever a record is
+ * read (a delivery is on its way after a minute, a ride quote expires after 15), so there are no timers. Spending
+ * money and publishing need the user's own tap: the agent only prepares ride and extension quotes and review drafts;
+ * confirmRide, confirmExtension and publishReview are called from the HTTP routes.
+ *
+ * Every request record and view carries `kind`, its category (ride, early_checkin, service, dining, wakeup, receipt,
+ * extension, review); a ride's own type is `rideKind`, a meal's `mealKind`.
  *
  * The hotel's side (merchant.js, docs/MERCHANT.md) reads a hotel's stays and requests whoever booked them, checks
  * guests in at the front desk (the same room as their own check-in), moves deliveries on and answers early
@@ -29,23 +34,20 @@ const DAY_MS = 24 * 60 * MIN;
 const QUOTE_TTL_MS = 15 * MIN;
 const DELIVERY_ON_THE_WAY_MS = MIN;
 const DELIVERY_DONE_MS = 5 * MIN;
-const INVOICE_ISSUE_MS = 2 * MIN;
+const RECEIPT_SEND_MS = MIN;
 const DRIVER_ASSIGN_MS = 90 * 1000;
 const DRIVER_EARLY_MS = 5 * MIN;
 const DEFAULT_PICKUP_IN_MS = 15 * MIN;
 const MAX_PICKUP_AHEAD_DAYS = 60;
-const EARLY_CHECKIN_FROM = '11:00';
-const STANDARD_CHECKIN = '14:00';
-const CHECKOUT_TIME = '12:00';
-const BREAKFAST_HOURS = '07:00–10:00';
-const BREAKFAST_PRICE = 68;
-const MAX_REVIEW_CHARS = 300;
-const MAX_REPLY_CHARS = 300;
+export const EARLY_CHECKIN_FROM = '12:00';
+export const STANDARD_CHECKIN = '15:00';
+export const CHECKOUT_TIME = '11:00';
+export const BREAKFAST_PRICE = 18;
+const MAX_REVIEW_CHARS = 500;
+const MAX_REPLY_CHARS = 500;
 const TIME_RE = /^(\d{1,2}):(\d{2})$/;
-const TAX_ID_RE = /^(?:[0-9A-Z]{15}|[0-9A-Z]{18}|[0-9A-Z]{20})$/;
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const COMPANY_RE = /公司|集团|有限|研究院|研究所|事务所|工作室|中心|学校|大学|学院|医院|银行|协会|委员会|基金会/;
-const HOTEL_WORD_RE = /^(?:酒店|宾馆|饭店|旅馆|民宿|住处|住的地方|我住的(?:酒店|地方)|hotel)$/i;
+const HOTEL_WORD_RE = /^(?:the |my |our )?(?:hotel|inn|resort|room|place)(?: where i'?m staying)?$|^where i'?m staying$/i;
+const AIRPORT_RE = /airport|terminal|\b(?:jfk|lga|ewr|lax|sfo|las|mia|mco|ord|sea-?tac|bos|dca|iad|msy|hnl|san|bna|aus|den|dia)\b/i;
 
 const STATUS = {
   unauthorized: 401, not_found: 404, no_order: 404, expired: 410,
@@ -54,7 +56,7 @@ const STATUS = {
   invalid_action: 409, not_arrived: 409, not_published: 409,
 };
 
-/** Typed stay error; `message` is user-facing Chinese. */
+/** Typed stay error; `message` is user-facing English. */
 export class StayError extends Error {
   constructor(code, message, details) {
     super(message);
@@ -65,57 +67,40 @@ export class StayError extends Error {
   }
 }
 
-export const RIDE_KIND_LABELS = Object.freeze({ airport_pickup: '接机', to_hotel: '去酒店', from_hotel: '从酒店出发', taxi: '打车' });
+export const RIDE_KIND_LABELS = Object.freeze({ airport_pickup: 'Airport pickup', to_hotel: 'To the hotel', from_hotel: 'From the hotel', taxi: 'Ride' });
 export const MEALS = Object.freeze({
-  breakfast: Object.freeze({ label: '早餐', from: '07:00', to: '10:00' }),
-  lunch: Object.freeze({ label: '午餐', from: '11:30', to: '14:00' }),
-  dinner: Object.freeze({ label: '晚餐', from: '17:30', to: '21:30' }),
+  breakfast: Object.freeze({ label: 'Breakfast', from: '07:00', to: '10:30' }),
+  lunch: Object.freeze({ label: 'Lunch', from: '11:30', to: '14:30' }),
+  dinner: Object.freeze({ label: 'Dinner', from: '17:30', to: '22:00' }),
 });
+export const REWARDS_PROGRAM = 'Nana Rewards';
 // Simulated perks only: nothing here changes a price the user sees.
 export const MEMBER_LEVELS = Object.freeze([
-  Object.freeze({ name: '银卡', min: 0, perks: Object.freeze(['退房按实付金额累积积分（1元=1积分）', '延迟退房至13:00（视房态）']) }),
-  Object.freeze({ name: '金卡', min: 2000, perks: Object.freeze(['延迟退房至14:00（视房态）', '优先安排高楼层、安静房间', '入住欢迎水果']) }),
-  Object.freeze({ name: '铂金卡', min: 8000, perks: Object.freeze(['延迟退房至16:00（视房态）', '免费升级房型（视房态）', '行政酒廊礼遇', '专属客服']) }),
+  Object.freeze({ name: 'Member', min: 0, perks: Object.freeze(['1 point for every $1 you pay, earned at check-out', 'Late checkout until 12:00 PM when available']) }),
+  Object.freeze({ name: 'Gold', min: 2000, perks: Object.freeze(['Late checkout until 2:00 PM when available', 'Higher, quieter rooms when available', 'A welcome snack on arrival']) }),
+  Object.freeze({ name: 'Platinum', min: 8000, perks: Object.freeze(['Late checkout until 4:00 PM when available', 'Free room upgrade when available', 'Club lounge access', 'A dedicated support line']) }),
 ]);
 
-const CATEGORIES = ['economy', 'comfort', 'premium', 'luxury'];
-const FLOORS = { economy: [2, 8], comfort: [3, 12], premium: [5, 20], luxury: [12, 32] };
+const CATEGORIES = ['budget', 'midscale', 'upscale', 'luxury'];
+const FLOORS = { budget: [2, 6], midscale: [2, 12], upscale: [4, 24], luxury: [8, 40] };
 const INN_FLOORS = [1, 3];
-const UNLUCKY_FLOORS = new Set([4, 13, 14]);
-const BREAKFAST_VENUES = {
-  economy: [['1楼', '早餐厅'], ['2楼', '早餐厅']],
-  comfort: [['2楼', '自助餐厅'], ['1楼', '全日餐厅'], ['3楼', '自助餐厅']],
-  premium: [['2楼', '全日餐厅'], ['3楼', '自助餐厅'], ['1楼', '咖啡厅']],
-  luxury: [['2楼', '全日餐厅'], ['1楼', '大堂餐厅'], ['3楼', '自助餐厅']],
-  inn: [['1楼', '庭院餐厅'], ['1楼', '茶室']],
-};
-const RESTAURANTS = { economy: ['简餐厅', 58], comfort: ['全日餐厅', 88], premium: ['中餐厅', 168], luxury: ['中餐厅', 288] };
-
-// Wi-Fi names come from the brand stems of the simulated hotels (sim-hotels.js BRANDS); others get XiaoSu-Guest.
-const STEM_PINYIN = {
-  悦途: 'YueTu', 简居: 'JianJu', 青舍: 'QingShe', 拾光: 'ShiGuang', 憩园: 'QiYuan', 行舍: 'XingShe', 小栈: 'XiaoZhan', 禾宿: 'HeSu', 朴宿: 'PuSu', 途悠: 'TuYou',
-  栖云: 'QiYun', 漫居: 'ManJu', 云舍: 'YunShe', 素履: 'SuLv', 星屿: 'XingYu', 屿见: 'YuJian', 晴舍: 'QingShe', 松间: 'SongJian', 溪岸: 'XiAn', 木禾: 'MuHe',
-  观潮: 'GuanChao', 澜庭: 'LanTing', 听松: 'TingSong', 映月: 'YingYue', 清岚: 'QingLan', 临水: 'LinShui', 若水: 'RuoShui', 揽月: 'LanYue', 映岚: 'YingLan', 叠翠: 'DieCui',
-  隐庐: 'YinLu', 静庐: 'JingLu', 臻园: 'ZhenYuan', 澄庐: 'ChengLu', 观止: 'GuanZhi', 揽胜: 'LanSheng', 云麓: 'YunLu', 鹤庐: 'HeLu', 山澜: 'ShanLan', 望庐: 'WangLu',
-  竹篱: 'ZhuLi', 花溪: 'HuaXi', 青檐: 'QingYan', 慢屿: 'ManYu', 南风: 'NanFeng', 归园: 'GuiYuan', 素心: 'SuXin', 听雨: 'TingYu', 木心: 'MuXin', 檐下: 'YanXia',
-};
-export const WIFI_STEMS = Object.freeze(Object.keys(STEM_PINYIN));
-
-const SURNAMES = ['张', '王', '李', '刘', '陈', '杨', '赵', '黄', '周', '吴', '徐', '孙', '马', '胡', '朱', '郭', '何', '林', '罗', '高'];
-const CARS = [['比亚迪汉EV', '白色'], ['比亚迪秦PLUS', '白色'], ['广汽埃安S', '蓝色'], ['吉利几何A', '银色'], ['大众ID.4', '黑色']];
-const VANS = [['别克GL8', '黑色'], ['广汽传祺M8', '银色']];
-const PLATE_PREFIX = {
-  北京: '京A', 上海: '沪A', 广州: '粤A', 深圳: '粤B', 杭州: '浙A', 成都: '川A', 重庆: '渝A', 西安: '陕A',
-  南京: '苏A', 苏州: '苏E', 厦门: '闽D', 三亚: '琼B', 青岛: '鲁B', 长沙: '湘A', 武汉: '鄂A', 丽江: '云P',
-};
+// Most US hotels have no 13th floor.
+const UNLUCKY_FLOORS = new Set([13]);
+const RESTAURANT_NAMES = ['Harvest Table', 'The Copper Pot', 'Juniper & Rye', 'The Morning Room', 'Bluebell Café', 'Ember Grill', 'The Saltwater Room', 'Oak & Ivy'];
+const MEAL_PRICES = { budget: 16, midscale: 28, upscale: 45, luxury: 85 };
+const DRIVER_FIRST = ['Mike', 'Jessica', 'Carlos', 'Ashley', 'David', 'Maria', 'Chris', 'Tanya', 'James', 'Priya', 'Kevin', 'Lauren', 'Andre', 'Nicole', 'Tom', 'Grace'];
+const LAST_INITIALS = 'ABCDEFGHJKLMNPRSTW';
+const SEDANS = [['Toyota Camry', 'White'], ['Tesla Model 3', 'Black'], ['Honda Accord', 'Silver'], ['Toyota Prius', 'Blue'], ['Tesla Model 3', 'White']];
+const VANS = [['Honda Odyssey', 'Black'], ['Toyota Sienna', 'Silver']];
+const PLATE_LETTERS = 'ABCDEFGHJKLMNPRSTUVWXYZ';
 
 function str(v, max) {
   return typeof v === 'string' ? v.trim().slice(0, max) : typeof v === 'number' ? String(v).slice(0, max) : '';
 }
 
-/** One line of model/user text: no control characters, and no 【】 that could pass for a platform notice. */
+/** One line of model/user text: no control characters, and no brackets that could pass for a platform notice. */
 function clean(v, max) {
-  return str(v, max * 2).replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').replace(/[【】]/g, '').replace(/\s+/g, ' ').trim().slice(0, max);
+  return str(v, max * 2).replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').replace(/[[\]【】]/g, '').replace(/\s+/g, ' ').trim().slice(0, max);
 }
 
 /** Free text (a review): line breaks kept, nothing cut, so the caller can refuse an over-long one. */
@@ -123,7 +108,7 @@ function cleanText(v) {
   return (typeof v === 'string' ? v : '')
     .replace(/\r\n?/g, '\n')
     .replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/g, ' ')
-    .replace(/[【】]/g, '')
+    .replace(/[[\]【】]/g, '')
     .replace(/[ \t]+/g, ' ')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
@@ -137,29 +122,38 @@ function sum(list, pick) {
   return list.reduce((s, x) => s + (Number(pick(x)) || 0), 0);
 }
 
+function plural(n, word, many = `${word}s`) {
+  return `${n} ${n === 1 ? word : many}`;
+}
+
 function intIn(v, min, max, message) {
   const n = typeof v === 'number' ? v : typeof v === 'string' && v.trim() ? Number(v) : NaN;
   if (!Number.isInteger(n) || n < min || n > max) throw new StayError('invalid_number', message);
   return n;
 }
 
-/** 'HH:MM' (or 'H:MM') → zero-padded 'HH:MM'. */
+/** 'HH:MM' (or 'H:MM') → zero-padded 24-hour 'HH:MM'. */
 function requireTime(v, what) {
-  const m = TIME_RE.exec(str(v, 10).replace('：', ':'));
+  const m = TIME_RE.exec(str(v, 10));
   const h = m ? Number(m[1]) : NaN;
   const mi = m ? Number(m[2]) : NaN;
-  if (!(h >= 0 && h <= 23 && mi >= 0 && mi <= 59)) throw new StayError('invalid_time', `${what}需要是 HH:MM 格式，如 07:30`);
+  if (!(h >= 0 && h <= 23 && mi >= 0 && mi <= 59)) throw new StayError('invalid_time', `The ${what} needs to be a time like 07:30 (24-hour HH:MM)`);
   return `${String(h).padStart(2, '0')}:${String(mi).padStart(2, '0')}`;
 }
 
 function requireDate(v, what) {
   const d = str(v, 10);
-  if (!isValidDate(d)) throw new StayError('invalid_date', `${what}需要是 YYYY-MM-DD 格式的有效日期`);
+  if (!isValidDate(d)) throw new StayError('invalid_date', `The ${what} needs to be a valid date (YYYY-MM-DD)`);
   return d;
 }
 
 function cityOf(order) {
-  return String(order?.hotel?.city || '').replace(/市$/, '');
+  return String(order?.hotel?.city || '');
+}
+
+/** The hotel's time zone: times at the hotel are wall-clock times there. */
+function zoneOf(order) {
+  return resolveTimeZone(order?.hotel?.timeZone || findCity(order?.hotel?.city)?.zone, DEFAULT_TIME_ZONE);
 }
 
 function partyOf(order) {
@@ -186,7 +180,7 @@ function extensionStatus(r, t) {
   return r.status === 'pending' && t >= Date.parse(r.expiresAt) ? 'expired' : r.status;
 }
 
-/** accepted → on_the_way → done; the hotel's 接单 / 送达 (onTheWayAt / doneAt) can come sooner than the usual pace, never later. */
+/** accepted → on_the_way → done; the hotel's accept / deliver (onTheWayAt / doneAt) can come sooner than the usual pace, never later. */
 function deliverySteps(r) {
   const created = Date.parse(r.createdAt);
   const done = Math.min(created + DELIVERY_DONE_MS, r.doneAt ? Date.parse(r.doneAt) : Infinity);
@@ -194,8 +188,13 @@ function deliverySteps(r) {
   return [['accepted', created], ['on_the_way', onTheWay], ['done', done]];
 }
 
-function issuedAtMs(r) {
-  return Date.parse(r.requestedAt || r.createdAt) + INVOICE_ISSUE_MS;
+function sentAtMs(r) {
+  return Date.parse(r.requestedAt || r.createdAt) + RECEIPT_SEND_MS;
+}
+
+/** The hotel's IANA zone on a view, when the record has one. */
+function zoneField(r) {
+  return r.timeZone ? { timeZone: r.timeZone } : {};
 }
 
 /** `kind: 'ride'` is the request category; the ride's own type is rideKind. */
@@ -203,7 +202,7 @@ function rideView(r, t) {
   return {
     id: r.id, orderId: r.orderId, kind: 'ride', rideKind: r.rideKind, kindLabel: RIDE_KIND_LABELS[r.rideKind] || r.rideKind,
     from: r.from, to: r.to, pickupAt: r.pickupAt, passengers: r.passengers, carType: r.carType, fare: r.fare, minutes: r.minutes,
-    status: rideStatus(r, t), expiresAt: r.expiresAt, createdAt: r.createdAt,
+    status: rideStatus(r, t), expiresAt: r.expiresAt, createdAt: r.createdAt, ...zoneField(r),
     ...(r.confirmedAt ? { confirmedAt: r.confirmedAt } : {}),
     ...(r.driver ? { driver: { ...r.driver } } : {}),
   };
@@ -212,7 +211,7 @@ function rideView(r, t) {
 function earlyView(r) {
   return {
     id: r.id, orderId: r.orderId, kind: 'early_checkin', hotel: { ...r.hotel }, date: r.date, arrivalTime: r.arrivalTime,
-    status: r.status, note: r.note, createdAt: r.createdAt,
+    status: r.status, note: r.note, createdAt: r.createdAt, ...zoneField(r),
   };
 }
 
@@ -222,7 +221,7 @@ function serviceView(r, t) {
   return {
     id: r.id, orderId: r.orderId, kind: 'service', roomNumber: r.roomNumber, items: r.items.map((i) => ({ ...i })),
     ...(r.note ? { note: r.note } : {}),
-    status: reached[reached.length - 1][0], createdAt: r.createdAt, eta: new Date(doneAt).toISOString(),
+    status: reached[reached.length - 1][0], createdAt: r.createdAt, eta: new Date(doneAt).toISOString(), ...zoneField(r),
     timeline: reached.map(([status, at]) => ({ status, at: new Date(at).toISOString() })),
   };
 }
@@ -234,32 +233,30 @@ function diningView(r, t) {
     restaurant: r.restaurant, place: r.place, at: r.at, people: r.people, table: r.table, price: r.price, included: r.included,
     ...(r.covered > 0 ? { covered: r.covered } : {}),
     ...(r.note ? { note: r.note } : {}),
-    status: r.status === 'cancelled' ? 'cancelled' : t < Date.parse(r.at) ? 'reserved' : 'done', createdAt: r.createdAt,
+    status: r.status === 'cancelled' ? 'cancelled' : t < Date.parse(r.at) ? 'reserved' : 'done', createdAt: r.createdAt, ...zoneField(r),
   };
 }
 
 function wakeupView(r, t) {
   const status = r.status === 'cancelled' ? 'cancelled' : t >= Date.parse(r.at) ? 'done' : 'set';
-  return { id: r.id, orderId: r.orderId, kind: 'wakeup', roomNumber: r.roomNumber, at: r.at, status, createdAt: r.createdAt };
+  return { id: r.id, orderId: r.orderId, kind: 'wakeup', roomNumber: r.roomNumber, at: r.at, status, createdAt: r.createdAt, ...zoneField(r) };
 }
 
-/** `kind: 'invoice'` is the request category; the invoice type (电子普通发票) is invoiceKind. */
-function invoiceView(r, t) {
-  const issued = t >= issuedAtMs(r);
+/** An emailed receipt: 'sending' for a minute, then 'sent'. */
+function receiptView(r, t) {
+  const sent = t >= sentAtMs(r);
   return {
-    id: r.id, orderId: r.orderId, kind: 'invoice', invoiceKind: '电子普通发票', title: r.title,
-    ...(r.taxId ? { taxId: r.taxId } : {}),
-    ...(r.email ? { email: r.email } : {}),
-    amount: r.amount, status: issued ? 'issued' : 'issuing',
-    ...(issued ? { issuedAt: new Date(issuedAtMs(r)).toISOString() } : {}),
-    createdAt: r.createdAt,
+    id: r.id, orderId: r.orderId, kind: 'receipt', email: r.email, amount: r.amount, status: sent ? 'sent' : 'sending',
+    ...(sent ? { sentAt: new Date(sentAtMs(r)).toISOString() } : {}),
+    createdAt: r.createdAt, ...zoneField(r),
   };
 }
 
 function extensionView(r, t) {
   return {
     id: r.id, orderId: r.orderId, kind: 'extension', hotel: { ...r.hotel }, room: r.room, fromDate: r.fromDate, toDate: r.toDate,
-    nights: r.nights, price: r.price, status: extensionStatus(r, t), expiresAt: r.expiresAt, createdAt: r.createdAt,
+    nights: r.nights, price: r.price, ...(Number.isFinite(r.taxesAndFees) ? { taxesAndFees: r.taxesAndFees } : {}),
+    status: extensionStatus(r, t), expiresAt: r.expiresAt, createdAt: r.createdAt, ...zoneField(r),
     ...(r.confirmedAt ? { confirmedAt: r.confirmedAt, payment: { ...r.payment } } : {}),
   };
 }
@@ -267,7 +264,7 @@ function extensionView(r, t) {
 function reviewView(r) {
   return {
     id: r.id, orderId: r.orderId, kind: 'review', hotel: { ...r.hotel }, rating: r.rating, text: r.text, tags: [...r.tags],
-    status: r.status, createdAt: r.createdAt,
+    status: r.status, createdAt: r.createdAt, ...zoneField(r),
     ...(r.publishedAt ? { publishedAt: r.publishedAt } : {}),
     ...(r.reply ? { reply: { text: r.reply.text, at: r.reply.at } } : {}),
   };
@@ -275,51 +272,47 @@ function reviewView(r) {
 
 const VIEWS = {
   ride: rideView, early_checkin: earlyView, service: serviceView, dining: diningView, wakeup: wakeupView,
-  invoice: invoiceView, extension: extensionView, review: reviewView,
+  receipt: receiptView, extension: extensionView, review: reviewView,
 };
 
 function viewOf(r, t) {
   return VIEWS[r.kind] ? VIEWS[r.kind](r, t) : null;
 }
 
-/** '10月30日 14:00' in China time. */
-function cnWhen(iso) {
-  const s = new Date(Date.parse(iso) + 8 * 3600 * 1000).toISOString();
-  return `${formatDateCN(s.slice(0, 10))} ${s.slice(11, 16)}`;
-}
-
 /** An in-progress request for stay_info.open: { kind, id, label, status }, or null when it is settled. */
-function openItem(r, t) {
+function openItem(r, t, zone) {
   const v = viewOf(r, t);
   if (!v) return null;
   const item = (label) => ({ kind: r.kind, id: r.id, label, status: v.status });
+  const when = (iso) => formatDateTime(iso, zone);
   switch (r.kind) {
-    case 'ride': return ['quoted', 'confirmed', 'arriving'].includes(v.status) ? item(`${v.kindLabel} · ${cnWhen(v.pickupAt)}`) : null;
-    case 'early_checkin': return v.status === 'pending' ? item(`提前入住 · ${v.arrivalTime}`) : null;
-    case 'service': return v.status !== 'done' ? item(v.items.map((i) => `${i.name}×${i.qty}`).join('、')) : null;
-    case 'dining': return v.status === 'reserved' ? item(`${v.kindLabel} · ${cnWhen(v.at)} · ${v.people}位`) : null;
-    case 'wakeup': return v.status === 'set' ? item(`叫醒 · ${cnWhen(v.at)}`) : null;
-    case 'invoice': return v.status === 'issuing' ? item(`发票 · ${v.title}`) : null;
-    case 'extension': return v.status === 'pending' ? item(`续住${v.nights}晚 · 待确认`) : null;
-    case 'review': return v.status === 'draft' ? item('点评草稿 · 待发布') : null;
+    case 'ride': return ['quoted', 'confirmed', 'arriving'].includes(v.status) ? item(`${v.kindLabel} · ${when(v.pickupAt)}`) : null;
+    case 'early_checkin': return v.status === 'pending' ? item(`Early check-in · ${formatTime(v.arrivalTime)}`) : null;
+    case 'service': return v.status !== 'done' ? item(v.items.map((i) => `${i.name} ×${i.qty}`).join(', ')) : null;
+    case 'dining': return v.status === 'reserved' ? item(`${v.kindLabel} · ${when(v.at)} · ${plural(v.people, 'guest')}`) : null;
+    case 'wakeup': return v.status === 'set' ? item(`Wake-up call · ${when(v.at)}`) : null;
+    case 'receipt': return v.status === 'sending' ? item(`Receipt · ${v.email}`) : null;
+    case 'extension': return v.status === 'pending' ? item(`${plural(v.nights, 'more night')} · waiting for your tap`) : null;
+    case 'review': return v.status === 'draft' ? item('Review draft · not posted yet') : null;
     default: return null;
   }
 }
 
-/** Hotels in a 民宿/客栈 area are low-rise; below luxury they are courtyard inns without gym or pool (as in the simulator). */
-function innArea(hotel) {
-  if (!hotel) return false;
-  const area = findCity(hotel.city)?.areas.find((a) => a.name === hotel.businessArea);
-  return area ? area.kind === 'inn' : /民宿|客栈|小院|院子/.test(hotel.name || '');
-}
-
+/** The brand stem in a hotel name ('Harborline Hotel SoHo' → 'Harborline'), or null. */
 function stemOf(name) {
   let best = null;
-  for (const stem of WIFI_STEMS) {
+  for (const stem of BRAND_STEMS) {
     const at = name.indexOf(stem);
-    if (at >= 0 && (!best || at < best.at)) best = { at, stem };
+    if (at >= 0 && (!best || at < best.at || (at === best.at && stem.length > best.stem.length))) best = { at, stem };
   }
-  return best ? STEM_PINYIN[best.stem] : null;
+  return best ? best.stem : null;
+}
+
+/** '1st floor' … '23rd floor'. */
+function floorName(n) {
+  if (n <= 1) return 'Lobby level';
+  const s = n % 100 >= 11 && n % 100 <= 13 ? 'th' : { 1: 'st', 2: 'nd', 3: 'rd' }[n % 10] || 'th';
+  return `${n}${s} floor`;
 }
 
 /**
@@ -342,11 +335,31 @@ export function createStayService({ store, bookings, hotels, clock = { now: () =
 
   function requireUser(userId) {
     const u = str(userId, 100);
-    if (!u) throw new StayError('unauthorized', '缺少用户身份，请刷新页面后重试');
+    if (!u) throw new StayError('unauthorized', 'Your user id is missing; please reload the page and try again');
     return u;
   }
 
   // ---- hotel facts (deterministic per hotel id) ---------------------------------------------
+
+  function facilitiesOf(hotel, category, courtyard, h, between) {
+    const amenities = hotel?.amenities || [];
+    const has = (a) => amenities.includes(a);
+    if (courtyard) {
+      const out = [{ name: 'Courtyard', hours: '7:00 AM–10:00 PM', place: 'Ground floor' }, { name: 'Guest lounge', hours: '24 hours', place: 'Ground floor' }];
+      if (has('Courtyard pool')) out.push({ name: 'Courtyard pool', hours: '8:00 AM–9:00 PM', place: 'Courtyard' });
+      return out;
+    }
+    const out = [];
+    const pool = amenities.find((a) => / pool$/i.test(a));
+    if (pool) out.push({ name: pool, hours: '6:00 AM–10:00 PM', place: pool === 'Rooftop pool' ? 'Rooftop' : pool === 'Outdoor pool' ? 'Pool deck, 2nd floor' : floorName(between('pool', 2, 4)) });
+    if (has('Fitness center') || category === 'upscale' || category === 'luxury') out.push({ name: 'Fitness center', hours: '24 hours', place: floorName(between('gym', 2, 5)) });
+    if (has('Spa')) out.push({ name: 'Spa', hours: '9:00 AM–8:00 PM', place: floorName(between('spa', 2, 4)) });
+    if (has('Club lounge')) out.push({ name: 'Club lounge', hours: '6:30 AM–10:00 PM', place: floorName(between('lounge', 20, 30)) });
+    if (has('Business center')) out.push({ name: 'Business center', hours: '24 hours', place: 'Lobby level' });
+    if (has('Guest laundry')) out.push({ name: 'Guest laundry', hours: '24 hours', place: floorName(between('laundry', 2, 4)) });
+    if (!out.length) out.push({ name: 'Vending area', hours: '24 hours', place: floorName(between('vending', 2, 3)) });
+    return out;
+  }
 
   function profileOf(order) {
     const hotelId = order.hotel?.id || '';
@@ -359,55 +372,45 @@ export function createStayService({ store, bookings, hotels, clock = { now: () =
     }
     const h = (k) => hashString(`${hotelId}|${k}`);
     const between = (k, lo, hi) => lo + (h(k) % (hi - lo + 1));
-    const category = CATEGORIES.includes(hotel?.category) ? hotel.category : 'comfort';
-    const lowRise = innArea(hotel);
+    const category = CATEGORIES.includes(hotel?.category) ? hotel.category : 'midscale';
+    const lowRise = hotel ? isInn(hotel) : false;
     const courtyard = lowRise && category !== 'luxury';
-    const pinyin = stemOf(hotel?.name || order.hotel?.name || '');
-    const initials = pinyin ? pinyin.replace(/[a-z]/g, '').toLowerCase() : 'xs';
-    const venues = BREAKFAST_VENUES[lowRise ? 'inn' : category];
-    const [bfPlace, bfName] = venues[h('breakfast') % venues.length];
-    const [restaurant, price] = RESTAURANTS[category];
-    const telCode = findCity(hotel?.city || order.hotel?.city)?.telCode || '400';
-    let facilities;
-    if (courtyard) {
-      facilities = [{ name: '公共茶室', hours: '08:00–22:00', place: '1楼' }, { name: '自助洗衣', hours: '24小时', place: '1楼' }];
-    } else if (category === 'luxury' || category === 'premium') {
-      const outdoor = (hotel?.amenities || []).includes('室外泳池');
-      facilities = [
-        { name: outdoor ? '室外泳池' : '室内泳池', hours: '06:30–22:00', place: outdoor ? '1楼 花园' : `${between('pool', 3, 6)}楼` },
-        { name: '健身房', hours: '24小时', place: `${between('gym', 3, 6)}楼` },
-        { name: '行政酒廊', hours: '07:00–22:00', place: `${category === 'luxury' ? between('lounge', 25, 32) : between('lounge', 15, 20)}楼` },
-      ];
-    } else if (category === 'comfort') {
-      facilities = [
-        { name: '健身房', hours: '06:00–23:00', place: `${between('gym', 2, 5)}楼` },
-        { name: '洗衣房', hours: '24小时', place: `${between('laundry', 2, 5)}楼` },
-      ];
-    } else {
-      facilities = [{ name: '自助洗衣', hours: '24小时', place: `${between('laundry', 1, 3)}楼` }];
-    }
+    const stem = stemOf(hotel?.name || order.hotel?.name || '');
+    const short = stem ? stem.replace(/[^A-Za-z]/g, '') : 'NanaHotel';
+    const letters = `${short.toLowerCase()}xxxx`.slice(0, 4);
+    const restaurantName = RESTAURANT_NAMES[h('restaurant') % RESTAURANT_NAMES.length];
+    let breakfastVenue;
+    if (courtyard) breakfastVenue = { restaurant: 'Courtyard breakfast room', place: 'Ground floor' };
+    else if (category === 'budget') breakfastVenue = { restaurant: 'Breakfast area', place: 'Lobby level' };
+    else if (category === 'midscale') breakfastVenue = h('breakfast') % 2 ? { restaurant: 'Breakfast room', place: 'Lobby level' } : { restaurant: restaurantName, place: 'Lobby level' };
+    else breakfastVenue = { restaurant: restaurantName, place: h('breakfast') % 2 ? 'Lobby level' : '2nd floor' };
+    const areaCode = findCity(hotel?.city || order.hotel?.city)?.areaCode || '212';
     const profile = {
       hotel,
       category,
       lowRise,
-      wifi: { ssid: `${pinyin || 'XiaoSu'}-Guest`, password: `${initials}${String(h('wifi') % 1e6).padStart(6, '0')}` },
-      breakfast: { time: BREAKFAST_HOURS, place: `${bfPlace} ${bfName}`, price: BREAKFAST_PRICE },
-      breakfastVenue: { restaurant: bfName, place: bfPlace },
-      restaurant: { restaurant: courtyard ? '私房菜餐厅' : restaurant, place: lowRise ? '1楼' : `${between('restaurant', 2, 3)}楼`, price },
-      // The simulator's 0000 numbers cannot reach anyone real.
-      frontDesk: hotel?.tel || `${telCode}-0000${String(h('tel') % 1e4).padStart(4, '0')}`,
-      facilities,
+      wifi: { ssid: `${short}-Guest`, password: `${letters}${String(h('wifi') % 1e4).padStart(4, '0')}` },
+      breakfast: { time: `${formatTime(MEALS.breakfast.from)}–${formatTime(MEALS.breakfast.to)}`, place: `${breakfastVenue.restaurant}, ${breakfastVenue.place}`, price: BREAKFAST_PRICE },
+      breakfastVenue,
+      restaurant: {
+        restaurant: courtyard ? 'The Courtyard Kitchen' : category === 'budget' ? 'Lobby Café' : restaurantName,
+        place: lowRise || category === 'budget' ? 'Lobby level' : floorName(between('restaurant', 1, 2)),
+        price: MEAL_PRICES[category],
+      },
+      // 555-01xx numbers are reserved for fiction and cannot reach anyone real.
+      frontDesk: hotel?.tel || `(${areaCode}) 555-01${String(h('tel') % 100).padStart(2, '0')}`,
+      facilities: facilitiesOf(hotel, category, courtyard, h, between),
     };
     profiles.set(hotelId, profile);
     return profile;
   }
 
-  /** The floors the rooms card showed for the booked room type ('5-14层'), else the hotel's usual range. */
+  /** The floors the rooms card showed for the booked room type ('Floors 4–18'), else the hotel's usual range. */
   function floorRange(order, prof) {
     try {
       const offer = prof.hotel ? buildRoomOffer(prof.hotel, { checkIn: order.checkIn, checkOut: order.checkOut }) : null;
-      const m = /^(\d+)-(\d+)层$/.exec(offer?.roomTypes.find((rt) => rt.roomId === order.room?.roomId)?.floor || '');
-      if (m) return [Number(m[1]), Number(m[2])];
+      const range = parseFloors(offer?.roomTypes.find((rt) => rt.roomId === order.room?.roomId)?.floor);
+      if (range) return range;
     } catch {
       // not a simulated hotel: use the defaults below
     }
@@ -429,15 +432,15 @@ export function createStayService({ store, bookings, hotels, clock = { now: () =
 
   function ownOrder(u, orderId) {
     const o = bookings.getOrder(u, str(orderId, 80).toUpperCase());
-    if (!o) throw new StayError('not_found', '没有找到这个订单');
+    if (!o) throw new StayError('not_found', "Couldn't find that order");
     return o;
   }
 
   function requireConfirmed(order) {
     if (order.status === 'confirmed') return order;
-    if (order.status === 'cancelled') throw new StayError('order_not_confirmed', '这个订单已经取消了');
-    if (order.status === 'pending_payment') throw new StayError('order_not_confirmed', '这个订单还没支付，支付后才能安排');
-    throw new StayError('order_not_confirmed', '这个订单已关闭，不能再安排');
+    if (order.status === 'cancelled') throw new StayError('order_not_confirmed', 'That booking was cancelled');
+    if (order.status === 'pending_payment') throw new StayError('order_not_confirmed', "That booking isn't paid yet; I can arrange things once it is");
+    throw new StayError('order_not_confirmed', 'That booking is closed, so nothing more can be arranged for it');
   }
 
   function stayRec(order) {
@@ -448,19 +451,20 @@ export function createStayService({ store, bookings, hotels, clock = { now: () =
   /**
    * The user's confirmed orders whose stay ended at most `horizon` days ago, most current first: checked in and
    * not out; dates covering today; upcoming (soonest first); checked out today or yesterday; then the ones that
-   * ended. With `afterStay` (an invoice, a review: what is asked right after leaving) a stay checked out today or
+   * ended. With `afterStay` (a receipt, a review: what is asked right after leaving) a stay checked out today or
    * yesterday comes right after the checked-in one instead. A stay ends at check-out, else on its check-out date.
-   * Ties keep listOrders' newest-first order.
+   * "Today" is each hotel's own date. Ties keep listOrders' newest-first order.
    */
   function rankOrders(u, t, { horizon = 1, afterStay = false } = {}) {
-    const today = todayCN(new Date(t));
-    const yesterday = addDays(today, -1);
-    const oldest = addDays(today, -horizon);
     const ranked = [];
     for (const order of bookings.listOrders(u)) {
       if (order.status !== 'confirmed') continue;
+      const zone = zoneOf(order);
+      const today = todayIn(zone, t);
+      const yesterday = addDays(today, -1);
+      const oldest = addDays(today, -horizon);
       const rec = stayRec(order);
-      const leftOn = rec?.checkedOutAt ? todayCN(new Date(Date.parse(rec.checkedOutAt))) : null;
+      const leftOn = rec?.checkedOutAt ? dateIn(rec.checkedOutAt, zone) : null;
       const ended = leftOn || order.checkOut;
       if (ended < oldest) continue;
       let tier;
@@ -487,7 +491,7 @@ export function createStayService({ store, bookings, hotels, clock = { now: () =
 
   function currentOrder(u, opts) {
     const [first] = rankOrders(u, nowMs(), opts);
-    if (!first) throw new StayError('no_order', '还没有已确认的订单，订好并支付后我再帮你安排');
+    if (!first) throw new StayError('no_order', "There's no confirmed booking yet; once one is booked and paid, I can arrange the rest");
     return first.order;
   }
 
@@ -499,17 +503,18 @@ export function createStayService({ store, bookings, hotels, clock = { now: () =
 
   function requireCheckedIn(order) {
     const rec = stayRec(order);
-    if (!rec) throw new StayError('not_checked_in', '还没办入住，办好入住后才能安排（可以先帮你办入住）');
-    if (rec.checkedOutAt) throw new StayError('checked_out', '这一单已经退房了，住店服务已结束');
+    if (!rec) throw new StayError('not_checked_in', "You haven't checked in yet; I can check you in first");
+    if (rec.checkedOutAt) throw new StayError('checked_out', 'You already checked out of this stay, so room services have ended');
     return rec;
   }
 
   function requireNotCheckedOut(order) {
-    if (stayRec(order)?.checkedOutAt) throw new StayError('checked_out', '这一单已经退房了');
+    if (stayRec(order)?.checkedOutAt) throw new StayError('checked_out', 'You already checked out of this stay');
   }
 
   function stayView(order, rec) {
     const prof = profileOf(order);
+    const zone = zoneOf(order);
     return {
       orderId: order.id,
       hotel: { id: order.hotel?.id, name: order.hotel?.name, category: prof.category },
@@ -523,10 +528,11 @@ export function createStayService({ store, bookings, hotels, clock = { now: () =
       checkedInAt: rec.checkedInAt,
       early: rec.early,
       // The key stops working at check-out.
-      keyValidUntil: rec.checkedOutAt || iso(cnTimeMs(order.checkOut, CHECKOUT_TIME)),
+      keyValidUntil: rec.checkedOutAt || iso(zonedTimeMs(order.checkOut, CHECKOUT_TIME, zone)),
       wifi: { ...prof.wifi },
       breakfast: { ...prof.breakfast, included: (order.rate?.breakfast || 0) > 0 },
       checkoutTime: CHECKOUT_TIME,
+      timeZone: zone,
       ...(rec.checkedOutAt ? { checkedOutAt: rec.checkedOutAt, bill: structuredClone(rec.bill) } : {}),
     };
   }
@@ -543,89 +549,94 @@ export function createStayService({ store, bookings, hotels, clock = { now: () =
 
   function ownRequest(u, id, kind) {
     const r = requests.get(str(id, 80));
-    if (!r || r.userId !== u || (kind && r.kind !== kind)) throw new StayError('not_found', '没有找到这个请求，可能已失效');
+    if (!r || r.userId !== u || (kind && r.kind !== kind)) throw new StayError('not_found', "Couldn't find that request; it may have expired");
     return r;
   }
 
   function base(kind, order, sessionId, t, prefix) {
-    return { id: idgen.newId(prefix), kind, userId: order.userId, orderId: order.id, sessionId: str(sessionId, 100) || null, createdAt: iso(t) };
+    return {
+      id: idgen.newId(prefix), kind, userId: order.userId, orderId: order.id, sessionId: str(sessionId, 100) || null, createdAt: iso(t),
+      // The hotel's zone: the page formats the request's instants (pickupAt, at, eta …) in hotel time.
+      timeZone: zoneOf(order),
+    };
   }
 
-  /** Today when that time is still ahead (by more than `graceMs` ago), else tomorrow. */
-  function nextDateFor(hhmm, t, graceMs = 0) {
-    const today = todayCN(new Date(t));
-    return cnTimeMs(today, hhmm) > t - graceMs ? today : addDays(today, 1);
+  /** Today (at the hotel) when that time is still ahead (by more than `graceMs` ago), else tomorrow. */
+  function nextDateFor(hhmm, t, zone, graceMs = 0) {
+    const today = todayIn(zone, t);
+    return zonedTimeMs(today, hhmm, zone) > t - graceMs ? today : addDays(today, 1);
   }
 
   // ---- before arrival ---------------------------------------------------------------------------
 
   /** A day plan for the itinerary card; not stored. The order is optional (it gives the city and the date). */
-  function planItinerary({ userId, orderId, title, date, items } = {}) {
+  function planItinerary({ userId, orderId, title, date, items, timeZone } = {}) {
     const u = requireUser(userId);
     const t = nowMs();
     const order = str(orderId, 80) ? requireConfirmed(ownOrder(u, orderId)) : rankOrders(u, t)[0]?.order || null;
-    const today = todayCN(new Date(t));
+    const today = todayIn(order ? zoneOf(order) : resolveTimeZone(timeZone), t);
     // The arrival day while it is still ahead and the guest is not in yet (an early check-in is already staying).
-    const day = date ? requireDate(date, '行程日期') : order && order.checkIn > today && !stayRec(order) ? order.checkIn : today;
-    if (day < today) throw new StayError('invalid_date', `${formatDateCN(day)}已经过去了，换个日期吧`);
+    const day = date ? requireDate(date, 'plan date') : order && order.checkIn > today && !stayRec(order) ? order.checkIn : today;
+    if (day < today) throw new StayError('invalid_date', `${formatDate(day)} has already passed; pick another day`);
     const list = Array.isArray(items) ? items : [];
-    if (list.length < 2 || list.length > 8) throw new StayError('invalid_items', '行程需要2-8项，每项写上时间和要做的事');
+    if (list.length < 2 || list.length > 8) throw new StayError('invalid_items', 'A day plan needs 2–8 items, each with a time and what to do');
     const out = list.map((item, i) => {
-      const what = clean(item?.title, 30);
-      if (!what) throw new StayError('invalid_items', `第${i + 1}项缺少内容（title）`);
-      const place = clean(item?.place, 30);
-      const note = clean(item?.note, 60);
-      return { time: requireTime(item?.time, `第${i + 1}项的时间`), title: what, ...(place ? { place } : {}), ...(note ? { note } : {}) };
+      const what = clean(item?.title, 40);
+      if (!what) throw new StayError('invalid_items', `Item ${i + 1} has nothing to do (title)`);
+      const place = clean(item?.place, 40);
+      const note = clean(item?.note, 80);
+      return { time: requireTime(item?.time, `time of item ${i + 1}`), title: what, ...(place ? { place } : {}), ...(note ? { note } : {}) };
     });
     out.sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0));
     const city = order ? cityOf(order) : '';
-    return { title: clean(title, 30) || `${formatDateCN(day)}行程`, date: day, ...(city ? { city } : {}), items: out };
+    return { title: clean(title, 40) || `Plan for ${formatDate(day)}`, date: day, ...(city ? { city } : {}), items: out };
   }
 
   function estimateRide(order, rideKind, from, to, passengers) {
     const h = hashString(`${order.id}|${rideKind}|${from}|${to}`);
-    const airport = rideKind === 'airport_pickup' || /机场|航站楼/.test(`${from}${to}`);
-    const [lo, hi] = airport ? [35, 65] : [12, 40];
+    const airport = rideKind === 'airport_pickup' || AIRPORT_RE.test(`${from} ${to}`);
+    const [lo, hi] = airport ? [30, 60] : [10, 35];
     const minutes = lo + (h % (hi - lo + 1));
     const van = passengers > 4;
-    const fare = Math.round(((airport ? 30 : 12) + minutes * (airport ? 2.6 : 2.3)) * (van ? 1.5 : 1));
-    return { minutes, fare, carType: van ? '商务车（7座）' : '舒适型轿车' };
+    const fare = Math.round(((airport ? 25 : 8) + minutes * (airport ? 1.1 : 0.9)) * (van ? 1.4 : 1));
+    return { minutes, fare, carType: van ? 'Minivan' : 'Sedan' };
   }
 
   function pickupMs({ pickupDate, pickupTime }, rideKind, order, t) {
+    const zone = zoneOf(order);
     let ms;
     if (!str(pickupTime, 10) && !str(pickupDate, 10)) {
       ms = Math.ceil((t + DEFAULT_PICKUP_IN_MS) / MIN) * MIN;
     } else {
-      const hhmm = requireTime(pickupTime, '上车时间');
-      let day = str(pickupDate, 10) ? requireDate(pickupDate, '上车日期') : '';
+      const hhmm = requireTime(pickupTime, 'pickup time');
+      let day = str(pickupDate, 10) ? requireDate(pickupDate, 'pickup date') : '';
       if (!day) {
-        // '14:00' for a pickup to the hotel means arrival day when that is still ahead and the guest is not in yet.
-        const arrival = (rideKind === 'airport_pickup' || rideKind === 'to_hotel') && order.checkIn > todayCN(new Date(t)) && !stayRec(order);
-        day = arrival ? order.checkIn : nextDateFor(hhmm, t, MIN);
+        // '2:00 PM' for a ride to the hotel means arrival day while that is still ahead and the guest is not in yet.
+        const arrival = (rideKind === 'airport_pickup' || rideKind === 'to_hotel') && order.checkIn > todayIn(zone, t) && !stayRec(order);
+        day = arrival ? order.checkIn : nextDateFor(hhmm, t, zone, MIN);
       }
-      ms = cnTimeMs(day, hhmm);
+      ms = zonedTimeMs(day, hhmm, zone);
     }
-    if (ms < t - MIN) throw new StayError('invalid_time', '上车时间已经过了，换个时间吧');
-    if (ms > t + MAX_PICKUP_AHEAD_DAYS * DAY_MS) throw new StayError('invalid_time', `只能预约${MAX_PICKUP_AHEAD_DAYS}天以内的用车`);
+    if (ms < t - MIN) throw new StayError('invalid_time', 'That pickup time has already passed; pick another time');
+    if (ms > t + MAX_PICKUP_AHEAD_DAYS * DAY_MS) throw new StayError('invalid_time', `Rides can be booked up to ${MAX_PICKUP_AHEAD_DAYS} days ahead`);
     return ms;
   }
 
-  /** A ride quote (15 minutes): nothing is booked until the user taps 确认叫车 (confirmRide). */
+  /** A ride quote (15 minutes): nothing is booked until the user taps Confirm ride (confirmRide). */
   function quoteRide({ userId, sessionId, orderId, kind, from, to, pickupDate, pickupTime, passengers } = {}) {
     const order = resolveOrder(userId, orderId);
-    if (!Object.hasOwn(RIDE_KIND_LABELS, kind)) throw new StayError('invalid_ride_kind', '用车类型需要是接机、去酒店、从酒店出发或打车');
-    const hotelName = order.hotel?.name || '酒店';
-    let start = clean(from, 40);
-    let end = clean(to, 40);
+    if (!Object.hasOwn(RIDE_KIND_LABELS, kind)) throw new StayError('invalid_ride_kind', 'The ride needs to be an airport pickup, a ride to the hotel, a ride from the hotel, or a regular ride');
+    const hotelName = order.hotel?.name || 'the hotel';
+    let start = clean(from, 60);
+    let end = clean(to, 60);
     if (HOTEL_WORD_RE.test(start) || (kind === 'from_hotel' && !start)) start = hotelName;
     if (HOTEL_WORD_RE.test(end) || ((kind === 'airport_pickup' || kind === 'to_hotel') && !end)) end = hotelName;
-    if (!start) throw new StayError('missing_from', '从哪里上车？需要出发地（from）');
-    if (!end) throw new StayError('missing_to', '要去哪里？需要目的地（to）');
-    if (start === end) throw new StayError('same_place', '出发地和目的地是同一个地方，换一下吧');
+    if (!start) throw new StayError('missing_from', 'Where should the driver pick you up? (from)');
+    if (!end) throw new StayError('missing_to', 'Where are you going? (to)');
+    if (start.toLowerCase() === end.toLowerCase()) throw new StayError('same_place', 'The pickup and drop-off are the same place; change one of them');
     const n = passengers === undefined || passengers === null || passengers === ''
       ? Math.min(6, partyOf(order))
-      : intIn(passengers, 1, 6, '乘车人数需要在1-6位之间');
+      : intIn(passengers, 1, 6, 'A ride takes 1–6 passengers');
     const t = nowMs();
     const ride = {
       ...base('ride', order, sessionId, t, 'RD'),
@@ -643,23 +654,25 @@ export function createStayService({ store, bookings, hotels, clock = { now: () =
   }
 
   /** Per ride (route and pickup time): two rides at once get two drivers; a van and a sedan never share a plate. */
-  function driverFor(ride, order) {
+  function driverFor(ride) {
     const key = `${ride.orderId}|${ride.rideKind}|${ride.from}|${ride.to}|${ride.pickupAt}`;
     const h = (k) => hashString(`${key}|${k}`);
     const carClass = ride.passengers > 4 ? 'van' : 'sedan';
-    const cars = carClass === 'van' ? VANS : CARS;
+    const cars = carClass === 'van' ? VANS : SEDANS;
     const [car, color] = cars[h(`${carClass}|car`) % cars.length];
+    const p = h(`${carClass}|plate`);
+    const letters = [0, 1, 2].map((i) => PLATE_LETTERS[Math.floor(p / PLATE_LETTERS.length ** i) % PLATE_LETTERS.length]).join('');
     return {
-      name: `${SURNAMES[h('name') % SURNAMES.length]}师傅`,
+      name: `${DRIVER_FIRST[h('name') % DRIVER_FIRST.length]} ${LAST_INITIALS[h('initial') % LAST_INITIALS.length]}.`,
       car,
       color,
-      plate: `${PLATE_PREFIX[cityOf(order)] || '京A'}·D${String(h(`${carClass}|plate`) % 1e5).padStart(5, '0')}`,
-      phone: maskPhone(`1${3 + (h('carrier') % 7)}${String(h('phone') % 1e9).padStart(9, '0')}`),
+      plate: `${1 + (p % 9)}${letters}${String(h('plate-digits') % 1000).padStart(3, '0')}`,
+      phone: maskPhone(`+1212555${String(100 + (h('phone') % 100)).padStart(4, '0')}`),
     };
   }
 
   /**
-   * The user's tap on 确认叫车: a driver is assigned at once and the fare is paid (simulated) with the order's
+   * The user's tap on Confirm ride: a driver is assigned at once and the fare is paid (simulated) with the order's
    * payment method. Confirming again returns the same ride.
    */
   function confirmRide({ userId, rideId } = {}) {
@@ -667,15 +680,15 @@ export function createStayService({ store, bookings, hotels, clock = { now: () =
     const ride = ownRequest(u, rideId, 'ride');
     const t = nowMs();
     const status = rideStatus(ride, t);
-    if (status === 'expired') throw new StayError('expired', '这个叫车报价已过期（15分钟内有效），我帮你重新叫一下吧');
+    if (status === 'expired') throw new StayError('expired', 'That ride quote expired (quotes are good for 15 minutes); let me get you a new one');
     if (status !== 'quoted') return rideView(ride, t);
     const order = requireConfirmed(ownOrder(u, ride.orderId));
-    const method = order.payment?.method || 'wechat';
+    const method = order.payment?.method || 'card';
     const confirmed = {
       ...ride,
       status: 'confirmed',
       confirmedAt: iso(t),
-      driver: driverFor(ride, order),
+      driver: driverFor(ride),
       payment: { method, paidAt: iso(t), amount: ride.fare, transactionId: idgen.transactionId(method, new Date(t)) },
     };
     requests.set(ride.id, confirmed);
@@ -684,13 +697,13 @@ export function createStayService({ store, bookings, hotels, clock = { now: () =
 
   function requestEarlyCheckin({ userId, sessionId, orderId, arrivalTime } = {}) {
     const order = resolveOrder(userId, orderId);
-    if (stayRec(order)) throw new StayError('already_checked_in', '已经办好入住了，不用再申请提前入住');
-    const hhmm = requireTime(arrivalTime, '到店时间');
+    if (stayRec(order)) throw new StayError('already_checked_in', "You're already checked in, so there's no need for early check-in");
+    const hhmm = requireTime(arrivalTime, 'arrival time');
     const t = nowMs();
     const status = hhmm >= EARLY_CHECKIN_FROM ? 'confirmed' : 'pending';
-    let note = '这个时间有点早，酒店会尽量提前准备，房间准备好会通知你；可以先寄存行李';
-    if (hhmm >= STANDARD_CHECKIN) note = `${STANDARD_CHECKIN} 起就是正常入住时间，到店直接办理就行`;
-    else if (status === 'confirmed') note = `已和酒店确认，${hhmm} 到店就能入住`;
+    let note = "That's early, so the hotel will try to have your room ready and let you know; you can leave your bags at the front desk";
+    if (hhmm >= STANDARD_CHECKIN) note = `Check-in starts at ${formatTime(STANDARD_CHECKIN)}, so you can check in as soon as you arrive`;
+    else if (status === 'confirmed') note = `Confirmed with the hotel: your room will be ready at ${formatTime(hhmm)}`;
     // One request per order: asking again changes the time.
     const existing = requestsOf(order).find((r) => r.kind === 'early_checkin');
     const rec = {
@@ -714,13 +727,13 @@ export function createStayService({ store, bookings, hotels, clock = { now: () =
    * desk's): the order records the check-in (no more online cancellation) and a pending early check-in is settled.
    */
   function settleCheckIn(order, t) {
-    const today = todayCN(new Date(t));
-    if (order.checkOut < today) throw new StayError('stay_over', `这一单的离店日期（${formatDateCN(order.checkOut)}）已经过了，不能再办入住`);
+    const today = todayIn(zoneOf(order), t);
+    if (order.checkOut < today) throw new StayError('stay_over', `This booking's check-out date (${formatDate(order.checkOut)}) has passed, so it can't be checked in`);
     const rec = { orderId: order.id, userId: order.userId, ...assignRoom(order, profileOf(order)), checkedInAt: iso(t), early: today < order.checkIn };
     stays.set(order.id, rec);
     bookings.markCheckedIn?.({ userId: order.userId, orderId: order.id, at: rec.checkedInAt });
     for (const r of requestsOf(order)) {
-      if (r.kind === 'early_checkin' && r.status === 'pending') requests.set(r.id, { ...r, status: 'confirmed', note: '房间已准备好，已办理入住', updatedAt: iso(t) });
+      if (r.kind === 'early_checkin' && r.status === 'pending') requests.set(r.id, { ...r, status: 'confirmed', note: 'Your room was ready and you are checked in', updatedAt: iso(t) });
     }
     return rec;
   }
@@ -729,7 +742,7 @@ export function createStayService({ store, bookings, hotels, clock = { now: () =
   function checkIn({ userId, orderId } = {}) {
     const order = resolveOrder(userId, orderId);
     const existing = stayRec(order);
-    if (existing?.checkedOutAt) throw new StayError('checked_out', '这一单已经退房了，不能再办入住');
+    if (existing?.checkedOutAt) throw new StayError('checked_out', "You already checked out of this stay, so it can't be checked in again");
     if (existing) {
       // A stay from before orders recorded their check-in.
       if (!order.checkedInAt) bookings.markCheckedIn?.({ userId: order.userId, orderId: order.id, at: existing.checkedInAt });
@@ -743,14 +756,16 @@ export function createStayService({ store, bookings, hotels, clock = { now: () =
     const list = Array.isArray(items) ? items : [];
     const merged = new Map();
     for (const item of list) {
-      const name = clean(typeof item === 'string' ? item : item?.name, 20);
+      const name = clean(typeof item === 'string' ? item : item?.name, 30);
       if (!name) continue;
-      const qty = item?.qty === undefined || item?.qty === null || item?.qty === '' ? 1 : intIn(item.qty, 1, 10, `「${name}」的数量需要在1-10之间`);
-      merged.set(name, Math.min(10, (merged.get(name) || 0) + qty));
+      const qty = item?.qty === undefined || item?.qty === null || item?.qty === '' ? 1 : intIn(item.qty, 1, 10, `The quantity of "${name}" needs to be 1–10`);
+      const key = name.toLowerCase();
+      const prev = merged.get(key);
+      merged.set(key, { name: prev?.name || name, qty: Math.min(10, (prev?.qty || 0) + qty) });
     }
-    if (!merged.size) throw new StayError('invalid_items', '要送什么？请写明物品，如「毛巾 2条」');
-    if (merged.size > 6) throw new StayError('invalid_items', '一次最多送6样东西，分两次叫吧');
-    return [...merged].map(([name, qty]) => ({ name, qty }));
+    if (!merged.size) throw new StayError('invalid_items', 'What should we bring? Name the items, like "Towels ×2"');
+    if (merged.size > 6) throw new StayError('invalid_items', 'Up to 6 different items at a time; split it into two requests');
+    return [...merged.values()];
   }
 
   /** Delivery to the room: accepted → on_the_way (+1 min) → done (+5 min, the eta). */
@@ -768,22 +783,24 @@ export function createStayService({ store, bookings, hotels, clock = { now: () =
     const order = resolveOrder(userId, orderId);
     requireNotCheckedOut(order);
     const meal = Object.hasOwn(MEALS, kind) ? MEALS[kind] : null;
-    if (!meal) throw new StayError('invalid_meal', '餐别需要是早餐、午餐或晚餐');
-    const hhmm = requireTime(time, '用餐时间');
-    if (hhmm < meal.from || hhmm > meal.to) throw new StayError('invalid_time', `${meal.label}时间是 ${meal.from}–${meal.to}，换个时间吧`);
+    if (!meal) throw new StayError('invalid_meal', 'The meal needs to be breakfast, lunch or dinner');
+    const hhmm = requireTime(time, 'table time');
+    if (hhmm < meal.from || hhmm > meal.to) throw new StayError('invalid_time', `${meal.label} is served ${formatTime(meal.from)}–${formatTime(meal.to)}; pick a time in that window`);
     const t = nowMs();
-    const day = str(date, 10) ? requireDate(date, '用餐日期') : nextDateFor(hhmm, t);
+    const zone = zoneOf(order);
+    const day = str(date, 10) ? requireDate(date, 'table date') : nextDateFor(hhmm, t, zone);
     // A guest who checked in before the booked date is already staying.
     const inSince = stayRec(order)?.checkedInAt;
-    const first = inSince && todayCN(new Date(Date.parse(inSince))) < order.checkIn ? todayCN(new Date(Date.parse(inSince))) : order.checkIn;
+    const inDate = inSince ? dateIn(inSince, zone) : null;
+    const first = inDate && inDate < order.checkIn ? inDate : order.checkIn;
     if (day < first || day > order.checkOut) {
-      throw new StayError('outside_stay', `${formatDateCN(day)}不在这次入住期间（${formatDateCN(first)}–${formatDateCN(order.checkOut)}）`);
+      throw new StayError('outside_stay', `${formatDate(day)} isn't during this stay (${formatDate(first)} – ${formatDate(order.checkOut)})`);
     }
-    const atMs = cnTimeMs(day, hhmm);
-    if (atMs <= t) throw new StayError('invalid_time', `${formatDateCN(day)} ${hhmm} 已经过了，换个时间吧`);
-    const n = people === undefined || people === null || people === '' ? Math.min(10, partyOf(order)) : intIn(people, 1, 10, '用餐人数需要在1-10位之间');
+    const atMs = zonedTimeMs(day, hhmm, zone);
+    if (atMs <= t) throw new StayError('invalid_time', `${formatDate(day)} at ${formatTime(hhmm)} has already passed; pick a later time`);
+    const n = people === undefined || people === null || people === '' ? Math.min(10, partyOf(order)) : intIn(people, 1, 10, 'A table takes 1–10 guests');
     const prof = profileOf(order);
-    // The rate's breakfast covers its people per room (含双早 = 2 a room); the rest of the party pays ¥68 each.
+    // The rate's breakfast covers its people per room (breakfast for 2 = 2 a room); the rest pay $18 each.
     const covers = kind === 'breakfast' ? (Number(order.rate?.breakfast) || 0) * (Number(order.rooms) || 1) : 0;
     const included = covers >= n;
     const covered = included ? 0 : covers;
@@ -799,7 +816,7 @@ export function createStayService({ store, bookings, hotels, clock = { now: () =
       people: n,
       restaurant: venue.restaurant,
       place: venue.place,
-      table: rec.table || `${1 + (hashString(`${rec.id}|table`) % 30)}号桌`,
+      table: rec.table || `Table ${1 + (hashString(`${rec.id}|table`) % 30)}`,
       price: kind === 'breakfast' ? (included ? 0 : BREAKFAST_PRICE) : prof.restaurant.price,
       included,
       covered,
@@ -812,12 +829,13 @@ export function createStayService({ store, bookings, hotels, clock = { now: () =
   function setWakeupCall({ userId, sessionId, orderId, time, date } = {}) {
     const order = resolveOrder(userId, orderId);
     const rec = requireCheckedIn(order);
-    const hhmm = requireTime(time, '叫醒时间');
+    const hhmm = requireTime(time, 'wake-up time');
     const t = nowMs();
-    const day = str(date, 10) ? requireDate(date, '叫醒日期') : nextDateFor(hhmm, t);
-    const atMs = cnTimeMs(day, hhmm);
-    if (atMs <= t) throw new StayError('invalid_time', `${formatDateCN(day)} ${hhmm} 已经过了，换个时间吧`);
-    if (day > order.checkOut) throw new StayError('outside_stay', `${formatDateCN(day)}已经过了离店日（${formatDateCN(order.checkOut)}），换一天吧`);
+    const zone = zoneOf(order);
+    const day = str(date, 10) ? requireDate(date, 'wake-up date') : nextDateFor(hhmm, t, zone);
+    const atMs = zonedTimeMs(day, hhmm, zone);
+    if (atMs <= t) throw new StayError('invalid_time', `${formatDate(day)} at ${formatTime(hhmm)} has already passed; pick a later time`);
+    if (day > order.checkOut) throw new StayError('outside_stay', `${formatDate(day)} is after your check-out (${formatDate(order.checkOut)}); pick another day`);
     const at = iso(atMs);
     const same = requestsOf(order).find((r) => r.kind === 'wakeup' && r.at === at);
     if (same) return wakeupView(same, t);
@@ -831,6 +849,7 @@ export function createStayService({ store, bookings, hotels, clock = { now: () =
     const t = nowMs();
     const rec = stayRec(order);
     const prof = profileOf(order);
+    const zone = zoneOf(order);
     const checkedIn = Boolean(rec && !rec.checkedOutAt);
     return {
       orderId: order.id,
@@ -839,10 +858,12 @@ export function createStayService({ store, bookings, hotels, clock = { now: () =
       ...(checkedIn ? { roomNumber: rec.roomNumber } : {}),
       wifi: { ...prof.wifi },
       breakfast: { ...prof.breakfast, included: (order.rate?.breakfast || 0) > 0 },
+      checkinTime: STANDARD_CHECKIN,
       checkoutTime: CHECKOUT_TIME,
       frontDesk: prof.frontDesk,
       facilities: prof.facilities.map((f) => ({ ...f })),
-      open: requestsOf(order).map((r) => openItem(r, t)).filter(Boolean),
+      timeZone: zone,
+      open: requestsOf(order).map((r) => openItem(r, t, zone)).filter(Boolean),
     };
   }
 
@@ -856,7 +877,7 @@ export function createStayService({ store, bookings, hotels, clock = { now: () =
       });
     } catch (err) {
       if (err?.name === 'BookingError' && (err.code === 'sold_out' || err.code === 'rate_not_found')) {
-        throw new StayError('sold_out', `${formatDateCN(fromDate)}起续住${nightsBetween(fromDate, toDate)}晚，${order.room?.name || '这个房型'}已经订满了，换个晚数试试？`);
+        throw new StayError('sold_out', `The ${order.room?.name || 'room'} is sold out for ${plural(nightsBetween(fromDate, toDate), 'more night')} from ${formatDate(fromDate)}; try fewer nights?`);
       }
       if (err?.name === 'BookingError' && err.code === 'invalid_dates') throw new StayError('invalid_dates', err.message);
       throw err;
@@ -867,9 +888,9 @@ export function createStayService({ store, bookings, hotels, clock = { now: () =
   function prepareExtension({ userId, sessionId, orderId, nights } = {}) {
     const order = resolveOrder(userId, orderId);
     requireNotCheckedOut(order);
-    const n = nights === undefined || nights === null || nights === '' ? 1 : intIn(nights, 1, 7, '续住需要在1-7晚之间');
+    const n = nights === undefined || nights === null || nights === '' ? 1 : intIn(nights, 1, 7, 'An extension can be 1–7 nights');
     const t = nowMs();
-    if (order.checkOut < todayCN(new Date(t))) throw new StayError('stay_over', '这一单的离店日期已经过了，不能再续住，可以重新预订');
+    if (order.checkOut < todayIn(zoneOf(order), t)) throw new StayError('stay_over', "This booking's check-out date has passed, so it can't be extended; I can book a new stay");
     const fromDate = order.checkOut;
     const toDate = addDays(fromDate, n);
     const { rate } = priceExtension(order, fromDate, toDate);
@@ -887,6 +908,7 @@ export function createStayService({ store, bookings, hotels, clock = { now: () =
       nights: n,
       nightly: rate.nightly.map((x) => ({ date: x.date, price: x.price })),
       price: rate.totalPrice,
+      taxesAndFees: Number.isFinite(rate.taxesAndFees) ? rate.taxesAndFees : 0,
       status: 'pending',
       expiresAt: iso(t + QUOTE_TTL_MS),
     };
@@ -894,56 +916,59 @@ export function createStayService({ store, bookings, hotels, clock = { now: () =
     return extensionView(ext, t);
   }
 
-  /** The user's tap on 确认续住 plus the simulated payment: the order's check-out, nights and total move. */
+  /** The user's tap on Confirm extension plus the simulated payment: the order's check-out, nights and total move. */
   function confirmExtension({ userId, extensionId, method } = {}) {
     const u = requireUser(userId);
     const ext = ownRequest(u, extensionId, 'extension');
     const t = nowMs();
     const status = extensionStatus(ext, t);
     if (status === 'confirmed') return { extension: extensionView(ext, t), order: toPublicOrder(bookings.getOrder(u, ext.orderId)) };
-    if (status === 'expired') throw new StayError('expired', '这个续住报价已过期（15分钟内有效），我帮你重新报个价吧');
+    if (status === 'expired') throw new StayError('expired', 'That extension quote expired (quotes are good for 15 minutes); let me price it again');
     const m = normalizeMethod(method);
-    if (!m) throw new StayError('invalid_payment_method', '请选择微信支付或支付宝');
+    if (!m) throw new StayError('invalid_payment_method', 'Please choose a credit or debit card or Apple Pay');
     const order = requireConfirmed(ownOrder(u, ext.orderId));
     requireNotCheckedOut(order);
-    if (order.checkOut !== ext.fromDate) throw new StayError('superseded', '订单的离店日期已经变了，这个续住报价失效了，请重新报价');
+    if (order.checkOut !== ext.fromDate) throw new StayError('superseded', 'The check-out date of this booking changed, so this extension quote no longer applies; please get a new one');
     const { rate } = priceExtension(order, ext.fromDate, ext.toDate);
     if (rate.totalPrice !== ext.price) {
-      throw new StayError('price_changed', `续住价格有变动：刚才是 ¥${ext.price}，现在是 ¥${rate.totalPrice}，需要重新确认`, { oldPrice: ext.price, newPrice: rate.totalPrice });
+      throw new StayError('price_changed', `The extension price changed: it was ${formatUsd(ext.price)} and is now ${formatUsd(rate.totalPrice)}; please confirm again`, { oldPrice: ext.price, newPrice: rate.totalPrice });
     }
     const payment = { method: m, paidAt: iso(t), amount: ext.price, transactionId: idgen.transactionId(m, new Date(t)) };
     const updated = bookings.extendOrder({
-      userId: u, orderId: order.id, fromDate: ext.fromDate, toDate: ext.toDate, nightly: rate.nightly, amount: ext.price, payment, extensionId: ext.id,
+      userId: u, orderId: order.id, fromDate: ext.fromDate, toDate: ext.toDate, nightly: rate.nightly, amount: ext.price,
+      taxesAndFees: Number.isFinite(rate.taxesAndFees) ? rate.taxesAndFees : 0, payment, extensionId: ext.id,
     });
     const confirmed = { ...ext, status: 'confirmed', confirmedAt: iso(t), payment };
     requests.set(ext.id, confirmed);
     return { extension: extensionView(confirmed, t), order: toPublicOrder(updated) };
   }
 
-  // ---- check-out, invoice, points, review -------------------------------------------------------
+  // ---- check-out, receipt, points, review -------------------------------------------------------
 
   /**
-   * Room nights, extensions and confirmed rides were paid when the user tapped for them; meals already
-   * served went on the room bill and are settled with the order's payment method at check-out.
+   * Room nights, extensions and confirmed rides were paid when the user tapped for them; meals already served went
+   * on the room bill and are settled with the order's payment method at check-out.
    */
   function buildBill(order, rec, t) {
-    const methodLabel = (m) => PAYMENT_METHOD_LABELS[m] || '在线支付';
+    const methodLabel = (m) => PAYMENT_METHOD_LABELS[m] || 'Card on file';
     const exts = Array.isArray(order.extensions) ? order.extensions : [];
+    const roomNights = order.nights - sum(exts, (e) => e.nights);
     const paid = [{
-      label: `房费（${order.room?.name || '客房'} · ${order.nights - sum(exts, (e) => e.nights)}晚${order.rooms > 1 ? ` × ${order.rooms}间` : ''}）`,
+      label: `Room (${order.room?.name || 'room'} · ${plural(roomNights, 'night')}${order.rooms > 1 ? ` × ${order.rooms} rooms` : ''})`,
       amount: money(order.totalPrice - sum(exts, (e) => e.amount)),
-      note: `已预付（${methodLabel(order.payment?.method)}）`,
+      note: `Prepaid (${methodLabel(order.payment?.method)})`,
     }];
-    for (const e of exts) paid.push({ label: `续住（${e.nights}晚）`, amount: money(e.amount), note: `已预付（${methodLabel(e.payment?.method)}）` });
+    for (const e of exts) paid.push({ label: `Extension (${plural(e.nights, 'night')})`, amount: money(e.amount), note: `Prepaid (${methodLabel(e.payment?.method)})` });
     const charged = [];
     for (const r of requestsOf(order)) {
       if (r.kind === 'ride' && r.payment) {
-        paid.push({ label: `${RIDE_KIND_LABELS[r.rideKind] || '用车'}用车`, amount: money(r.fare), note: `已支付（${methodLabel(r.payment.method)}）` });
+        const kindLabel = r.rideKind === 'taxi' || !RIDE_KIND_LABELS[r.rideKind] ? '' : ` (${RIDE_KIND_LABELS[r.rideKind]})`;
+        paid.push({ label: `Ride${kindLabel}`, amount: money(r.fare), note: `Paid (${methodLabel(r.payment.method)})` });
       }
       const payers = r.kind === 'dining' ? r.people - (Number(r.covered) || 0) : 0;
       if (r.kind === 'dining' && r.status !== 'cancelled' && r.price > 0 && payers > 0 && Date.parse(r.at) <= t) {
-        const label = `${MEALS[r.mealKind]?.label || '餐饮'}（${r.people}位${r.covered > 0 ? `，含早${r.covered}位` : ''}）`;
-        charged.push({ label, amount: money(r.price * payers), note: '挂房账' });
+        const label = `${MEALS[r.mealKind]?.label || 'Dining'} (${plural(r.people, 'guest')}${r.covered > 0 ? `, ${r.covered} included in the rate` : ''})`;
+        charged.push({ label, amount: money(r.price * payers), note: 'Charged to the room' });
       }
     }
     const prepaid = sum(paid, (l) => l.amount);
@@ -959,10 +984,11 @@ export function createStayService({ store, bookings, hotels, clock = { now: () =
       prepaid,
       extras,
       due: extras,
-      // Shown as 还需支付（微信支付）: just the method.
-      settledBy: extras > 0 ? methodLabel(order.payment?.method) : '无需补缴',
-      // 1 yuan actually paid = 1 point.
-      pointsEarned: prepaid + extras,
+      currency: 'USD',
+      // Shown as "Due now (Apple Pay)": just the method.
+      settledBy: extras > 0 ? methodLabel(order.payment?.method) : 'Nothing due',
+      // $1 actually paid = 1 point.
+      pointsEarned: Math.floor(prepaid + extras),
       checkedOutAt: iso(t),
     };
   }
@@ -970,7 +996,7 @@ export function createStayService({ store, bookings, hotels, clock = { now: () =
   function checkOut({ userId, orderId } = {}) {
     const order = resolveOrder(userId, orderId);
     const rec = stayRec(order);
-    if (!rec) throw new StayError('not_checked_in', '还没办入住，不能退房');
+    if (!rec) throw new StayError('not_checked_in', "You haven't checked in yet, so there's nothing to check out of");
     if (rec.checkedOutAt) return { bill: structuredClone(rec.bill), already: true };
     const t = nowMs();
     const bill = buildBill(order, rec, t);
@@ -983,34 +1009,33 @@ export function createStayService({ store, bookings, hotels, clock = { now: () =
     return { bill: structuredClone(bill), already: false };
   }
 
-  /** 电子普通发票 for the order (one per order; asking again re-issues it with the new details). */
-  function requestInvoice({ userId, sessionId, orderId, title, taxId, email } = {}) {
+  /**
+   * Emails the order's receipt (one per order; asking again re-sends it, to a new address if one is given). The
+   * address defaults to the booking's email.
+   */
+  function requestReceipt({ userId, sessionId, orderId, email } = {}) {
     const order = resolveOrder(userId, orderId, { afterStay: true });
-    const head = clean(title, 50) || clean(order.guests?.[0], 20) || '个人';
-    const rawTax = str(taxId, 40).replace(/[\s-]/g, '').toUpperCase();
-    if (rawTax && !TAX_ID_RE.test(rawTax)) throw new StayError('invalid_tax_id', '税号格式不对：统一社会信用代码是18位数字或大写字母');
-    if (COMPANY_RE.test(head) && !rawTax) throw new StayError('missing_tax_id', `「${head}」是单位抬头，需要税号（统一社会信用代码）才能开票`);
-    const mail = str(email, 80);
-    if (mail && !EMAIL_RE.test(mail)) throw new StayError('invalid_email', '邮箱格式不对，请检查一下');
+    const given = str(email, 254);
+    const mail = given ? normalizeEmail(given) : normalizeEmail(order.holder?.email);
+    if (given && !mail) throw new StayError('invalid_email', "That email doesn't look right");
+    if (!mail) throw new StayError('missing_email', 'Which email should the receipt go to?');
     const t = nowMs();
     const bill = stayRec(order)?.bill;
     const amount = bill ? bill.prepaid + bill.due : money(order.totalPrice);
-    const existing = requestsOf(order).find((r) => r.kind === 'invoice');
-    if (existing && existing.title === head && existing.taxId === rawTax && existing.email === mail && existing.amount === amount) return invoiceView(existing, t);
-    const inv = {
-      ...(existing || base('invoice', order, sessionId, t, 'IV')),
+    const existing = requestsOf(order).find((r) => r.kind === 'receipt');
+    if (existing && existing.email === mail && existing.amount === amount && t < sentAtMs(existing)) return receiptView(existing, t);
+    const rec = {
+      ...(existing || base('receipt', order, sessionId, t, 'RC')),
       ...(str(sessionId, 100) ? { sessionId: str(sessionId, 100) } : {}),
       requestedAt: iso(t),
-      title: head,
-      taxId: rawTax,
       email: mail,
       amount,
     };
-    requests.set(inv.id, inv);
-    return invoiceView(inv, t);
+    requests.set(rec.id, rec);
+    return receiptView(rec, t);
   }
 
-  /** Level, points (1 per yuan paid, earned at check-out, kept while the order stands) and the latest stays that earned them. */
+  /** Level, points (1 per dollar paid, earned at check-out, kept while the order stands) and the latest stays that earned them. */
   function getMembership(userId) {
     const u = requireUser(userId);
     const done = stays.values()
@@ -1022,29 +1047,30 @@ export function createStayService({ store, bookings, hotels, clock = { now: () =
     const level = MEMBER_LEVELS[i];
     const next = MEMBER_LEVELS[i + 1];
     return {
+      program: REWARDS_PROGRAM,
       level: level.name,
       points,
       ...(next ? { nextLevel: next.name, pointsToNext: next.min - points } : {}),
       perks: [...level.perks],
-      recent: done.slice(0, 5).map((s) => ({ label: `${s.bill.hotel?.name || '酒店'} 退房`, points: s.bill.pointsEarned, at: s.checkedOutAt })),
+      recent: done.slice(0, 5).map((s) => ({ label: `Checked out of ${s.bill.hotel?.name || 'a hotel'}`, points: s.bill.pointsEarned, at: s.checkedOutAt })),
     };
   }
 
   function cleanTags(tags) {
-    const list = Array.isArray(tags) ? tags : typeof tags === 'string' ? tags.split(/[,，、\s]+/) : [];
-    return [...new Set(list.map((x) => clean(x, 10)).filter(Boolean))].slice(0, 6);
+    const list = Array.isArray(tags) ? tags : typeof tags === 'string' ? tags.split(/[,;]+/) : [];
+    return [...new Set(list.map((x) => clean(x, 24)).filter(Boolean))].slice(0, 6);
   }
 
-  /** A draft only: it is published when the user taps 发布 (publishReview). One review per order. */
+  /** A draft only: it is posted when the user taps Post review (publishReview). One review per order. */
   function draftReview({ userId, sessionId, orderId, rating, text, tags } = {}) {
     const order = resolveOrder(userId, orderId, { afterStay: true });
-    const stars = intIn(rating, 1, 5, '评分需要是1-5星');
+    const stars = intIn(rating, 1, 5, 'The rating needs to be 1–5 stars');
     const body = cleanText(text);
-    if (!body) throw new StayError('invalid_review', '点评内容不能为空');
-    if (body.length > MAX_REVIEW_CHARS) throw new StayError('invalid_review', `点评最多${MAX_REVIEW_CHARS}字（现在${body.length}字），精简一下再起草`);
+    if (!body) throw new StayError('invalid_review', 'The review needs some text');
+    if (body.length > MAX_REVIEW_CHARS) throw new StayError('invalid_review', `Reviews can be up to ${MAX_REVIEW_CHARS} characters (this one has ${body.length}); make it shorter`);
     const t = nowMs();
     const existing = requestsOf(order).find((r) => r.kind === 'review');
-    if (existing?.status === 'published') throw new StayError('already_published', '这一单已经发布过点评了');
+    if (existing?.status === 'published') throw new StayError('already_published', 'You already posted a review for this stay');
     const review = {
       ...(existing || base('review', order, sessionId, t, 'RV')),
       ...(str(sessionId, 100) ? { sessionId: str(sessionId, 100) } : {}),
@@ -1059,7 +1085,7 @@ export function createStayService({ store, bookings, hotels, clock = { now: () =
     return reviewView(review);
   }
 
-  /** The user's tap on 发布. Publishing again returns the same review. */
+  /** The user's tap on Post review. Posting again returns the same review. */
   function publishReview({ userId, reviewId } = {}) {
     const u = requireUser(userId);
     const review = ownRequest(u, reviewId, 'review');
@@ -1072,7 +1098,7 @@ export function createStayService({ store, bookings, hotels, clock = { now: () =
 
   // ---- reads for the page -----------------------------------------------------------------------
 
-  /** 我的安排: confirmed orders checking out at most 3 days ago (up to 5, the current one first). */
+  /** My trips: confirmed orders checking out at most 3 days ago (up to 5, the current one first). */
   function listStays(userId) {
     const u = requireUser(userId);
     const t = nowMs();
@@ -1175,13 +1201,13 @@ export function createStayService({ store, bookings, hotels, clock = { now: () =
    */
   function frontDeskCheckIn(orderId) {
     const order = anyOrder(orderId);
-    if (!order) throw new StayError('not_found', '没有找到这个订单');
+    if (!order) throw new StayError('not_found', "Couldn't find that order");
     requireConfirmed(order);
     const existing = stayRec(order);
-    if (existing?.checkedOutAt) throw new StayError('checked_out', '这一单已经退房了，不能再办入住');
-    if (existing) throw new StayError('already_checked_in', `客人已经办好入住了（${existing.roomNumber} 房）`);
+    if (existing?.checkedOutAt) throw new StayError('checked_out', "This guest already checked out, so they can't be checked in again");
+    if (existing) throw new StayError('already_checked_in', `The guest is already checked in (room ${existing.roomNumber})`);
     const t = nowMs();
-    if (order.checkIn > todayCN(new Date(t))) throw new StayError('not_arrived', `这一单${formatDateCN(order.checkIn)}才入住，到那天再在前台办理`);
+    if (order.checkIn > todayIn(zoneOf(order), t)) throw new StayError('not_arrived', `This booking checks in on ${formatDate(order.checkIn)}; check the guest in at the desk that day`);
     const rec = settleCheckIn(order, t);
     return { stay: stayView(order, rec), userId: order.userId, sessionId: order.sessionId || null };
   }
@@ -1194,42 +1220,42 @@ export function createStayService({ store, bookings, hotels, clock = { now: () =
   function advanceRequest(requestId, action) {
     const r = requests.get(str(requestId, 80));
     const order = r && (r.kind === 'service' || r.kind === 'early_checkin') ? bookings.getOrder(r.userId, r.orderId) : null;
-    if (!order || order.status !== 'confirmed') throw new StayError('not_found', '没有找到这个请求，可能已失效');
+    if (!order || order.status !== 'confirmed') throw new StayError('not_found', "Couldn't find that request; it may have expired");
     const t = nowMs();
     let next = null;
-    let why = '这个操作现在做不了';
+    let why = "That can't be done right now";
     if (r.kind === 'service') {
       const status = serviceView(r, t).status;
       if (action === 'accept') {
         if (status === 'accepted') next = { ...r, onTheWayAt: iso(t) };
-        else why = status === 'done' ? '这单已经送达了' : '这单已经在配送中了';
+        else why = status === 'done' ? 'This one was already delivered' : 'This one is already on its way';
       } else if (action === 'deliver' || action === 'done') {
         if (status !== 'done') next = { ...r, onTheWayAt: r.onTheWayAt || iso(t), doneAt: iso(t) };
-        else why = '这单已经送达了';
-      } else why = '送物工单只能接单、送达或完成';
+        else why = 'This one was already delivered';
+      } else why = 'A delivery can only be accepted, delivered or marked done';
     } else if (action === 'approve' || action === 'decline') {
       if (r.status === 'pending') {
         next = action === 'approve'
-          ? { ...r, status: 'confirmed', note: `酒店已确认 ${r.arrivalTime} 可以入住`, decidedAt: iso(t) }
-          : { ...r, status: 'declined', note: `那天房间比较满，按 ${STANDARD_CHECKIN} 入住哦`, decidedAt: iso(t) };
-      } else why = '这个提前入住申请已经处理过了';
-    } else why = '提前入住只能同意或婉拒';
+          ? { ...r, status: 'confirmed', note: `The hotel confirmed check-in at ${formatTime(r.arrivalTime)}`, decidedAt: iso(t) }
+          : { ...r, status: 'declined', note: `The hotel is full that day, so check-in is at ${formatTime(STANDARD_CHECKIN)}`, decidedAt: iso(t) };
+      } else why = 'This early check-in request was already answered';
+    } else why = 'An early check-in can only be approved or declined';
     if (!next) throw new StayError('invalid_action', why);
     requests.set(r.id, next);
     return { request: viewOf(next, t), userId: r.userId, sessionId: r.sessionId || order.sessionId || null };
   }
 
   /**
-   * The hotel's reply to a published review (1–300 characters): the guest's review card shows it as
+   * The hotel's reply to a published review (1–500 characters): the guest's review card shows it as
    * `reply: { text, at }`. Replying again replaces it; `changed` says whether the text is new.
    */
   function replyReview(reviewId, text) {
     const r = requests.get(str(reviewId, 80));
-    if (!r || r.kind !== 'review') throw new StayError('not_found', '没有找到这条点评');
-    if (r.status !== 'published') throw new StayError('not_published', '这条点评还没有发布，不能回复');
+    if (!r || r.kind !== 'review') throw new StayError('not_found', "Couldn't find that review");
+    if (r.status !== 'published') throw new StayError('not_published', "This review isn't posted yet, so it can't be answered");
     const body = cleanText(text);
-    if (!body) throw new StayError('invalid_reply', '回复内容不能为空');
-    if (body.length > MAX_REPLY_CHARS) throw new StayError('invalid_reply', `回复最多${MAX_REPLY_CHARS}字（现在${body.length}字），精简一下吧`);
+    if (!body) throw new StayError('invalid_reply', 'The reply needs some text');
+    if (body.length > MAX_REPLY_CHARS) throw new StayError('invalid_reply', `Replies can be up to ${MAX_REPLY_CHARS} characters (this one has ${body.length}); make it shorter`);
     const changed = r.reply?.text !== body;
     const updated = changed ? { ...r, reply: { text: body, at: iso(nowMs()) } } : r;
     if (changed) requests.set(r.id, updated);
@@ -1239,7 +1265,7 @@ export function createStayService({ store, bookings, hotels, clock = { now: () =
 
   return {
     planItinerary, quoteRide, confirmRide, requestEarlyCheckin, checkIn, requestService, reserveDining, setWakeupCall,
-    getStayInfo, prepareExtension, confirmExtension, checkOut, requestInvoice, getMembership, draftReview, publishReview,
+    getStayInfo, prepareExtension, confirmExtension, checkOut, requestReceipt, getMembership, draftReview, publishReview,
     listStays, getRequest, getStay, sessionOf, discardQuote,
     listHotelStays, listHotelRequests, frontDeskCheckIn, advanceRequest, replyReview,
   };

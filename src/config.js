@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveLlmConfig } from './llm/providers.js';
+import { canonicalTimeZone, DEFAULT_TIME_ZONE } from './util/dates.js';
 
 // The only module that reads process.env; everything else receives this config object.
 
@@ -11,10 +12,12 @@ const KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const ESCAPES = { n: '\n', r: '\r', t: '\t', '"': '"', '\\': '\\' };
 
 export const DEFAULTS = Object.freeze({
-  appName: '小宿',
+  appName: 'NanaHotel',
   port: 8787,
   host: '127.0.0.1',
   dataDir: 'data',
+  // "Today" and "tonight" for a request whose X-Time-Zone header is missing or not a real zone.
+  timeZone: DEFAULT_TIME_ZONE,
 });
 
 export const DEFAULT_LIMITS = Object.freeze({
@@ -109,7 +112,7 @@ function intIn(env, key, min, max, fallback) {
   if (raw === undefined) return fallback;
   const n = Number(raw);
   if (!Number.isInteger(n) || n < min || n > max) {
-    throw new Error(`配置项 ${key} 无效：「${raw}」，应为 ${min}-${max} 之间的整数`);
+    throw new Error(`The setting ${key} is invalid: "${raw}"; it should be a whole number from ${min} to ${max}`);
   }
   return n;
 }
@@ -130,6 +133,8 @@ export function loadConfig({ env = process.env, envFile, rootDir = ROOT_DIR } = 
   }
 
   const appName = (vars.APP_NAME || DEFAULTS.appName).slice(0, 20);
+  const timeZone = vars.DEFAULT_TIME_ZONE ? canonicalTimeZone(vars.DEFAULT_TIME_ZONE) : DEFAULTS.timeZone;
+  if (!timeZone) throw new Error(`The setting DEFAULT_TIME_ZONE is invalid: "${vars.DEFAULT_TIME_ZONE}"; it should be an IANA time zone like America/New_York`);
   const bochaKey = vars.BOCHA_API_KEY || '';
   return {
     appName,
@@ -138,6 +143,7 @@ export function loadConfig({ env = process.env, envFile, rootDir = ROOT_DIR } = 
     rootDir,
     publicDir: path.join(rootDir, 'public'),
     dataDir: path.resolve(rootDir, vars.DATA_DIR || DEFAULTS.dataDir),
+    timeZone,
     llm: resolveLlmConfig(vars),
     webSearch: { provider: 'bocha', apiKey: bochaKey, enabled: Boolean(bochaKey) },
     // Only behind a reverse proxy that sets X-Forwarded-For; otherwise clients could pick their own address.

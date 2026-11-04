@@ -1,8 +1,8 @@
 {
-  "name": "小宿 · AI 订房管家",
-  "short_name": "小宿",
-  "description": "说出行程，帮你找酒店、比房型、一键预订（演示版，酒店与支付均为模拟）。",
-  "lang": "zh-CN",
+  "name": "NanaHotel",
+  "short_name": "NanaHotel",
+  "description": "Tell Nana where you're going: Nana finds hotels, compares rooms and books them (demo: hotels and payments are simulated).",
+  "lang": "en-US",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

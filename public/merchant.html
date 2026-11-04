@@ -1,13 +1,13 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#0d0c0a">
-  <meta name="description" content="小宿商家版（演示）：经营概览、房态与入住、住客服务工单、点评与营销。数据为模拟，和旅客端的小宿连着。">
+  <meta name="description" content="NanaHotel for Hotels (demo): today's numbers, rooms and check-in, guest requests, reviews and promotions. The data is simulated and linked to the NanaHotel guest app.">
   <meta name="format-detection" content="telephone=no">
-  <title>小宿商家版</title>
+  <title>NanaHotel for Hotels</title>
   <link rel="icon" href="public/icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="public/merchant.css">
   <script type="module" src="public/merchant.js"></script>
@@ -16,19 +16,19 @@
   <div class="m-app" id="m-app">
     <header class="m-top">
       <button type="button" class="m-hotel" id="m-hotel" aria-haspopup="dialog">
-        <span class="m-hotel-kicker">小宿商家版 · 演示</span>
-        <span class="m-hotel-name" id="m-hotel-name">正在加载…</span>
+        <span class="m-hotel-kicker">NanaHotel for Hotels · Demo</span>
+        <span class="m-hotel-name" id="m-hotel-name">Loading…</span>
       </button>
-      <a class="m-to-guest" id="m-to-guest" href="./">旅客端</a>
+      <a class="m-to-guest" id="m-to-guest" href="./">Guest app</a>
     </header>
 
-    <nav class="m-tabs" id="m-tabs" aria-label="商家端"></nav>
+    <nav class="m-tabs" id="m-tabs" aria-label="Hotel console"></nav>
 
     <main class="m-main" id="m-main" aria-live="polite"></main>
   </div>
 
   <div class="m-tip" id="m-tip" role="tooltip" hidden></div>
   <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
-  <noscript><p class="noscript">需要启用 JavaScript 才能使用小宿商家版。</p></noscript>
+  <noscript><p class="noscript">NanaHotel for Hotels needs JavaScript to run.</p></noscript>
 </body>
 </html>

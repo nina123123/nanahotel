@@ -1,4 +1,4 @@
-import { todayCN, earliestCheckIn, checkStay, formatDateCN } from '../../util/dates.js';
+import { todayIn, earliestCheckIn, checkStay, formatDate, formatRange, DEFAULT_TIME_ZONE, resolveTimeZone } from '../../util/dates.js';
 import { distanceM } from '../../util/geo.js';
 import * as simPricing from './pricing.js';
 import { CATEGORIES, CATEGORY_LABELS, normalizeCategory, parseKeyword, hotelMatchesKeyword, RATE_TOKENS } from './supplier.js';
@@ -8,7 +8,7 @@ export { CATEGORIES, CATEGORY_LABELS };
 
 const STATUS = { city_not_supported: 404, hotel_not_found: 404 };
 
-/** Typed error with a user-facing Chinese `message`. */
+/** Typed error with a user-facing English `message`. */
 export class HotelError extends Error {
   constructor(code, message, details) {
     super(message);
@@ -20,8 +20,11 @@ export class HotelError extends Error {
 }
 
 const SORTS = new Set(['recommended', 'price_asc', 'price_desc', 'rating', 'distance']);
-const SORT_LABELS = { recommended: '综合推荐', price_asc: '价格从低到高', price_desc: '价格从高到低', rating: '评分', distance: '距离' };
-const MAX_RADIUS_M = 20000;
+const SORT_LABELS = { recommended: 'our picks', price_asc: 'price, low to high', price_desc: 'price, high to low', rating: 'rating', distance: 'distance' };
+const M_PER_MILE = 1609.344;
+const DEFAULT_RADIUS_MILES = 2;
+const MAX_RADIUS_MILES = 12;
+const MAX_RADIUS_M = Math.round(MAX_RADIUS_MILES * M_PER_MILE);
 const MAX_CHILDREN = 6;
 
 function present(v) {
@@ -30,7 +33,7 @@ function present(v) {
 
 function num(v) {
   if (!present(v)) return null;
-  const n = typeof v === 'number' ? v : Number(String(v).replace(/[¥￥,，元\s]/g, ''));
+  const n = typeof v === 'number' ? v : Number(String(v).replace(/[$,\s]|usd|dollars?/gi, ''));
   return Number.isFinite(n) ? n : null;
 }
 
@@ -44,9 +47,14 @@ function text(v, max = 60) {
   return typeof v === 'string' ? v.trim().slice(0, max) : '';
 }
 
-function km(m) {
-  const k = m / 1000;
-  return Number.isInteger(k) ? String(k) : k.toFixed(1);
+/** 3219 m → '2 miles', 800 m → '0.5 miles'. */
+function miles(m) {
+  const mi = Math.round((m / M_PER_MILE) * 10) / 10;
+  return `${Number.isInteger(mi) ? mi : mi.toFixed(1)} mile${mi === 1 ? '' : 's'}`;
+}
+
+function money(n) {
+  return `$${Math.round(n).toLocaleString('en-US')}`;
 }
 
 function median(nums) {
@@ -57,8 +65,14 @@ function median(nums) {
 }
 
 function toCategories(v) {
-  const list = Array.isArray(v) ? v : present(v) ? String(v).split(/[\s,，、]+/) : [];
+  const list = Array.isArray(v) ? v : present(v) ? String(v).split(/[\s,/]+/) : [];
   return [...new Set(list.map(normalizeCategory).filter(Boolean))];
+}
+
+/** '2 adults and 1 child'. */
+export function partyText(adults, children = 0) {
+  const a = `${adults} adult${adults === 1 ? '' : 's'}`;
+  return children ? `${a} and ${children} ${children === 1 ? 'child' : 'children'}` : a;
 }
 
 /** The deepest active promotion covering the night of `date`, or null. */
@@ -69,9 +83,10 @@ function promoOn(promos, date) {
 }
 
 /**
- * A RoomOffer with the hotel's own 特惠 applied: a night covered by an active promotion costs
+ * A RoomOffer with the hotel's own promotions applied: a night covered by an active promotion costs
  * round(price × discount) (the deepest one when several cover it), and a rate with any such night carries
- * `promo: { id, title, discount }` (the deepest it used). Pure: the offer passed in is not changed.
+ * `promo: { id, title, discount }` (the deepest it used). Taxes and fees shrink with the price. Pure: the offer
+ * passed in is not changed.
  * @param {object} offer  RoomOffer
  * @param {Array<{ id: string, title: string, discount: number, from: string, to: string }>} promos  active ones
  */
@@ -91,13 +106,15 @@ export function applyPromotions(offer, promos) {
         });
         if (!used) return rate;
         const perRoom = nightly.reduce((sum, n) => sum + n.price, 0);
-        return { ...rate, nightly, totalPrice: perRoom * (offer.rooms || 1), promo: { id: used.id, title: used.title, discount: used.discount } };
+        const totalPrice = perRoom * (offer.rooms || 1);
+        const taxesAndFees = Number.isFinite(rate.taxesAndFees) && rate.totalPrice > 0 ? Math.round((rate.taxesAndFees * totalPrice) / rate.totalPrice) : rate.taxesAndFees;
+        return { ...rate, nightly, totalPrice, taxesAndFees, promo: { id: used.id, title: used.title, discount: used.discount } };
       }),
     })),
   };
 }
 
-/** The promotion a bookable rate of the offer uses (the deepest), for the hotel's 特惠 tag; null when none. */
+/** The promotion a bookable rate of the offer uses (the deepest), for the hotel's deal tag; null when none. */
 function offerPromo(offer) {
   let best = null;
   for (const rt of offer.roomTypes) {
@@ -123,12 +140,16 @@ export function withPromotions(promotions, pricing = simPricing) {
 }
 
 /**
- * Supplier-agnostic hotel service: normalizes search params, resolves landmarks, prices and ranks
- * hotels. Methods are synchronous (callers may still `await` them).
+ * Supplier-agnostic hotel service: normalizes search params, resolves landmarks, prices and ranks hotels. Methods
+ * are synchronous (callers may still `await` them).
+ *
+ * Dates: a stay is checked against the HOTEL's own date (its city's time zone, with the before-6-AM rule for the
+ * night in progress). Missing dates default to the user's tonight (`timeZone`: the user's zone) when that night is
+ * still bookable at the hotel, else to the hotel's tonight.
  *
  * @param {{ supplier: import('./supplier.js').HotelSupplier, clock?: { now: () => Date }, pricing?: { buildRoomOffer, lowestNightly, findRate },
  *           promotions?: { activeFor(hotelId: string): Array<{ id, title, discount, from, to }> } }} deps
- *   promotions: the hotels' own 特惠 (merchant.js createPromotionBook). An active one covering a night discounts that
+ *   promotions: the hotels' own deals (merchant.js createPromotionBook). An active one covering a night discounts that
  *   night everywhere a price comes from here: search results' lowest price (+ `promo` on the hotel), room rates
  *   (+ `promo` on each discounted rate) and priceCheck, so quotes, orders and extensions charge what the cards showed.
  */
@@ -137,15 +158,15 @@ export function createHotelService({ supplier, clock = { now: () => new Date() }
   const offerFor = (hotel, opts) => applyPromotions(pricing.buildRoomOffer(hotel, opts), promosOf(promotions, hotel.id));
 
   function supportedText() {
-    return supplier.listCities().map((c) => c.name).join('、');
+    return supplier.listCities().map((c) => c.name).join(', ');
   }
 
   function requireCity(cityText) {
     const raw = text(cityText, 40);
-    if (!raw) throw new HotelError('city_required', '请告诉我要去哪个城市');
+    if (!raw) throw new HotelError('city_required', 'Which city are you going to?');
     const city = supplier.resolveCity(raw);
     if (!city) {
-      throw new HotelError('city_not_supported', `演示版暂时只覆盖：${supportedText()}。「${raw}」还没有数据`, { city: raw });
+      throw new HotelError('city_not_supported', `The demo covers ${supportedText()}. "${raw}" isn't covered yet`, { city: raw });
     }
     return city;
   }
@@ -154,11 +175,18 @@ export function createHotelService({ supplier, clock = { now: () => new Date() }
     return supplier.resolveCity(hotel.city) || undefined;
   }
 
-  function stayOrThrow(checkIn, checkOut, ErrorClass, opts = {}) {
+  function zoneOfHotel(hotel) {
+    return resolveTimeZone(hotel.timeZone || cityOfHotel(hotel)?.zone || DEFAULT_TIME_ZONE);
+  }
+
+  /** The stay checked at the hotel (its zone), defaulting to the user's tonight (`userZone`) when that still works there. */
+  function stayOrThrow(checkIn, checkOut, ErrorClass, { zone, userZone, ...opts } = {}) {
     const now = clock.now();
-    const stay = checkStay(checkIn, checkOut, todayCN(now), { ...opts, earliestCheckIn: earliestCheckIn(now) });
+    const hotelZone = resolveTimeZone(zone);
+    const userTonight = userZone ? earliestCheckIn(now, resolveTimeZone(userZone)) : undefined;
+    const stay = checkStay(checkIn, checkOut, todayIn(hotelZone, now), { ...opts, earliestCheckIn: earliestCheckIn(now, hotelZone), defaultCheckIn: userTonight });
     if (stay.error) throw new ErrorClass('invalid_dates', stay.error);
-    return stay;
+    return { ...stay, today: todayIn(hotelZone, now), earliest: earliestCheckIn(now, hotelZone) };
   }
 
   /** Children count as occupants (beds) but do not change the price. */
@@ -169,31 +197,27 @@ export function createHotelService({ supplier, clock = { now: () => new Date() }
     return { rooms: r, adults: a, children: c };
   }
 
-  function partyText(adults, children) {
-    return `${adults}位成人${children ? `、${children}名儿童` : ''}`;
-  }
-
   function resolveNear(city, near, tokens, notes) {
     if (near) {
       const lm = supplier.resolveLandmark(city.name, near);
       if (!lm) {
-        notes.push(`没找到「${near}」这个地点，先按全城搜索`);
+        notes.push(`Couldn't find "${near}" in ${city.name}, so I searched the whole city`);
         return { landmark: null, tokens };
       }
-      if (lm.matched === 'partial' && !near.includes(lm.name)) notes.push(`「${near}」按「${lm.name}」附近来找`);
+      if (lm.matched === 'partial' && !near.toLowerCase().includes(lm.name.toLowerCase())) notes.push(`Searched near ${lm.name} for "${near}"`);
       return { landmark: lm, tokens };
     }
-    // Models often put a place into `keyword` ('西湖'); treat it as `near` only on an exact match.
-    if (tokens.length === 1) {
-      const lm = supplier.resolveLandmark(city.name, tokens[0]);
+    // Models often put a place into `keyword` ('Times Square'); treat it as `near` only on an exact match.
+    if (tokens.length) {
+      const lm = supplier.resolveLandmark(city.name, tokens.join(' '));
       if (lm && lm.matched === 'exact') return { landmark: lm, tokens: [] };
     }
     return { landmark: null, tokens };
   }
 
   /**
-   * Distance from a landmark's edge (lakes and beaches are big). Hotels "on" the edge get a stable
-   * 100-350 m instead of a row of identical zeros.
+   * Distance from a landmark's edge (parks and beaches are big). Hotels "on" the edge get a stable 100–350 m
+   * instead of a row of identical zeros.
    */
   function distanceFrom(landmark, location) {
     const raw = distanceM(location, landmark.location);
@@ -221,8 +245,8 @@ export function createHotelService({ supplier, clock = { now: () => new Date() }
   }
 
   /**
-   * Progressive relaxation of the hard filters (radius, categories) so the user rarely gets an empty
-   * answer; every step leaves a note. Keywords never filter, they only rank (see keywordNotes).
+   * Progressive relaxation of the hard filters (radius, categories) so the user rarely gets an empty answer; every
+   * step leaves a note. Keywords never filter, they only rank (see keywordNotes).
    */
   function findWithRelaxation(city, landmark, radiusM, cats) {
     const attempts = [{ r: radiusM, cats }];
@@ -236,14 +260,14 @@ export function createHotelService({ supplier, clock = { now: () => new Date() }
       const found = collect(city, landmark, a.r, a.cats);
       if (!found.length) continue;
       const notes = [];
-      if (a.r > radiusM) notes.push(`${km(radiusM)}公里内没有找到合适的，已扩大到${km(a.r)}公里`);
-      if (cats.length && !a.cats.length) notes.push(`附近没有${cats.map((c) => CATEGORY_LABELS[c]).join('/')}酒店，给你看看其他类型`);
+      if (a.r > radiusM) notes.push(`Nothing suitable within ${miles(radiusM)}, so I widened the search to ${miles(a.r)}`);
+      if (cats.length && !a.cats.length) notes.push(`No ${cats.map((c) => CATEGORY_LABELS[c].toLowerCase()).join('/')} hotels there, so here are other kinds`);
       return { found, notes, radiusM: a.r };
     }
-    return { found: [], notes: ['附近暂时没有找到酒店'], radiusM };
+    return { found: [], notes: ['No hotels found nearby'], radiusM };
   }
 
-  /** 含早 is a rate property: a hotel matches when it has a bookable breakfast rate for this stay. */
+  /** Breakfast is a rate property: a hotel matches when it has a bookable breakfast rate for this stay. */
   function sellsBreakfast(offer) {
     return offer.roomTypes.some((rt) => rt.rates.some((r) => r.available && r.breakfast > 0));
   }
@@ -254,10 +278,10 @@ export function createHotelService({ supplier, clock = { now: () => new Date() }
     const hit = new Set(pool.flatMap((h) => h.matchedKeywords));
     const matched = tokens.filter((t) => hit.has(t));
     const missing = tokens.filter((t) => !hit.has(t));
-    if (!matched.length) return [`没有找到完全符合「${tokens.join(' ')}」的酒店，以下按${SORT_LABELS[sort] || SORT_LABELS.recommended}排序`];
-    if (missing.length) return [`没有找到「${missing.join(' ')}」相关的酒店，已优先显示符合「${matched.join(' ')}」的`];
+    if (!matched.length) return [`Nothing matches "${tokens.join(' ')}", so these are sorted by ${SORT_LABELS[sort] || SORT_LABELS.recommended}`];
+    if (missing.length) return [`Nothing matches "${missing.join(' ')}"; hotels with "${matched.join(' ')}" come first`];
     if (tokens.length > 1 && !pool.some((h) => h.matchedKeywords.length === tokens.length)) {
-      return [`没有同时符合「${tokens.join(' ')}」的酒店，已按符合条件多少排序`];
+      return [`No hotel has all of "${tokens.join(' ')}"; the ones with the most come first`];
     }
     return [];
   }
@@ -274,7 +298,7 @@ export function createHotelService({ supplier, clock = { now: () => new Date() }
         const hi = Math.ceil((priceMax * f) / 10) * 10;
         fit = avail.filter((h) => within(h, priceMin, hi));
         if (fit.length) {
-          notes.push(`预算 ¥${priceMax} 以内没有合适的，放宽到了 ¥${hi}`);
+          notes.push(`Nothing under ${money(priceMax)} a night, so I went up to ${money(hi)}`);
           return { pool: fit, forceSort: null };
         }
       }
@@ -282,12 +306,12 @@ export function createHotelService({ supplier, clock = { now: () => new Date() }
     if (priceMin !== null) {
       fit = avail.filter((h) => within(h, null, priceMax));
       if (fit.length) {
-        notes.push(`没有 ¥${priceMin} 以上的，给你看看其他价位`);
+        notes.push(`Nothing from ${money(priceMin)} up, so here are other price points`);
         return { pool: fit, forceSort: null };
       }
     }
     const cheapest = Math.min(...avail.map((h) => h.lowestPrice));
-    notes.push(`预算 ¥${priceMax} 附近订不到，最便宜的也要 ¥${cheapest}/晚，先按价格从低到高列出来`);
+    notes.push(`Nothing close to ${money(priceMax)} a night: the cheapest is ${money(cheapest)}, so these are sorted from low to high`);
     return { pool: avail, forceSort: 'price_asc' };
   }
 
@@ -307,7 +331,7 @@ export function createHotelService({ supplier, clock = { now: () => new Date() }
     const med = median(list.filter((h) => h.lowestPrice !== null).map((h) => h.lowestPrice));
     const score = (h) => {
       if (h.lowestPrice === null) return -1;
-      const rating = Math.min(1, Math.max(0, ((h.rating ?? 4.2) - 4.0) / 0.9));
+      const rating = Math.min(1, Math.max(0, ((h.rating ?? 4.2) - 3.6) / 1.3));
       const value = Math.min(1, Math.max(0, 0.5 + 0.5 * Math.log2(med / h.lowestPrice)));
       const pop = Math.min(1, Math.log10((h.reviewCount || 0) + 1) / 4);
       if (!landmark) return 0.5 * rating + 0.38 * value + 0.12 * pop;
@@ -319,14 +343,24 @@ export function createHotelService({ supplier, clock = { now: () => new Date() }
     return scored.map((x) => x.h);
   }
 
-  /** @returns HotelSearchResult (see docs/SPEC.md) */
+  function radiusMilesOf(params) {
+    if (present(params.radiusMiles)) return Math.round(clamp(params.radiusMiles, 0.3, MAX_RADIUS_MILES, DEFAULT_RADIUS_MILES) * 10) / 10;
+    if (present(params.radiusKm)) return Math.round((clamp(params.radiusKm, 0.5, 20, 3.2) / 1.609344) * 10) / 10;
+    return DEFAULT_RADIUS_MILES;
+  }
+
+  /**
+   * @param {object} params  HotelSearch (see docs/SPEC.md); `timeZone` is the user's zone (for "tonight")
+   * @returns HotelSearchResult
+   */
   function searchHotels(params = {}) {
     const now = clock.now();
     const city = requireCity(params.city);
-    const stay = stayOrThrow(params.checkIn, params.checkOut, HotelError);
+    const zone = resolveTimeZone(city.zone);
+    const stay = stayOrThrow(params.checkIn, params.checkOut, HotelError, { zone, userZone: params.timeZone });
     const { adults, rooms, children } = party(params.adults, params.rooms, params.children);
     const occupants = adults + children;
-    const radiusKm = Math.round(clamp(params.radiusKm, 0.5, 20, 3) * 10) / 10;
+    const radiusMiles = radiusMilesOf(params);
     const limit = Math.round(clamp(params.limit, 1, 10, 6));
     let priceMin = num(params.priceMin);
     let priceMax = num(params.priceMax);
@@ -335,21 +369,21 @@ export function createHotelService({ supplier, clock = { now: () => new Date() }
     if (priceMin !== null && priceMax !== null && priceMin > priceMax) [priceMin, priceMax] = [priceMax, priceMin];
     const keyword = text(params.keyword, 60);
     const near = text(params.near, 60);
-    const kw = parseKeyword(keyword, { ignore: [city.name, city.fullName] });
+    const kw = parseKeyword(keyword, { ignore: [city.name.toLowerCase(), city.fullName.toLowerCase()] });
     const categories = [...new Set([...toCategories(params.categories), ...kw.categories])];
     let sort = SORTS.has(params.sort) ? params.sort : 'recommended';
 
     const notes = [];
     if (!present(params.checkIn)) {
-      notes.push(stay.checkIn < todayCN(now)
-        ? `没说日期，现在是凌晨，先按今晚（凌晨入住：${formatDateCN(stay.checkIn)}入住、${formatDateCN(stay.checkOut)}离店）查的`
-        : '没说日期，先按今晚入住、住1晚查的');
-    } else if (!present(params.checkOut)) notes.push('没说离店日期，先按住1晚查的');
+      notes.push(stay.checkIn < stay.today
+        ? `No dates given and it's after midnight, so I searched the night in progress (check in ${formatDate(stay.checkIn)}, check out ${formatDate(stay.checkOut)})`
+        : `No dates given, so I searched ${stay.nights === 1 ? 'one night' : `${stay.nights} nights`} from ${stay.checkIn === stay.today ? 'tonight' : formatDate(stay.checkIn)}`);
+    } else if (!present(params.checkOut)) notes.push('No check-out date given, so I searched one night');
 
     const { landmark, tokens } = resolveNear(city, near, kw.tokens, notes);
     if (sort === 'distance' && !landmark) sort = 'recommended';
 
-    const relaxed = findWithRelaxation(city, landmark, Math.round(radiusKm * 1000), categories);
+    const relaxed = findWithRelaxation(city, landmark, Math.round(radiusMiles * M_PER_MILE), categories);
     notes.push(...relaxed.notes);
 
     const priceCtx = { checkIn: stay.checkIn, checkOut: stay.checkOut, adults, children, rooms, city, now };
@@ -360,10 +394,11 @@ export function createHotelService({ supplier, clock = { now: () => new Date() }
       const lowestPrice = promos.length ? simPricing.lowestNightlyOf(offerOf()) : pricing.lowestNightly(hotel, priceCtx);
       const matchedKeywords = tokens.filter((t) => (RATE_TOKENS.has(t) ? sellsBreakfast(offerOf()) : hotelMatchesKeyword(hotel, [t])));
       const out = { ...hotel, distanceM: d, lowestPrice, matchedKeywords, fitsParty: true };
+      if (Number.isFinite(d)) out.distanceMiles = Math.round((d / M_PER_MILE) * 10) / 10;
       const promo = promos.length && lowestPrice !== null ? offerPromo(offerOf()) : null;
       if (promo) out.promo = promo;
       if (lowestPrice === null) {
-        // "Does not fit" is not 满房: tell them apart so nobody is told a hotel is full when it is not.
+        // "Doesn't fit" is not sold out: tell them apart so nobody hears a hotel is full when it is not.
         const maxOcc = Math.max(0, ...offerOf().roomTypes.map((rt) => rt.maxOccupancy));
         if (maxOcc && rooms * maxOcc < occupants) Object.assign(out, { fitsParty: false, maxOccupancy: maxOcc, needRooms: Math.ceil(occupants / maxOcc) });
       }
@@ -372,9 +407,10 @@ export function createHotelService({ supplier, clock = { now: () => new Date() }
     const tooSmall = priced.filter((h) => !h.fitsParty);
     if (tooSmall.length) {
       const m = Math.min(...tooSmall.map((h) => h.maxOccupancy));
-      notes.push(`${partyText(adults, children)}订${rooms}间：有${tooSmall.length}家酒店的房型每间最多住${m}人，住不下，建议订${Math.ceil(occupants / m)}间或选家庭房`);
+      const need = Math.ceil(occupants / m);
+      notes.push(`${partyText(adults, children)} in ${rooms} room${rooms === 1 ? '' : 's'}: ${tooSmall.length} hotel${tooSmall.length === 1 ? "'s rooms sleep" : "s' rooms sleep"} at most ${m}, so book ${need} rooms or a suite there`);
     }
-    if (priced.length && priced.every((h) => h.lowestPrice === null && h.fitsParty)) notes.push('所选日期附近的酒店都满房了，换个日期或区域试试？');
+    if (priced.length && priced.every((h) => h.lowestPrice === null && h.fitsParty)) notes.push('Everything around there is sold out for these dates; try other dates or another area?');
 
     const budget = applyBudget(priced, priceMin, priceMax, notes);
     if (budget.forceSort) sort = budget.forceSort;
@@ -384,9 +420,12 @@ export function createHotelService({ supplier, clock = { now: () => new Date() }
     return {
       query: {
         city: city.name,
+        state: city.state,
+        timeZone: zone,
         keyword: keyword || null,
         near: near || null,
-        radiusKm,
+        radiusMiles,
+        radiusKm: Math.round(radiusMiles * 1.609344 * 10) / 10,
         checkIn: stay.checkIn,
         checkOut: stay.checkOut,
         nights: stay.nights,
@@ -399,6 +438,7 @@ export function createHotelService({ supplier, clock = { now: () => new Date() }
         categories,
         sort,
         limit,
+        currency: 'USD',
       },
       landmark: landmark ? { name: landmark.name, location: { ...landmark.location }, area: landmark.area || '' } : null,
       hotels,
@@ -412,11 +452,11 @@ export function createHotelService({ supplier, clock = { now: () => new Date() }
     return supplier.getHotel(text(id, 80)) || null;
   }
 
-  /** @returns {{ hotel, offer: RoomOffer, datesAssumed: boolean }} */
-  function getRoomOffer({ hotelId, checkIn, checkOut, adults, rooms, children } = {}) {
+  /** @returns {{ hotel, offer: RoomOffer, datesAssumed: boolean }}  `timeZone` is the user's zone (for "tonight") */
+  function getRoomOffer({ hotelId, checkIn, checkOut, adults, rooms, children, timeZone } = {}) {
     const hotel = getHotel(hotelId);
-    if (!hotel) throw new HotelError('hotel_not_found', '没有找到这家酒店，可能是编号有误，请重新搜索');
-    const stay = stayOrThrow(checkIn, checkOut, HotelError);
+    if (!hotel) throw new HotelError('hotel_not_found', "Couldn't find that hotel; the id may be wrong. Please search again");
+    const stay = stayOrThrow(checkIn, checkOut, HotelError, { zone: zoneOfHotel(hotel), userZone: timeZone });
     const p = party(adults, rooms, children);
     const offer = offerFor(hotel, { checkIn: stay.checkIn, checkOut: stay.checkOut, ...p, city: cityOfHotel(hotel), now: clock.now() });
     return { hotel, offer, datesAssumed: stay.datesAssumed };
@@ -425,19 +465,20 @@ export function createHotelService({ supplier, clock = { now: () => new Date() }
   /** Re-price one rate for booking. Throws BookingError (hotel_not_found, invalid_dates, rate_not_found, too_many_guests, sold_out). */
   function priceCheck({ hotelId, rateId, checkIn, checkOut, rooms = 1, adults = 2, children = 0 } = {}) {
     const hotel = getHotel(hotelId);
-    if (!hotel) throw new BookingError('hotel_not_found', '没有找到这家酒店，请重新搜索');
-    const stay = stayOrThrow(checkIn, checkOut, BookingError, { allowDefaults: false });
+    if (!hotel) throw new BookingError('hotel_not_found', "Couldn't find that hotel; please search again");
+    const stay = stayOrThrow(checkIn, checkOut, BookingError, { zone: zoneOfHotel(hotel), allowDefaults: false });
     const kids = Math.round(clamp(children, 0, MAX_CHILDREN, 0));
     const offer = offerFor(hotel, { checkIn: stay.checkIn, checkOut: stay.checkOut, adults, children: kids, rooms, city: cityOfHotel(hotel), now: clock.now() });
     const hit = pricing.findRate(offer, text(rateId, 40));
-    if (!hit) throw new BookingError('rate_not_found', '这个价格方案不存在或已下架，请重新查看房型');
+    if (!hit) throw new BookingError('rate_not_found', "That rate isn't offered anymore; please look at the rooms again");
     const { rates, ...roomType } = hit.roomType;
     const occupants = adults + kids;
     if (rooms * roomType.maxOccupancy < occupants) {
-      throw new BookingError('too_many_guests', `${roomType.name}每间最多住${roomType.maxOccupancy}人，${partyText(adults, kids)}需要至少${Math.ceil(occupants / roomType.maxOccupancy)}间`);
+      const need = Math.ceil(occupants / roomType.maxOccupancy);
+      throw new BookingError('too_many_guests', `The ${roomType.name} sleeps up to ${roomType.maxOccupancy}; ${partyText(adults, kids)} need at least ${need} rooms`);
     }
     if (!hit.rate.available) {
-      throw new BookingError('sold_out', `${roomType.name}在 ${stay.checkIn} 至 ${stay.checkOut} 已订满，换个房型或日期试试`);
+      throw new BookingError('sold_out', `The ${roomType.name} is sold out for ${formatRange(stay.checkIn, stay.checkOut, stay.today)}; try another room or other dates`);
     }
     return { hotel, roomType, rate: hit.rate };
   }
@@ -446,6 +487,7 @@ export function createHotelService({ supplier, clock = { now: () => new Date() }
     source: supplier.source,
     listCities: () => supplier.listCities(),
     resolveCity: (t) => supplier.resolveCity(t),
+    zoneOfHotel,
     searchHotels,
     getHotel,
     getRoomOffer,

@@ -1,8 +1,8 @@
 {
-  "name": "hotel-agent",
+  "name": "nanahotel",
   "version": "0.1.0",
   "private": true,
-  "description": "小宿 · AI 订房管家（演示版）：对话式酒店搜索与模拟预订",
+  "description": "NanaHotel: an AI hotel concierge (demo): chat to find, book and manage US hotel stays, with simulated inventory and test-mode payments",
   "type": "module",
   "main": "src/server.js",
   "engines": {

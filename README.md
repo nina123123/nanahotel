@@ -1,219 +1,244 @@
-# 小宿 · AI 订房管家（MVP）
+# NanaHotel: an AI hotel concierge (demo)
 
-一个像 Omni、Instinct 那样"打个电话就把事办了"的助理，面向国内旅客、国内酒店：找酒店、订房，到店前、住店期间、离店之后，都在一个对话里办完。
+NanaHotel is a chat assistant that gets a hotel stay done the way a phone call to a good concierge would: find a
+hotel, book it, and then handle everything before arrival, during the stay and after check-out, all in one
+conversation. It is the US English edition of 小宿, the Chinese product this repository was copied from. The
+assistant is **Nana**, a calm 3D plush capybara with an orange on its head.
 
-> 「这周五去杭州，西湖边住两晚，两个人，600 以内」
-> → 它算好日期（11月6日周五入住），回一两句话，同时发来酒店卡片（照片、评分、离西湖多远、起价）→ 点一家 → 房型卡片（含早、免费取消、总价）→ 点「订」→ 确认单 → **你点「确认预订」** → 模拟支付 → 订好了。也可以照它说的回「订第1家」「好」。
+> "This Friday in New York near Times Square, two nights, under $300"
+> → Nana works out the dates (check-in Fri, Nov 6), answers in a sentence or two and sends hotel cards (photo,
+> rating, distance from Times Square, all-in price per night) → tap a hotel → room cards (breakfast, free
+> cancellation, total) → tap **Book** → the booking summary → **you tap "Confirm booking"** → test-mode payment
+> (card or Apple Pay) → booked. You can also just reply "Book #1", "Yes" or "#2".
 >
-> 订好之后：「帮我规划一下那天的行程」→ 行程卡片；「帮我叫车去酒店」→ 叫车卡片，**你点「确认叫车」** 才派车（司机、车牌、到哪了）；「我到了，帮我办入住」→ 房号、电子房卡、Wi-Fi；「送两条毛巾」→ 送物进度；「明早7点叫醒我」「订明天的早餐」；「再住一晚」→ **你点「确认续住」** 并支付；「我要退房」→ 账单和积分；「开发票」；「写个好评」→ 草稿，**你点「发布点评」** 才发布。
+> After booking: "Plan my day" → an itinerary card; "Get me a ride to the hotel" or "Pick me up at JFK" → a ride
+> quote, and only **your tap on "Confirm ride"** books it (driver, car, plate, live progress); "I'm here, check me
+> in" → room number, digital key, Wi-Fi; "Two more towels please" → delivery status; "Wake me up at 7am",
+> "Book breakfast for tomorrow"; "One more night" → **you tap "Confirm extension"** and pay; "I'd like to check out"
+> → the bill and Nana Rewards points; "Email me a receipt"; "Write a review" → a draft that is posted only when
+> **you tap "Post review"**.
 
-界面像一通和小宿的电话：暖奶油色加琥珀色（深色模式是黑金），中间是对话和卡片，底部是通话栏——麦克风、输入框、拨打/挂断。点「打给小宿」开始通话：计时、声波，小宿在说的时候可以直接插话。**语音识别先是模拟的**：点麦克风，会给出几句"你可以说"的话（跟着进度变：订房时是「订第1家」，住店时是「送两条毛巾」），点一句就当你说了，会像转写一样一个字一个字出来再发出去；也可以直接打字。通话中，如果浏览器有中文语音（iPhone、电脑），小宿会把回复念出来；安卓 app 的 WebView 没有语音，只显示文字。
+The screen feels like a call with Nana: warm cream and amber (black and gold in dark mode), the conversation and its
+cards in the middle, and a call bar at the bottom with a mic, a text box and call / hang up. **Speech recognition is
+simulated for now**: the mic offers a few "you could say" phrases that follow the journey ("Book #1" while booking,
+"Two more towels please" during the stay); tap one and it is typed out like a transcript and sent. You can always
+type. During a call the browser reads Nana's replies aloud when it has an English voice.
 
-带路的是**小宿**，一只头顶橘子、情绪稳定的卡皮巴拉：顶部头像旁写着它在干嘛（在想…、正在输入…、下一步点哪儿），每段回复下面给出能直接点的快捷回复，订好后它去泡温泉庆祝，晾着它太久会打盹，点它一下橘子会掉下来。顶部的「我的安排」列出订好的酒店、房号和正在路上的车、送物，点开是这次住店的全部卡片（入住后可以直接出示电子房卡）。
+Nana shows what it is doing next to its avatar (Thinking…, Typing…, what to tap next), offers quick replies under
+each answer, goes off to the hot spring when you book, naps when left alone, and drops its orange when poked.
+**My trips** lists your bookings with their room numbers, rides on the way and deliveries; open one to see every card
+of that stay, including the digital key after check-in.
 
-花钱和公开发布的事只能你自己点：确认预订、确认取消、确认叫车、确认续住、发布点评。AI 只能准备确认卡片。
+Anything that spends money or posts publicly happens only on your tap: Confirm booking, Confirm cancellation, Confirm
+ride, Confirm extension, Post review. The AI can only prepare those cards.
 
-**演示版说明：酒店、房型、价格、库存、订单、支付全部是模拟的。** 酒店是虚构的，按真实城市的商圈和地标生成（例如西湖、外滩、春熙路），不会产生真实预订，也不会扣款。酒店数据接在一个"供应商接口"后面，以后接高德、携程、美团或飞猪时只需要替换这一层。
+## Demo mode
 
-## 手机 app 版
+**Out of the box everything is simulated: hotels, rooms, prices, availability, bookings and payments.** The hotels are
+fictional (314 of them in 16 US cities), placed around real neighborhoods and landmarks (Times Square, the Strip,
+South Beach, Waikiki). No real booking is made and nothing is charged. The hotel data sits behind a supplier
+interface (`src/services/hotels/supplier.js`), which is where the live hotel connector plugs in (see
+[Going live](#going-live)).
 
-不需要电脑和服务器：整个小宿（包括"后端"）都在手机里运行，对话和订单存在手机本地。
+Demo cities: New York, Los Angeles, San Francisco, Las Vegas, Miami, Orlando, Chicago, Seattle, Boston,
+Washington DC, New Orleans, Honolulu, San Diego, Nashville, Austin and Denver. Each city has its own time zone,
+neighborhoods (why stay there, nearby landmarks, prices from), airports and hotels in four categories (budget,
+midscale, upscale, luxury). Prices rise on weekends, US holidays and big weekends (Thanksgiving, Christmas to New
+Year, July 4, Memorial Day, Labor Day, spring break in Miami, Orlando and Las Vegas) and follow each city's season.
+The same hotel on the same night costs the same for everyone.
 
-**安卓**
+Prices are **all-in**: the nightly price on every card already includes taxes and any resort or destination fee,
+and the breakdown (`taxesAndFees`) is on the booking summary, so nothing is added at checkout.
 
-1. 在手机上打开 https://github.com/nina123123/for_nina/releases （需要登录 GitHub），找最新的「小宿 安卓版」，下载 `xiaosu-*.apk` 并安装。第一次安装需要允许浏览器"安装未知应用"。
-2. 它和小账本是两个独立的 app，互不影响。以后每次更新代码，GitHub 会自动打包新版本，直接覆盖安装，数据不会丢。
+`npm run demo` goes one step further and needs no API key at all: Nana's replies come from a script
+(`src/llm/scripted-llm.js`) that understands the demo phrases in `docs/US-CONTRACT.md` §12, so the whole journey
+can be tried and tested offline.
 
-**iPhone**
+## Run it
 
-1. 代码合并到 main 以后，用 Safari 打开 https://nina123123.github.io/For_nina/hotel-agent/app/
-2. 点「分享 → 添加到主屏幕」，之后像 app 一样打开。需要 iOS 16.4 或以上。
-
-**AI：安卓 app 内置 DeepSeek，所有下载的人直接用**
-
-- 仓库设置了 `DEEPSEEK_API_KEY` 这个 Secret 后，GitHub 打包 APK 时会把 Key 编进安卓 app。打开就是真实 AI，app 上没有任何设置项。
-- 设置方法：GitHub 仓库 → Settings → Secrets and variables → Actions → New repository secret，名字填 `DEEPSEEK_API_KEY`，值填 DeepSeek 的 Key（在 platform.deepseek.com 申请）。设好之后，下一次改动代码或在 Actions 里手动运行「小宿 Android APK」，就会出带 AI 的新版本。
-- Key 不在代码仓库里，网页代码也拿不到它，只有安卓原生层在请求 DeepSeek 时才加上。
-- **但它还是在 APK 里，有心人解包就能提取。** 所以请给这个 app 单独建一个 Key，只充小额余额（DeepSeek 是预付费，最多损失余额），并定期看用量。每台手机每 10 分钟最多发 20 条，防止误用烧钱。
-- 要公开推广，应该改成"服务器转发"：Key 放在自己的服务器上，app 只连服务器。
-- 没设置 Key 时，以及 iPhone 网页版，都是**演示模式**：回复是预先写好的脚本，可以完整体验找酒店、选房型、预订、支付和取消。网页版是公开网站，不能放 Key，要用真实 AI 也需要先有转发服务器。
-
-## 快速开始（电脑上运行）
-
-需要 Node.js 20 或更高版本，不需要安装任何依赖。
+Node.js 20 or later; there is nothing to install.
 
 ```bash
-cd hotel-agent
+cd nanahotel
 
-# 1) 不需要 API Key 的演示（脚本模拟 AI 回复，只能跑通固定流程）
-npm run demo            # 打开 http://localhost:8787
+# 1) The no-key demo (scripted replies, simulated hotels; data is cleared on restart)
+npm run demo            # open http://localhost:8787
 
-# 2) 接真实大模型
-cp .env.example .env    # 填一个 DEEPSEEK_API_KEY（或其他厂商的 Key）
-npm start               # 打开 http://localhost:8787
+# 2) With a real AI model
+cp .env.example .env    # set ANTHROPIC_API_KEY (or OPENAI_API_KEY)
+npm start               # open http://localhost:8787
 ```
 
-想用手机在同一局域网打开：把 `.env` 里的 `HOST` 改成 `0.0.0.0`，然后在手机上访问 `http://电脑的局域网IP:8787`。
+- To open it from a phone on the same Wi-Fi, set `HOST=0.0.0.0` in `.env` and visit `http://<your computer's IP>:8787`.
+- Behind a reverse proxy such as nginx, set `TRUST_PROXY=1` so rate limits use each visitor's address, not the proxy's.
+- Rate limits: `CHAT_TURNS_PER_WINDOW` (messages per user per 10 minutes, default 30) and `WRITES_PER_IP_PER_WINDOW`
+  (writes per address per 10 minutes, default 600, 0 = off). Raise the second when many people share one public
+  address (an office or event Wi-Fi).
+- Time zones: the page sends the browser's zone in `X-Time-Zone`, so "today" and "tonight" are the traveler's own.
+  `DEFAULT_TIME_ZONE` (default `America/New_York`) is used when a request has none or an invalid one. Times at the
+  hotel (pickups, wake-up calls, breakfast, check-in) are always in the hotel's zone.
 
-部署在 Nginx 等反向代理后面时，设置 `TRUST_PROXY=1`，这样按 IP 限流时用的是用户的真实地址，而不是代理的地址。
+### AI models
 
-限流可在 `.env` 里调整：`CHAT_TURNS_PER_WINDOW`（每个用户 10 分钟内最多发几条，默认 30），`WRITES_PER_IP_PER_WINDOW`（同一 IP 10 分钟内最多多少次写操作，默认 600，填 0 关闭）。很多人共用一个出口 IP 时（公司、活动现场的 Wi-Fi）可以调大后者。
-
-## 能做什么
-
-- **找酒店**：城市、地标或商圈（"西湖边""国贸附近""迪士尼"）、日期、人数、间数、预算、档次（经济型、舒适型、高档型、豪华型）、偏好（亲子、近地铁、含早……）。
-- **比房型**：每个房型给出床型、面积、窗户、楼层，以及几种价格计划（含早或不含早、免费取消、限时取消、不可取消），每晚价格分开列出。
-- **订房**：AI 只能准备"确认单"。真正下单必须由你点确认单上的「确认预订」，然后在模拟支付里选微信支付或支付宝。确认和支付时会再核一次价格、房态和取消政策（例如免费取消时间已过），有变化就请你重新报价。
-- **深夜入住**：凌晨 0 点到 6 点之间，"今晚"指的是正在过的这一夜，可以订前一天日期入住的房间。
-- **查订单、取消订单**：直接说「看看我的订单」「取消刚才那单」。取消前会先告诉你按取消政策要扣多少、退多少，你点「确认取消」才会取消。
-- **住哪儿合适**：每个城市都有几个商圈，各自附带"住这里的理由"、周边地标和起价，也可以搜景点和交通枢纽。
-- **记住你**：入住人、手机号、偏好可以在右上角「⋯ → 常用入住人」里保存，也可以在对话里说「记住」。保存后订房不用再问；改已保存的信息前 AI 会先跟你确认。
-- **保护手机号**：无论是保存的手机号，还是在聊天里直接输入的手机号，大模型都只能看到打码后的样子（`138****5678`），完整号码只留在服务器上，下单时才填进去。
-- **搜寻资料**（可选）：在 `.env` 里填 `BOCHA_API_KEY` 后，AI 可以用博查联网搜索攻略、开放时间、活动等。
-
-订好之后（全部模拟，房号、司机、车牌、Wi-Fi 密码等按订单号固定生成；细节见 `docs/JOURNEY.md`）：
-
-- **到店前**：按订单的城市和日期排行程；叫车、接机（报价 15 分钟有效，确认后派司机，进度会自己往前走）；问能不能提前入住；开发票。
-- **入住**：房号、楼层、电子房卡（模拟「靠近门锁开门」）、Wi-Fi、早餐时间和地点、退房时间。
-- **住店期间**：送毛巾、牙刷、打扫（已接单 → 配送中 → 已送达）；订早餐或餐厅位子；叫醒服务；查设施和前台电话；续住（确认并模拟支付后订单的离店日期和总价随之更新）。
-- **离店**：退房账单（预付、杂费、应付）和积分；开电子发票；会员等级和积分；AI 按你说的起草点评，你点了才发布。
-
-覆盖 16 个城市，共 374 家模拟酒店：北京、上海、广州、深圳、杭州、成都、重庆、西安、南京、苏州、厦门、三亚、青岛、长沙、武汉、丽江。价格在周末和法定节假日会上浮，三亚、丽江等旅游城市有季节性；同一酒店、同一天的价格固定，对所有用户都一样。
-
-## 商家端（演示）
-
-给酒店前台和店长用的黑金色控制台，和旅客端用同一个服务、同一份数据，两边是连着的（细节见 `docs/MERCHANT.md`）：
-
-- **经营概览**：今晚入住率、今日营收、平均房价和 RevPAR、预抵/预离/在住；近 7 天或 30 天的营收柱状图和入住率走势，
-  未来 14 天的入住率预测（90% 满房预警线）；订单来源（小宿、携程、美团、飞猪、直订）；小宿给的经营建议。
-  图表可以悬停或用键盘查看每一天，每张图下面都能展开数据表。
-- **房态与入住**：按楼层的房态图（空净、空脏、在住、预抵、预离、维修，金色边框是小宿的客人）；小宿客人今天到店，
-  前台点「办理入住」，旅客那边马上收到房号。
-- **住客服务工单**：旅客在小宿里要的毛巾、提前入住、叫醒、订餐都会出现在这里；前台点「接单」「送达」，
-  旅客的送物卡片跟着变成「配送中」「已送达」；提前入住可以同意或婉拒。
-- **点评与营销**：评分分布和关键词，小宿客人的点评带「小宿」标记，回复后旅客在点评卡片上能看到；
-  开一个特惠（如未来 7 天 85 折），旅客再搜这家酒店就会看到特惠价。
-
-打开方式：电脑上运行后打开 `http://localhost:8787/merchant`；手机 app 和 iPhone 网页版在「⋯ → 切换到商家端（演示）」，
-商家端右上角「旅客端」回去。酒店里的其他客人、渠道和历史点评是按酒店确定性生成的模拟数据，小宿里真实发生的订单、
-请求和点评叠加在上面；商家端只显示打码后的姓名和手机号。
-
-## 为什么"AI 不能自己下单"
-
-参考了 Instinct 的经验（它被批评过未经确认就发邮件、下单），并结合国内规定：《电子商务法》规定提交订单即成立合同，《在线旅游经营服务管理暂行规定》要求信息真实、禁止大数据杀熟。所以这里的设计是：
-
-1. AI 调用 `prepare_booking` 只会生成一张确认单，15 分钟有效，上面写明房型、日期、入住人和取消政策。
-2. 只有用户点击按钮才会调用 `POST /api/quotes/:id/confirm` 和 `/api/orders/:id/pay`。服务端会再核一次价格和房态，并检查订单属于当前用户。
-3. 支付或取消完成后，服务端会给 AI 的对话历史写一条「系统通知」，AI 才知道订单状态。用户自己输入的「【系统通知」会被改写，无法伪造。
-
-## 切换大模型
-
-国内正式上线必须使用已备案的模型。目前通过 OpenAI 兼容接口支持以下五家，在 `.env` 里改 `LLM_PROVIDER` 即可：
-
-| LLM_PROVIDER | 厂商 | 默认模型 | Key |
+| `LLM_PROVIDER` | Provider | Default model | Key |
 |---|---|---|---|
-| `deepseek`（默认） | DeepSeek | `deepseek-v4-flash` | `DEEPSEEK_API_KEY` |
-| `qwen` | 通义千问（百炼） | `qwen-flash` | `DASHSCOPE_API_KEY` |
-| `kimi` | 月之暗面 | `kimi-k2.6` | `MOONSHOT_API_KEY` |
-| `glm` | 智谱 | `glm-4.7-flash` | `ZHIPUAI_API_KEY` |
-| `doubao` | 火山方舟 | `doubao-seed-2-1-lite-260915` | `ARK_API_KEY` |
+| `anthropic` (default) | Anthropic Claude | `claude-opus-5-5` | `ANTHROPIC_API_KEY` |
+| `openai` | OpenAI | `gpt-5-mini` | `OPENAI_API_KEY` |
 
-- 默认关闭"深度思考"，回复更快、更便宜；需要时设置 `LLM_THINKING=on`。
-- `LLM_MODEL`、`LLM_BASE_URL` 可以换模型或改走自建网关。
-- 各家接口差异（思考开关、工具调用的流式格式、`reasoning_content` 回传、内容安全报错等）都在 `src/llm/client.js` 里处理了。
-- 注意：DeepSeek 已在 2026-07 下线 `deepseek-chat` 和 `deepseek-reasoner` 这两个名字。
+`ANTHROPIC_MODEL` / `OPENAI_MODEL` pick another model, `LLM_EFFORT` sets how much the model thinks before answering,
+and `LLM_BASE_URL` routes through a gateway. With no key, Nana explains in the chat how to set one up. All options are
+in `.env.example` and `docs/LIVE.md`.
 
-## 结构
+## What Nana can do
+
+- **Find hotels**: city, landmark or neighborhood ("near Times Square", "on the Strip", "near Disney World"), dates,
+  guests (adults, children, rooms), budget, category and wishes (family friendly, pool, free parking, pets,
+  breakfast…).
+- **Compare rooms**: bed, size in sq ft, view, floor, and a few rate plans per room (room only or with breakfast;
+  free cancellation, free cancellation until a nearer deadline, or non-refundable), all-in price per night.
+- **Book**: the AI only prepares a booking summary (valid for 15 minutes). The booking is placed when you tap
+  **Confirm booking**, then you pay in the test-mode checkout (credit or debit card, or Apple Pay; "Test mode — you
+  won't be charged"). Price, availability and the cancellation policy are checked again on confirm and on pay; if
+  anything changed (say the free-cancellation deadline passed) Nana quotes again.
+- **Late at night**: between midnight and 6 AM, "tonight" means the night in progress, so you can still check in
+  for the night that started yesterday.
+- **Trips and cancellations**: "My trips", "Cancel that booking". Nana shows what the policy charges and refunds
+  first; you tap **Confirm cancellation**.
+- **Where to stay**: neighborhoods with a reason to stay, nearby landmarks and prices from; landmarks, airports and
+  stations by name.
+- **Remembers you**: first and last name, email, phone and stay preferences in **⋯ → Traveler details**, or by saying
+  "remember that". Saved details are used for the next booking; Nana asks before changing them.
+- **Protects your phone number**: the AI model only ever sees it masked (`***-***-0123`), whether it was saved or
+  typed into the chat. The full number stays on the server and is filled in when the booking is placed.
+- **Searches the web** (optional): with `BOCHA_API_KEY` set, Nana can look up opening hours, events and tips.
+
+After booking (all simulated; room numbers, drivers, plates and Wi-Fi passwords are fixed per booking; details in
+`docs/JOURNEY.md`):
+
+- **Before arrival**: an itinerary for the trip's city and dates; rides and airport pickups (a quote is valid for 15
+  minutes; once confirmed a driver is assigned and the ride moves along); early check-in requests.
+- **Check-in**: room number, floor, digital key, Wi-Fi, breakfast hours and place, check-out time.
+- **During the stay**: towels, a toothbrush kit, extra pillows, housekeeping (accepted, on the way, delivered);
+  breakfast or a restaurant table; wake-up calls; facilities and the front desk; one more night (confirmed and paid,
+  then the booking's check-out date and total change).
+- **Check-out**: the bill (prepaid, extras, due) and Nana Rewards points; an emailed receipt; membership tier
+  (Member, Gold, Platinum); a review drafted from what you said, posted only on your tap.
+
+## The hotel console (demo)
+
+**NanaHotel for Hotels** is a black-and-gold console for the front desk and the manager, on the same server and data
+as the traveler side, so the two are connected (details in `docs/MERCHANT.md`):
+
+- **Overview**: tonight's occupancy, today's revenue, ADR and RevPAR, arrivals / departures / in house; revenue and
+  occupancy for the last 7 or 30 days and a 14-day occupancy forecast (with a 90% line); bookings by channel
+  (NanaHotel, Expedia, Booking.com, Google, Direct); Nana's suggestions. Every chart can be explored by hover or
+  keyboard and has a data table.
+- **Rooms and check-in**: a room map by floor (vacant clean, vacant dirty, occupied, arriving, departing, out of
+  order; a gold border marks NanaHotel guests). When a NanaHotel guest arrives today, the desk checks them in and the
+  guest gets the room number in the chat.
+- **Guest requests**: towels, early check-in, wake-up calls and dining requests made in the chat show up here; when
+  the desk accepts and delivers, the guest's card follows; early check-in can be approved or declined.
+- **Reviews and promotions**: rating breakdown and keywords; NanaHotel guests' reviews are tagged, and replies show
+  up on the guest's review card. A deal (say 15% off for the next 7 days) prices the hotel on the guest side at once.
+
+Open `http://localhost:8787/merchant` (or **⋯ → Switch to hotel console (demo)** in the app). Other guests,
+channels and past reviews are simulated per hotel; what really happens in NanaHotel is layered on top. The console
+only ever shows masked names ("Sarah M.") and phone numbers.
+
+## Why the AI can't book on its own
+
+Assistants that send emails or place orders without asking have been rightly criticized, and a booking is a
+contract that spends the traveler's money. So:
+
+1. `prepare_booking` only creates a booking summary, valid for 15 minutes, with the room, dates, guests, the
+   all-in total and the cancellation policy.
+2. Only a tap calls `POST /api/quotes/:id/confirm` and `/api/orders/:id/pay`. The server checks the price and
+   availability again, and that the order belongs to the current user.
+3. After a payment or cancellation the server adds a `[System notice — not from the user]` to the AI's history, so
+   the AI learns the booking's status. If a user types that prefix it is rewritten, so notices cannot be forged.
+
+Showing the all-in price from the first card follows the FTC's rule on unfair or deceptive fees, which requires
+lodging prices to include mandatory fees.
+
+## Project structure
 
 ```
-hotel-agent/
+nanahotel/
   src/
-    server.js              HTTP 服务：SSE 对话、会话、报价/订单/支付/取消、我的安排/确认叫车/确认续住/发布点评、个人信息、静态页面；
-                           商家端接口 /api/merchant/*（不用 X-User-Id）和 /merchant 页面，商家的操作给旅客的对话发通知
-    config.js              读取 .env 和环境变量（全项目只有这里读环境变量）
-    llm/                   国内模型 OpenAI 兼容客户端（流式、工具调用、重试、错误归类）
+    server.js              HTTP server: chat over SSE, sessions, quotes / orders / payment / cancellation, My trips,
+                           Confirm ride / extension, Post review, traveler details, static pages; the hotel console
+                           API /api/merchant/* (no X-User-Id) and the /merchant page; hotel actions notify the guest
+    config.js              reads .env and the environment (the only module that does)
+    util/                  dates and time zones, US phone and name checks, money, ids
+    llm/                   model clients (Anthropic, OpenAI), provider settings, the scripted demo model
+    live/                  live connectors: LiteAPI hotels and payments, Google Places, Resend email, ride links
     agent/
-      agent.js             一轮对话的工具调用循环
-      tools.js             给 AI 的工具：search_hotels / get_hotel_rooms / list_areas / search_places /
-                           web_search / prepare_booking / list_orders / prepare_cancellation / save_profile，
-                           以及订好之后的 13 个（行程、叫车、提前入住、入住、送物、订餐、叫醒、住店信息、续住、退房、
-                           发票、积分、点评）
-      prompt.js            系统提示词（含当天日期、未来两周日期、节假日、用户偏好）
+      agent.js             one turn's tool-calling loop
+      tools.js             the AI's tools: search_hotels / get_hotel_rooms / list_areas / search_places / web_search /
+                           prepare_booking / list_orders / prepare_cancellation / save_profile, and 13 for the stay
+                           (itinerary, rides, early check-in, check-in, requests, dining, wake-up, stay info, extension,
+                           check-out, receipt, rewards, review)
+      prompt.js            the system prompt (today in the traveler's zone, the next two weeks, holidays, preferences)
+      text.js              the notice prefix, forged-notice neutralizing, small text helpers
     services/
-      hotels/              酒店服务 + 供应商接口 supplier.js + 模拟供应商（城市/商圈/地标、酒店生成、定价、节假日）
-      bookings.js          报价 → 订单 → 支付 → 取消，订单状态机
-      stays.js             订好之后：叫车、入住、送物、订餐、叫醒、续住、退房账单、发票、积分、点评（按时间推进状态）
-      merchant.js          商家端：经营概览、房态与前台办入住、住客工单、点评回复、特惠（其他客人按酒店和日期模拟，小宿的真实数据叠在上面）
-      places.js            城市指南（商圈、地标）
-      websearch.js         博查联网搜索（可选）
-    store/json-store.js    JSON 文件存储（data/ 目录）
-  public/                  手机优先的 H5（浅色/深色）：对话 + 卡片 + 通话栏
-    app.js                 页面：对话、通话和模拟语音、我的安排、支付和电子房卡
-    cards.js               卡片：酒店、房型、地点、订单，以及行程、叫车、入住、送物、订餐、叫醒、住店信息、续住、
-                           账单、发票、会员、点评（字段见 docs/JOURNEY.md）
-    icons.js               线条图标
-    merchant.html/.js/.css 商家端控制台（黑金色）：概览图表、房态、工单、点评与特惠（接口见 docs/MERCHANT.md）
-    art/photos/            酒店和房型照片（Codex 生成后放这里，manifest.json 列出文件；没有照片时显示色块占位）
-    pet.js                 卡皮巴拉小宿的图（SVG，带各种表情）
-    pet-rive.js            小宿的 Rive 动画：加载 art/xiaosu.riv 并跟着对话切换状态
-    art/xiaosu.riv         Rive 动画文件，由 tools/build-pet-riv.mjs 从 pet.js 的图生成
-    vendor/rive/           Rive 网页播放器（@rive-app/canvas-lite，MIT），随项目打包，不走 CDN
-  tools/build-pet-riv.mjs  生成 xiaosu.riv：改了 pet.js 的图或动画后运行 node tools/build-pet-riv.mjs
-  app/                     手机 app 版的外壳：把 src/ 的服务端代码放进页面里运行（Node 内置模块用浏览器版替身），
-                           数据存在 IndexedDB；安卓 app 和 iPhone 网页版都用它
-  android/                 安卓 app（WebView 加载 app/，原生网络通道连接模型），由 GitHub Actions 打包发布
-  test/                    单元测试 + 集成测试；e2e/ 是 Playwright 冒烟测试
-  docs/SPEC.md             设计规范（模块接口、数据结构、API）
-  docs/JOURNEY.md          订好之后的旅程：服务、工具、卡片字段、接口（前后端的约定）
-  docs/MERCHANT.md         商家端：服务、接口、数据（和旅客端怎么连着）
-  docs/ART-PROMPTS.md      用 Codex 生成 3D 毛绒小宿和酒店照片的提示词
+      hotels/              hotel service + supplier interface + the simulated supplier (cities, neighborhoods,
+                           landmarks, hotel generation, pricing, US holidays)
+      bookings.js          quote → order → payment → cancellation, the order state machine
+      stays.js             after booking: rides, check-in, requests, dining, wake-up, extension, bill, receipt,
+                           rewards, reviews (statuses move on with time)
+      merchant.js          the hotel console: overview, rooms and desk check-in, requests, review replies, deals
+      places.js            city guide (neighborhoods, landmarks)
+      websearch.js         web search (optional)
+    store/json-store.js    JSON file storage (the data/ folder)
+    http/                  SSE writer, static files
+  public/                  the mobile-first web page (light and dark): chat, cards, call bar, My trips, the console
+  app/                     the phone app shell: runs src/ inside the page (browser stand-ins for Node modules),
+                           data in IndexedDB; used by the Android app and the home-screen web app
+  android/                 the Android app (a WebView on app/), built by GitHub Actions
+  tools/                   asset builders (the Nana Rive animation)
+  test/                    unit and integration tests; e2e/ has the Playwright smoke tests and the demo server
+  docs/SPEC.md             design spec: modules, data shapes, the API
+  docs/JOURNEY.md          the stay after booking: services, tools, card fields, API
+  docs/MERCHANT.md         the hotel console: service, API, data, and how it connects to the traveler side
+  docs/US-CONTRACT.md      what the US edition agreed on (voice, locale, time zones, demo phrases)
+  docs/LIVE.md             going live: keys, real hotels, payments, places, email
+  docs/ART-PROMPTS.md      image prompts for the 3D plush Nana and the hotel photos
 ```
 
-### 小宿的动画（Rive）
+The chat is `POST /api/chat`, streamed as SSE: `status` (Searching hotels near Times Square…), `delta` (text),
+`card` (hotels, rooms, booking summary, ride, check-in…, drawn as cards by the page), `done`. My trips reads
+`GET /api/stays` and refreshes every 15 seconds while a ride or a delivery is on its way. The full API is in
+`docs/SPEC.md` and `docs/JOURNEY.md`.
 
-会动的地方（顶部头像、开场页、正在回复的头像、订好后的温泉贴纸）播放 Rive 动画；页面先显示 SVG 的小宿，Rive 加载好后无缝接替。系统开了「减少动态效果」、浏览器不支持 WebAssembly、或加载失败时，一直用 SVG 版，功能不受影响。
+Phone app: `app/` runs the whole server inside the page, so the Android app and the home-screen web app work
+offline with the demo; an Android build given a hosted server address shows that server instead.
 
-`xiaosu.riv` 里有三个画板 `Head`、`Body`、`Onsen`；`Head` 和 `Body` 的状态机叫 `pet`，有两个输入：
-- `mood`（数字）：0 平时、1 看你打字、2 思考、3 正在输入、4 开心、5 打盹、6 出错冒汗
-- `poke`（触发）：被点了一下，橘子掉下来再放回去
-
-现在这个文件是用代码生成的。以后想让设计师在 Rive 编辑器里重做得更细：画板名、状态机名和这两个输入保持不变，导出的 `.riv` 直接替换 `public/art/xiaosu.riv`，代码不用改（同时删掉 `test/pet-riv.test.js` 里「与生成器一致」那条检查）。
-
-对话用 `POST /api/chat`，以 SSE 推送 `status`（正在查找…）、`delta`（文字）、`card`（酒店、房型、确认单、叫车、入住……页面把它们画成卡片）、`done`。「我的安排」读 `GET /api/stays`，有车或送物在路上时每 15 秒刷新一次，屏幕上对应的卡片跟着更新。完整 API 见 `docs/SPEC.md` 和 `docs/JOURNEY.md`。
-
-### 照片和 3D 小宿（Codex 生成）
-
-`docs/ART-PROMPTS.md` 里是 25 条提示词：10 张 3D 毛绒卡皮巴拉小宿（平常、在听、思考、说话、开心、打盹、出错、被点、打招呼、泡温泉）和 15 张酒店照片（大堂、湖景、江景、各种房型、早餐、泳池）。在 Codex 里生成后把图片发进对话，由 Claude 压缩成 WebP 放进 `public/art/`，并更新 manifest。没有照片时卡片显示按档次着色的占位块，功能不受影响。
-
-## 测试
+## Tests
 
 ```bash
-npm test                                   # 全部单元测试和集成测试，不联网
-npm run test:app                           # 手机 app 版（浏览器里运行的版本）：演示流程、本地存储、真实 AI 模式、安卓桥接
-npm run demo & BASE_URL=http://localhost:8787 npm run test:e2e   # 浏览器端到端：通话、卡片、订房、取消、整段住店
-BASE_URL=http://localhost:8787 npm run test:merchant             # 旅客端和商家端连着：前台办入住、工单送达、回复点评、特惠价
+npm test                                                         # all unit and integration tests, offline
+npm run test:app                                                 # the phone app build: demo flow, local storage
+npm run demo & BASE_URL=http://localhost:8787 npm run test:e2e   # browser end-to-end: call, cards, booking, the stay
+BASE_URL=http://localhost:8787 npm run test:merchant             # traveler and console together: desk check-in, requests, replies, deals
 ```
 
-## 从演示版到真实上线，还差什么
+The unit tests run on a fixed clock (Wed, Nov 4, 2026) against the simulated supplier, so they are deterministic.
+They cover the time-zone rules (a traveler in Los Angeles at 11 PM asking for "tonight"; `X-Time-Zone` checks),
+US phone, email and name validation, all-in pricing, the booking and stay journeys, and the receipt flow.
 
-**接真实酒店数据**：实现 `src/services/hotels/supplier.js` 里的接口即可，Agent、工具和订单流程都不用动。
+## Going live
 
-- 酒店基础信息：高德 Web 服务 API（`/v5/place/text`、`/v5/place/around`，住宿类型码 `100000`），需要"Web服务"类型的 Key。
-- 实时房态、价格、下单：携程、美团、飞猪或同程的分销开放平台（需要商务合作），流程一般是"查价 → 可订检查（试单）→ 创建订单 → 支付 → 供应商确认 → 取消/退款 → 状态推送"。
-- 注意：分销订单"创建成功"不等于"预订成功"。接入后订单要增加"确认中"状态。
+The demo turns into a real service one connector at a time, each switched on by its key: the AI model, real US
+hotels with live prices and payment (LiteAPI), places (Google Places) and email (Resend) for confirmations and
+receipts. Every connector starts in test mode. **See [`docs/LIVE.md`](docs/LIVE.md)** for the keys, where to put
+them (never in the code or a chat) and how to check each one.
 
-**接真实支付**：微信支付、支付宝都需要国内企业主体开通商户号。
+Before real travelers use it you will also want a privacy policy and consent for guest names, emails, phone numbers
+and trip details; a real sign-in (the demo tells users apart by a random id the browser makes); and a database
+instead of the JSON files in `data/`.
 
-**上线合规清单**（需要国内公司主体）：
+## Known limits
 
-- 网站 ICP 备案（经营性业务还需要 ICP 经营许可证）、公安联网备案。
-- 调用已备案大模型的应用，需要到属地网信办办理生成式 AI 服务**登记**，上线后公示模型名称和备案号。
-- 按《人工智能生成合成内容标识办法》显著标注"内容由AI生成"。页面在对话最上方显示「内容由 AI 生成」。
-- 个人信息保护：入住人姓名、手机号、行程属于个人信息，行踪轨迹还属于敏感个人信息。上线前需要隐私政策、单独同意、交给酒店前告知、可删除。目前全部存在本地 `data/` 目录，只会把打码后的手机号发给大模型。
-- 正式登录：MVP 用浏览器生成的随机 ID 区分用户，上线需要换成手机号验证码登录。
-
-## 已知限制
-
-- 所有酒店、价格、订单都是模拟的；2027 年节假日是按惯例推算的。
-- 没有天气查询（不想编造天气）；不接真实地图，所以距离是直线距离。
-- 每个用户的对话和订单存在服务器的 JSON 文件里，适合演示和小规模试用，正式上线需要换成数据库。
+- In demo mode every hotel, price and booking is simulated; future holidays follow the usual rules.
+- No weather (Nana won't make it up), and distances are straight-line.
+- Conversations and bookings are JSON files on the server: fine for a demo or a small pilot, not for production.

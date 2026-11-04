@@ -24,14 +24,14 @@ async function setup(t) {
   t.after(() => rm(base, { recursive: true, force: true }));
   const root = path.join(base, 'public');
   await mkdir(path.join(root, 'sub', 'dir'), { recursive: true });
-  await writeFile(path.join(root, 'index.html'), '<!doctype html><title>首页</title>');
+  await writeFile(path.join(root, 'index.html'), '<!doctype html><title>Home</title>');
   await writeFile(path.join(root, 'app.js'), 'console.log("app");');
   await writeFile(path.join(root, 'style.css'), 'body{}');
   await writeFile(path.join(root, 'icon.svg'), '<svg xmlns="http://www.w3.org/2000/svg"/>');
-  await writeFile(path.join(root, 'site.webmanifest'), '{"name":"小宿"}');
+  await writeFile(path.join(root, 'site.webmanifest'), '{"name":"NanaHotel"}');
   await writeFile(path.join(root, 'data.bin'), 'xx');
   await writeFile(path.join(root, '.hidden'), 'hidden');
-  await writeFile(path.join(root, 'sub', 'dir', 'note.txt'), '你好');
+  await writeFile(path.join(root, 'sub', 'dir', 'note.txt'), 'Hello, café');
   await writeFile(path.join(base, 'secret.txt'), 'TOP-SECRET');
   await symlink(path.join(base, 'secret.txt'), path.join(root, 'link.txt'));
 
@@ -52,7 +52,7 @@ test('safeRelativePath rejects traversal, NUL bytes, backslashes, hidden files a
   assert.equal(safeRelativePath('app.js'), 'app.js');
   assert.equal(safeRelativePath('sub/dir/note.txt'), 'sub/dir/note.txt');
   assert.equal(safeRelativePath('sub//dir/note.txt'), 'sub/dir/note.txt');
-  assert.equal(safeRelativePath('%E4%BD%A0.txt'), '你.txt');
+  assert.equal(safeRelativePath('caf%C3%A9.txt'), 'café.txt');
   for (const bad of ['', '/', '../secret.txt', 'sub/../../secret.txt', '%2e%2e/secret.txt', '%2E%2E%2Fsecret.txt',
     '..%2fsecret.txt', 'app.js%00.html', 'a\0b', '%5c..%5csecret.txt', '..\\secret.txt', '.hidden', 'sub/.git/config',
     './app.js', '%zz', '%']) {
@@ -74,13 +74,13 @@ test('contentTypeFor knows the types the H5 needs', () => {
 test('serves files with the right content type and cache headers', async (t) => {
   const port = await setup(t);
   const cases = [
-    ['/', 'text/html; charset=utf-8', 'no-cache', '<!doctype html><title>首页</title>'],
+    ['/', 'text/html; charset=utf-8', 'no-cache', '<!doctype html><title>Home</title>'],
     ['/public/index.html', 'text/html; charset=utf-8', 'no-cache', null],
     ['/public/app.js', 'text/javascript; charset=utf-8', 'public, max-age=300', 'console.log("app");'],
     ['/public/style.css', 'text/css; charset=utf-8', 'public, max-age=300', 'body{}'],
     ['/public/icon.svg', 'image/svg+xml', 'public, max-age=300', null],
     ['/public/site.webmanifest', 'application/manifest+json; charset=utf-8', 'public, max-age=300', null],
-    ['/public/sub/dir/note.txt', 'text/plain; charset=utf-8', 'public, max-age=300', '你好'],
+    ['/public/sub/dir/note.txt', 'text/plain; charset=utf-8', 'public, max-age=300', 'Hello, café'],
     ['/public/data.bin', 'application/octet-stream', 'public, max-age=300', null],
     ['/public/app.js?v=123', 'text/javascript; charset=utf-8', 'public, max-age=300', null],
   ];

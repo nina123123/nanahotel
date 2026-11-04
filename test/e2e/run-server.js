@@ -6,7 +6,7 @@ import { createScriptedLlm, demoScript } from '../../src/llm/scripted-llm.js';
 
 // A bare `node --test` treats every file under test/ as a test; a server that never exits would hang it.
 if (process.env.NODE_TEST_CONTEXT) {
-  console.log('[demo] 跳过：这是演示服务启动脚本，不是测试（用 npm run demo 运行）。');
+  console.log('[demo] skipped: this starts the demo server, it is not a test (run it with npm run demo).');
   process.exit(0);
 }
 
@@ -14,7 +14,7 @@ const base = loadConfig();
 const config = {
   ...base,
   dataDir: null,
-  llm: { provider: 'scripted', label: '脚本演示', model: 'demo-script', configured: true, keyEnv: '' },
+  llm: { provider: 'scripted', label: 'Scripted demo', model: 'demo-script', configured: true, keyEnv: '' },
   webSearch: { provider: 'bocha', apiKey: '', enabled: false },
 };
 
@@ -24,8 +24,8 @@ const running = await startServer({
   llm: createScriptedLlm(demoScript, { delayMs: 10 }),
   webSearch: { enabled: false },
 });
-console.log(`[demo] ${config.appName} 脚本演示版已启动：${running.url}`);
-console.log('[demo] 不需要 API Key；大模型回复是预先写好的脚本，酒店、价格、订单与支付均为模拟，重启后数据清空。');
+console.log(`[demo] ${config.appName} scripted demo is running: ${running.url}`);
+console.log('[demo] No API key needed: the replies are scripted, and hotels, prices, bookings and payments are simulated. Data is cleared on restart.');
 
 let stopping = false;
 const stop = () => {

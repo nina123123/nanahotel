@@ -1,28 +1,34 @@
 import * as defaultIds from '../util/ids.js';
-import { todayCN, earliestCheckIn, addDays, isValidDate, cnTimeMs, formatDateCN, weekdayCN, dayOfWeek, monthOf } from '../util/dates.js';
+import {
+  todayIn, earliestCheckIn, addDays, isValidDate, zonedTimeMs, formatDate, formatTime, weekdayLong, dayOfWeek, monthOf, dateIn, timeIn,
+  resolveTimeZone, DEFAULT_TIME_ZONE,
+} from '../util/dates.js';
+import { maskedGuestName } from '../util/names.js';
 import { hashString, hash01 } from './hotels/sim-hotels.js';
 import { findCity } from './hotels/sim-cities.js';
-import { buildRoomOffer, dayFactor } from './hotels/pricing.js';
+import { buildRoomOffer, dayFactor, parseFloors, isInn } from './hotels/pricing.js';
 import { holidayOn } from './hotels/holidays.js';
 
 /**
- * 小宿商家版 (docs/MERCHANT.md): the hotel's console over the same data as the traveler side — the overview, the
- * room grid with front-desk check-in, guests' service tickets, reviews with replies, and the hotel's promotions.
+ * NanaHotel for Hotels (docs/MERCHANT.md): the hotel's console over the same data as the traveler side — the
+ * overview, the room grid with front-desk check-in, guests' service tickets, reviews with replies, and the hotel's
+ * deals.
  *
  * The hotel's other guests (rooms, tickets, channels, review history) are simulated, deterministically per hotel id
- * and date (hashes, like pricing.js): a hotel shows the same night whenever it is looked at. What happens in 小宿 —
- * orders, requests, reviews — is layered on top with `source: 'xiaosu'` (simulated items carry `source: 'sim'`).
- * A 小宿 guest's room is the one stays.js gives at check-in (same floors, same numbering), so it is always in the
- * grid; the simulated guest who would have had that room makes way. Guests appear masked (「李*」).
+ * and date (hashes, like pricing.js): a hotel shows the same night whenever it is looked at. What happens in
+ * NanaHotel — orders, requests, reviews — is layered on top with `source: 'nanahotel'` (simulated items carry
+ * `source: 'sim'`). A NanaHotel guest's room is the one stays.js gives at check-in (same floors, same numbering), so it
+ * is always in the grid; the simulated guest who would have had that room makes way. Guests appear masked
+ * ("Sarah M.").
  *
  * The hotel's own changes are stored: a room cleaned or out of order (today only), a simulated ticket handled, a
- * reply to a simulated review, the promotions. Changes that reach a 小宿 guest (front-desk check-in, an early
+ * reply to a simulated review, the deals. Changes that reach a NanaHotel guest (front-desk check-in, an early
  * check-in answered, a reply to their review) return an `event` ({ kind, userId, sessionId, ... }) for the server to
  * turn into a notice in the guest's chat; the user id never goes to the console.
  *
- * The hotel's day is the night in progress: until 06:00 it is still the previous date (as for bookings, 凌晨入住),
- * so a guest arriving at 00:30 for "tonight" is an arrival of the night that began yesterday. Dates in and out of
- * the API stay calendar dates; "today" in the room grid shows that night until 06:00.
+ * Times are the hotel's own (its city's time zone). The hotel's day is the night in progress: until 6 AM it is still
+ * the previous date, so a guest arriving at 12:30 AM for "tonight" is an arrival of the night that began yesterday.
+ * Dates in and out of the API stay calendar dates; "today" in the room grid shows that night until 6 AM.
  *
  * Same style as stays.js: synchronous methods, the injected clock, statuses worked out when read (no timers), and no
  * Node-only imports, so it also runs inside the phone app's page.
@@ -42,22 +48,22 @@ const MAX_PROMOTIONS = 5;
 const PROMO_AHEAD_DAYS = 60;
 const MIN_DISCOUNT = 0.5;
 const MAX_DISCOUNT = 0.95;
-const MAX_TITLE_CHARS = 20;
-const MAX_REPLY_CHARS = 300;
+const MAX_TITLE_CHARS = 30;
+const MAX_REPLY_CHARS = 500;
 const MAX_ARRIVALS = 20;
 // A simulated stay never runs past this many nights (every room has a fixed day in the cycle when guests change).
 const STAY_CYCLE_DAYS = 14;
 // Any date: a hotel's room types and their floors do not depend on it.
 const REF_DATE = '2026-01-05';
 const ID_RE = /^[A-Za-z0-9_-]{1,80}$/;
-const HHMM_RE = /^([01]?\d|2[0-3])[:：]([0-5]\d)$/;
+const HHMM_RE = /^([01]?\d|2[0-3]):([0-5]\d)$/;
 
 const STATUS = {
   hotel_not_found: 404, not_found: 404, room_not_found: 404,
   invalid_action: 409, wrong_room: 409, too_many_promotions: 409, order_not_confirmed: 409,
 };
 
-/** Typed merchant error; `message` is user-facing Chinese. A stays.js error keeps its own code and status. */
+/** Typed merchant error; `message` is user-facing English. A stays.js error keeps its own code and status. */
 export class MerchantError extends Error {
   constructor(code, message, details, status) {
     super(message);
@@ -68,114 +74,117 @@ export class MerchantError extends Error {
   }
 }
 
-export const CHANNEL_LABELS = Object.freeze({ xiaosu: '小宿', ctrip: '携程', meituan: '美团', fliggy: '飞猪', direct: '直订' });
+export const CHANNEL_LABELS = Object.freeze({ nanahotel: 'NanaHotel', expedia: 'Expedia', booking: 'Booking.com', google: 'Google', direct: 'Direct' });
 const CHANNELS = Object.freeze(Object.keys(CHANNEL_LABELS));
 export const ROOM_ACTIONS = Object.freeze(['clean', 'ooo', 'release', 'check_in']);
 export const TICKET_ACTIONS = Object.freeze(['accept', 'deliver', 'done', 'approve', 'decline']);
 
-const CATEGORIES = ['economy', 'comfort', 'premium', 'luxury'];
-// stays.js assignRoom: the booked room type's floors (its defaults when a hotel has no room types), skipping
-// unlucky floors, rooms 01–28 a floor (01–08 in a courtyard inn).
-const FLOORS = { economy: [2, 8], comfort: [3, 12], premium: [5, 20], luxury: [12, 32] };
+const CATEGORIES = ['budget', 'midscale', 'upscale', 'luxury'];
+// stays.js assignRoom: the booked room type's floors (its defaults when a hotel has no room types), skipping the
+// 13th floor, rooms 01–28 a floor (01–08 in a historic inn).
+const FLOORS = { budget: [2, 6], midscale: [2, 12], upscale: [4, 24], luxury: [8, 40] };
 const INN_FLOORS = [1, 3];
-const UNLUCKY_FLOORS = new Set([4, 13, 14]);
-// How common each room type is on a floor (R1 大床 the most, R4 家庭房 / 套房 the fewest).
+const UNLUCKY_FLOORS = new Set([13]);
+// How common each room type is on a floor (R1 kings the most, suites the fewest).
 const TYPE_WEIGHTS = [0.4, 0.32, 0.18, 0.1];
-const BASE_OCCUPANCY = { economy: 0.8, comfort: 0.76, premium: 0.71, luxury: 0.66 };
-const FNB_PER_ROOM = { economy: 8, comfort: 30, premium: 85, luxury: 210 };
-const FALLBACK_PRICE = { economy: 228, comfort: 398, premium: 658, luxury: 1288 };
+const BASE_OCCUPANCY = { budget: 0.78, midscale: 0.75, upscale: 0.72, luxury: 0.68 };
+const FNB_PER_ROOM = { budget: 6, midscale: 18, upscale: 55, luxury: 140 };
+const FALLBACK_PRICE = { budget: 139, midscale: 209, upscale: 319, luxury: 649 };
 const BUSINESS_KINDS = new Set(['cbd', 'station', 'airport', 'university']);
 const LONG_STAY_KINDS = new Set(['resort', 'beach', 'inn']);
-const CHANNEL_MIX = { ctrip: 0.44, meituan: 0.24, fliggy: 0.1, direct: 0.22 };
+const CHANNEL_MIX = { expedia: 0.34, booking: 0.24, google: 0.12, direct: 0.3 };
 
-// Common surnames, most frequent first (picked with a bias towards the front).
-const SURNAMES = [
-  '王', '李', '张', '刘', '陈', '杨', '黄', '赵', '吴', '周', '徐', '孙', '马', '朱', '胡', '郭', '何', '高', '林', '罗',
-  '郑', '梁', '谢', '宋', '唐', '许', '韩', '冯', '邓', '曹', '彭', '曾', '肖', '田', '董', '袁', '潘', '于', '蒋', '蔡',
+// Common first names, most frequent first (picked with a bias towards the front), and last-name initials.
+const FIRST_NAMES = [
+  'Sarah', 'Michael', 'Jessica', 'David', 'Emily', 'James', 'Ashley', 'Chris', 'Jennifer', 'Daniel', 'Amanda', 'Matthew', 'Lauren', 'Andrew',
+  'Megan', 'Ryan', 'Rachel', 'Kevin', 'Nicole', 'Brian', 'Olivia', 'Jason', 'Sophia', 'Eric', 'Maria', 'Jose', 'Priya', 'Wei', 'Aisha',
+  'Carlos', 'Hannah', 'Tyler', 'Grace', 'Marcus', 'Elena', 'Nathan', 'Chloe', 'Omar', 'Lily', 'Diego',
 ];
-const COMPOUND_SURNAMES = ['欧阳', '司马', '上官', '诸葛', '东方', '皇甫', '令狐', '慕容', '尉迟', '长孙', '宇文', '司徒', '夏侯', '公孙', '端木', '独孤', '南宫'];
+const LAST_INITIALS = 'SMJBWDGHCLRTPKANFEOVY';
 
 // Simulated requests the front desk takes by phone.
-const SIM_ITEMS = [['毛巾', 2], ['浴巾', 1], ['矿泉水', 2], ['牙刷', 2], ['拖鞋', 2], ['枕头', 1], ['被子', 1], ['吹风机', 1], ['充电器', 1], ['衣架', 4], ['卫生纸', 2], ['打扫房间', 1]];
-const SIM_NOTES = ['放门口就行', '麻烦尽快', '要软一点的', '孩子要用', '急用，谢谢'];
-const TASK_RE = /打扫|清洁|整理|收拾|维修|修理|检修|换床|铺床|开夜床|消毒|加床/;
+const SIM_ITEMS = [['Towels', 2], ['Bath towels', 1], ['Bottled water', 2], ['Toothbrush kit', 1], ['Slippers', 2], ['Extra pillows', 2],
+  ['Blanket', 1], ['Hair dryer', 1], ['Phone charger', 1], ['Hangers', 4], ['Toilet paper', 2], ['Housekeeping', 1]];
+const SIM_NOTES = ['Just leave it at the door', 'As soon as you can, please', 'Firm pillows if possible', 'For the kids', 'Thanks so much!'];
+const TASK_RE = /housekeeping|clean|tidy|make up|turndown|repair|fix|maintenance|crib|rollaway/i;
 
 // What simulated reviews praise: [key, tag, phrases]; `${lm}` is the area's landmark, `${view}` the hotel's view.
 const PRAISE = {
-  location: ['位置好', ['位置很好，离${lm}走路就几分钟', '地段方便，出门就是${lm}', '去${lm}很方便，晚上散步回来也不远']],
-  clean: ['干净卫生', ['房间很干净，床品都有消毒封条', '卫生做得很好，卫生间也很干净', '打扫得很干净，没有异味']],
-  service: ['服务热情', ['前台很热情，入住办得很快', '服务很周到，主动帮忙拿行李', '前台帮忙寄存行李、推荐吃的，很贴心']],
-  breakfast: ['早餐丰富', ['早餐品种挺多，有现做的面条和小笼包', '早餐不错，中西式都有']],
-  bed: ['床很舒服', ['床很舒服，睡得很好', '枕头有软硬两种可以选，睡得很香']],
-  quiet: ['安静', ['晚上很安静，睡得踏实', '房间很安静，一夜好眠']],
-  value: ['性价比高', ['这个价格很值', '性价比很高，下次还会选']],
-  view: ['景观好', ['${view}很美，拉开窗帘就能看到', '房间的${view}很惊艳']],
-  transit: ['交通方便', ['离车站很近，赶车很方便', '去机场很方便，适合赶早班机']],
-  facility: ['设施好', ['泳池和健身房都不错', '设施很新，房间设计感很强']],
-  family: ['亲子友好', ['带孩子住很方便，还送了小玩具', '亲子房布置得很用心，孩子很喜欢']],
+  location: ['Great location', ['Great location, a few minutes on foot from ${lm}', 'Perfect spot, with ${lm} right there', 'Easy to get to ${lm} and back in the evening']],
+  clean: ['Spotless', ['The room was spotless', 'Very clean room and bathroom', 'Housekeeping did a great job every day']],
+  service: ['Friendly staff', ['The front desk was friendly and check-in was quick', 'Staff went out of their way to help with our bags', 'Great tips for dinner from the front desk']],
+  breakfast: ['Good breakfast', ['Breakfast had plenty of choice, with eggs made to order', 'Breakfast was really good']],
+  bed: ['Comfy bed', ['The bed was super comfortable', 'Slept great, the pillows were perfect']],
+  quiet: ['Quiet', ['Nice and quiet at night', 'A quiet room, we slept really well']],
+  value: ['Great value', ['Great value for the price', 'Worth every penny, we would book again']],
+  view: ['Great views', ['The ${view} was amazing', 'We loved the ${view} from our room']],
+  transit: ['Convenient', ['Close to the station, very convenient', 'Easy to get to the airport for an early flight']],
+  facility: ['Great amenities', ['The pool and the gym were great', 'Modern rooms with a great design']],
+  family: ['Family-friendly', ['Great with kids, they even had a little gift for ours', 'Our kids loved the family room']],
 };
-// What they complain about: label (as in 「3 条点评提到隔音」), tag, phrases, how text mentions it, the hotel's
+// What they complain about: label (as in "3 reviews mention noise"), tag, phrases, how text mentions it, the hotel's
 // remedy (for a drafted reply) and advice (for the overview).
 const ISSUES = {
   noise: {
-    label: '隔音', tag: '隔音一般', re: /隔音|吵|噪音|噪声/,
-    phrases: ['隔音一般，晚上能听到走廊的声音', '临街的房间有点吵，隔音不太好', '隔壁说话声听得很清楚，隔音需要改进'],
-    remedy: '我们正在为临街房间更换隔音窗，入住时也可以优先为您安排安静的高楼层房间',
-    advice: '可以优先给在意的客人排安静的高楼层，回复时说明隔音改造的安排',
+    label: 'noise', tag: 'Noisy', re: /noise|noisy|loud|thin walls|hear the|neighbors/i,
+    phrases: ['The walls are thin and we could hear the hallway at night', 'Street-facing rooms are noisy', 'We could hear the neighbors talking'],
+    remedy: "we're installing quieter windows in street-facing rooms, and we're happy to give you a quiet, higher room next time",
+    advice: 'give guests who care about it quieter, higher rooms, and mention the window upgrade in replies',
   },
   breakfast: {
-    label: '早餐', tag: '早餐一般', re: /早餐/,
-    phrases: ['早餐品种少，去晚了基本没什么吃的', '早餐比较单调，几天都一样'],
-    remedy: '早餐会增加现做的品种，并在高峰时段及时补餐',
-    advice: '可以看看早餐高峰的补餐节奏，增加一两样现做的品种',
+    label: 'breakfast', tag: 'Breakfast could be better', re: /breakfast/i,
+    phrases: ['Breakfast had little choice and things ran out early', 'Breakfast was the same every day'],
+    remedy: "we're adding made-to-order options at breakfast and restocking faster at busy times",
+    advice: 'check how fast breakfast is restocked at peak times and add a made-to-order option',
   },
   parking: {
-    label: '停车', tag: '停车难', re: /停车|车位/,
-    phrases: ['停车位太少，绕了好几圈才停好', '停车不太方便，要停到隔壁'],
-    remedy: '我们已和周边停车场合作，入住时前台可以帮您登记优惠停车',
-    advice: '可以在订单确认时提示附近的合作停车场',
+    label: 'parking', tag: 'Parking', re: /parking|valet|garage/i,
+    phrases: ['Parking was expensive and hard to find', 'The valet took forever'],
+    remedy: 'we now partner with a nearby garage, and the front desk can sign you up for the discounted rate',
+    advice: 'mention the partner garage in the confirmation email',
   },
   aircon: {
-    label: '空调', tag: '空调一般', re: /空调/,
-    phrases: ['空调声音有点大', '空调制冷效果一般'],
-    remedy: '工程部已经逐间检修空调',
-    advice: '可以安排工程部集中检修一轮空调',
+    label: 'the AC', tag: 'AC issues', re: /\bac\b|a\/c|air condition|heating|hvac/i,
+    phrases: ['The AC was loud', "The AC didn't cool the room well"],
+    remedy: "our engineering team is servicing every room's AC unit",
+    advice: 'have engineering service the AC units floor by floor',
   },
   bathroom: {
-    label: '卫浴', tag: '卫浴待改进', re: /卫生间|淋浴|热水|水压|浴室/,
-    phrases: ['卫生间有点小，淋浴水压不稳', '淋浴的热水要放很久才来'],
-    remedy: '我们已经安排检修热水和淋浴水压',
-    advice: '可以检查一下热水循环和淋浴水压',
+    label: 'the bathroom', tag: 'Bathroom needs work', re: /bathroom|shower|water pressure|hot water/i,
+    phrases: ['The bathroom was small and the water pressure was weak', 'The shower took ages to get hot'],
+    remedy: "we've scheduled repairs for the hot water and the shower pressure",
+    advice: 'check the hot water loop and the shower pressure',
   },
   dated: {
-    label: '设施老旧', tag: '设施有点旧', re: /设施.{0,2}旧|老旧|陈旧|装修.{0,2}旧|地毯/,
-    phrases: ['设施有点旧，地毯有点味道', '房间装修偏旧，和图片有差距'],
-    remedy: '酒店正在分批升级客房，会优先为您安排已经翻新的房间',
-    advice: '可以把翻新过的房间优先排给新订单，房型照片也更新一下',
+    label: 'dated rooms', tag: 'Dated rooms', re: /dated|worn|carpet|tired|older than/i,
+    phrases: ['The room felt dated and the carpet was worn', 'The room looked older than in the photos'],
+    remedy: "we're renovating rooms floor by floor and will put you in a renovated room next time",
+    advice: 'give new bookings the renovated rooms first and update the room photos',
   },
   frontdesk: {
-    label: '前台效率', tag: '办理慢', re: /排队|等了|办理慢|效率/,
-    phrases: ['前台办入住排队等了二十多分钟', '退房的时候等了很久'],
-    remedy: '高峰时段我们会增加前台人手，也可以提前在线办理入住',
-    advice: '可以在入住高峰（16:00–19:00）多排一位前台',
+    label: 'check-in waits', tag: 'Slow check-in', re: /waited|in line|slow check|queue|took a long time/i,
+    phrases: ['We waited 20 minutes in line to check in', 'Check-out took a long time'],
+    remedy: "we're adding front desk staff at busy times, and you can check in through NanaHotel too",
+    advice: 'add a front desk agent for the 4–7 PM check-in rush',
   },
   wifi: {
-    label: '网络', tag: 'Wi-Fi不稳', re: /wi-?fi|网络|网速|信号/i,
-    phrases: ['Wi-Fi 时断时续，开视频会议很卡', '房间里网速很慢'],
-    remedy: '网络已经扩容升级，如果还有问题可以随时联系前台',
-    advice: '可以测一下客房楼层的 Wi-Fi 覆盖',
+    label: 'Wi-Fi', tag: 'Spotty Wi-Fi', re: /wi-?fi|internet|signal|connection/i,
+    phrases: ['The Wi-Fi kept dropping during video calls', 'The internet in the room was really slow'],
+    remedy: "we've upgraded the network, and if anything is still slow the front desk can help right away",
+    advice: 'test the Wi-Fi coverage on the guest floors',
   },
 };
-const LIKED = [['location', /位置|地段|离.{0,8}近|方便/, '位置'], ['clean', /干净|卫生/, '房间卫生'], ['service', /服务|前台|热情|贴心/, '服务'],
-  ['breakfast', /早餐/, '早餐'], ['bed', /床|睡/, '睡眠体验'], ['view', /景|窗外|风景/, '景观']];
+const LIKED = [['location', /location|walk|close to|steps from|convenient/i, 'location'], ['clean', /clean|spotless/i, 'clean rooms'],
+  ['service', /staff|service|front desk|friendly|helpful/i, 'team'], ['breakfast', /breakfast/i, 'breakfast'], ['bed', /bed|slept|sleep|pillow/i, 'beds'],
+  ['view', /view/i, 'views']];
 
 function str(v, max) {
   return typeof v === 'string' ? v.trim().slice(0, max) : typeof v === 'number' ? String(v).slice(0, max) : '';
 }
 
-/** One line of the hotel's text (a promotion title): no control characters, no 【】 that could pass for a notice. */
+/** One line of the hotel's text (a deal title): no control characters, no brackets that could pass for a notice. */
 function clean(v, max) {
-  return str(v, max * 2).replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').replace(/[【】]/g, '').replace(/\s+/g, ' ').trim().slice(0, max);
+  return str(v, max * 2).replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').replace(/[[\]【】]/g, '').replace(/\s+/g, ' ').trim().slice(0, max);
 }
 
 /** Free text (a reply): line breaks kept, nothing cut, so an over-long one can be refused. */
@@ -183,7 +192,7 @@ function cleanText(v) {
   return (typeof v === 'string' ? v : '')
     .replace(/\r\n?/g, '\n')
     .replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/g, ' ')
-    .replace(/[【】]/g, '')
+    .replace(/[[\]【】]/g, '')
     .replace(/[ \t]+/g, ' ')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
@@ -193,32 +202,25 @@ const iso = (ms) => new Date(ms).toISOString();
 const pad2 = (n) => String(n).padStart(2, '0');
 const round = (x, digits = 0) => Math.round(x * 10 ** digits) / 10 ** digits;
 const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
-const cnDate = (isoText) => todayCN(new Date(Date.parse(isoText)));
 const dayIndex = (date) => Math.round(Date.parse(`${date}T00:00:00Z`) / 86400000);
 const fill = (template, vars) => template.replace(/\$\{(\w+)\}/g, (_, k) => vars[k] ?? '');
-
-/** 'HH:MM' in China time of an ISO instant. */
-function hhmmOf(isoText) {
-  return new Date(Date.parse(isoText) + 8 * HOUR).toISOString().slice(11, 16);
-}
+const capitalize = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
+const lowerFirst = (s) => (s ? s[0].toLowerCase() + s.slice(1) : s);
+const plural = (n, word, many = `${word}s`) => `${n} ${n === 1 ? word : many}`;
 
 function hhmm(minutes) {
   return `${pad2(Math.floor(minutes / 60) % 24)}:${pad2(minutes % 60)}`;
 }
 
-/** '李明' → '李*', '欧阳娜娜' → '欧阳*', 'John Smith' → 'Smith*': the console only shows a guest's surname. */
+/** 'Sarah Miller' → 'Sarah M.': the console only shows a guest's first name and last initial. */
 export function maskName(name) {
-  const s = String(name ?? '').trim();
-  if (!s) return '客人';
-  if (/^[一-鿿]/.test(s)) return `${(s.length > 2 && COMPOUND_SURNAMES.find((c) => s.startsWith(c))) || s[0]}*`;
-  const words = s.split(/\s+/);
-  return `${words[words.length - 1].slice(0, 20)}*`;
+  return maskedGuestName(name);
 }
 
 /** Largest-remainder split of `n` slots by weight; every weight gets at least one while slots last. */
 function splitByWeight(n, weights) {
-  const sum = weights.reduce((a, b) => a + b, 0) || 1;
-  const exact = weights.map((w) => (w / sum) * n);
+  const total = weights.reduce((a, b) => a + b, 0) || 1;
+  const exact = weights.map((w) => (w / total) * n);
   const counts = exact.map((x) => Math.max(n >= weights.length ? 1 : 0, Math.floor(x)));
   let left = n - counts.reduce((a, b) => a + b, 0);
   const order = exact.map((x, i) => [x - Math.floor(x), i]).sort((a, b) => b[0] - a[0] || a[1] - b[1]);
@@ -232,45 +234,44 @@ function splitByWeight(n, weights) {
   return counts;
 }
 
-/** Index into a list picked with a bias towards its front (the list's most common entries). */
+/** An entry picked with a bias towards the front of the list (its most common entries). */
 function biasedPick(list, u, power = 1.6) {
   return list[Math.min(list.length - 1, Math.floor(list.length * u ** power))];
 }
 
-/** '晴舍精品酒店（杭州湖滨店）' → '晴舍精品酒店' (a reply signs with the short name). */
-function shortName(name) {
-  return String(name || '酒店').replace(/（[^）]*）$/, '') || '酒店';
+function simGuestName(u1, u2) {
+  return `${biasedPick(FIRST_NAMES, u1)} ${LAST_INITIALS[Math.floor(u2 * LAST_INITIALS.length)]}.`;
 }
 
 function requireDate(v, what) {
   const d = str(v, 10);
-  if (!isValidDate(d)) throw new MerchantError('invalid_date', `${what}需要是 YYYY-MM-DD 格式的有效日期`);
+  if (!isValidDate(d)) throw new MerchantError('invalid_date', `The ${what} needs to be a valid date (YYYY-MM-DD)`);
   return d;
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// Promotions (shared with the hotel service, which prices with them)
+// Deals (shared with the hotel service, which prices with them)
 // ---------------------------------------------------------------------------------------------------------------
 
 /**
- * The hotels' own promotions, stored in `merchant_promotions`. The hotel service reads `activeFor` to discount the
- * nights they cover (search, rooms, quotes, orders); the merchant service lists, creates and switches them.
- * @param {{ store: { collection(name: string) }, clock?: { now: () => Date }, ids?: Partial<typeof defaultIds> }} deps
+ * The hotels' own deals ("promotions"), stored in `merchant_promotions`. The hotel service reads `activeFor` to
+ * discount the nights they cover (search, rooms, quotes, orders); the merchant service lists, creates and switches them.
+ * @param {{ store: { collection(name: string) }, clock?: { now: () => Date }, ids?: Partial<typeof defaultIds>, zoneOf?: (hotelId: string) => string }} deps
  */
-export function createPromotionBook({ store, clock = { now: () => new Date() }, ids } = {}) {
+export function createPromotionBook({ store, clock = { now: () => new Date() }, ids, zoneOf } = {}) {
   if (!store) throw new Error('createPromotionBook: store is required');
   const idgen = { ...defaultIds, ...(ids || {}) };
   const col = store.collection('merchant_promotions');
   const nowMs = () => clock.now().getTime();
 
-  /** Promotions switched on, as the hotel service prices with them: [{ id, title, discount, from, to }]. */
+  /** Deals switched on, as the hotel service prices with them: [{ id, title, discount, from, to }]. */
   function activeFor(hotelId) {
     const out = [];
     for (const p of col.values()) if (p.hotelId === hotelId && p.active) out.push({ id: p.id, title: p.title, discount: p.discount, from: p.from, to: p.to });
     return out;
   }
 
-  /** Every promotion of a hotel (stored records), newest first. */
+  /** Every deal of a hotel (stored records), newest first. */
   function listFor(hotelId) {
     return col.values().filter((p) => p.hotelId === hotelId).sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : a.id < b.id ? 1 : -1));
   }
@@ -281,30 +282,31 @@ export function createPromotionBook({ store, clock = { now: () => new Date() }, 
   }
 
   /**
-   * A new promotion, switched on: title 1–20 characters, discount 0.5–0.95 (0.85 = 85折), nights `from`–`to`
-   * (inclusive) between today and 60 days ahead; at most 5 per hotel that have not ended.
+   * A new deal, switched on: title 1–30 characters, discount 0.5–0.95 (0.85 = 15% off), nights `from`–`to`
+   * (inclusive) between today and 60 days ahead (the hotel's dates); at most 5 per hotel that have not ended.
    */
-  function create(hotelId, { title, discount, from, to } = {}) {
+  function create(hotelId, { title, discount, from, to } = {}, zone = zoneOf?.(hotelId)) {
     const t = nowMs();
-    const today = todayCN(new Date(t));
-    // Until 06:00 the night in progress can still be booked (凌晨入住), so it can be discounted too.
-    const earliest = earliestCheckIn(new Date(t));
+    const z = resolveTimeZone(zone, DEFAULT_TIME_ZONE);
+    const today = todayIn(z, t);
+    // Until 6 AM the night in progress can still be booked, so it can be discounted too.
+    const earliest = earliestCheckIn(new Date(t), z);
     const name = clean(title, MAX_TITLE_CHARS + 1);
-    if (!name) throw new MerchantError('invalid_title', '特惠需要一个名称，如「限时特惠」');
-    if (name.length > MAX_TITLE_CHARS) throw new MerchantError('invalid_title', `特惠名称最多${MAX_TITLE_CHARS}个字`);
+    if (!name) throw new MerchantError('invalid_title', 'A deal needs a name, like "Fall special"');
+    if (name.length > MAX_TITLE_CHARS) throw new MerchantError('invalid_title', `Deal names can be up to ${MAX_TITLE_CHARS} characters`);
     const d = typeof discount === 'number' ? discount : typeof discount === 'string' && discount.trim() ? Number(discount) : NaN;
     if (!Number.isFinite(d) || d < MIN_DISCOUNT || d > MAX_DISCOUNT) {
-      throw new MerchantError('invalid_discount', `折扣需要在 ${MIN_DISCOUNT}–${MAX_DISCOUNT} 之间（0.85 就是 85 折）`);
+      throw new MerchantError('invalid_discount', `The discount needs to be between ${MIN_DISCOUNT} and ${MAX_DISCOUNT} (0.85 means 15% off)`);
     }
-    const first = requireDate(from, '开始日期（from）');
-    const last = requireDate(to, '结束日期（to）');
+    const first = requireDate(from, 'start date (from)');
+    const last = requireDate(to, 'end date (to)');
     const latest = addDays(today, PROMO_AHEAD_DAYS);
-    if (first < earliest) throw new MerchantError('invalid_date', `开始日期 ${first} 已经过去了，最早从今天（${today}）开始`);
-    if (last > latest) throw new MerchantError('invalid_date', `只能设置今天起 ${PROMO_AHEAD_DAYS} 天内的特惠（最晚 ${latest}）`);
-    if (last < first) throw new MerchantError('invalid_date', '结束日期不能早于开始日期');
+    if (first < earliest) throw new MerchantError('invalid_date', `The start date ${first} has already passed; the earliest is today (${today})`);
+    if (last > latest) throw new MerchantError('invalid_date', `Deals can run up to ${PROMO_AHEAD_DAYS} days ahead (until ${latest})`);
+    if (last < first) throw new MerchantError('invalid_date', "The end date can't be before the start date");
     const running = col.values().filter((p) => p.hotelId === hotelId && p.to >= earliest).length;
     if (running >= MAX_PROMOTIONS) {
-      throw new MerchantError('too_many_promotions', `每家酒店最多同时有 ${MAX_PROMOTIONS} 个没结束的特惠，等一个结束后再新建`);
+      throw new MerchantError('too_many_promotions', `Each hotel can have up to ${MAX_PROMOTIONS} deals that haven't ended; wait for one to end first`);
     }
     const at = iso(t);
     const rec = {
@@ -315,12 +317,12 @@ export function createPromotionBook({ store, clock = { now: () => new Date() }, 
     return rec;
   }
 
-  /** Switches a promotion on or off (`active` true / false); the time it was on is kept for its view count. */
+  /** Switches a deal on or off (`active` true / false); the time it was on is kept for its view count. */
   function setActive(hotelId, id, active) {
     const p = get(hotelId, id);
-    if (!p) throw new MerchantError('not_found', '没有找到这个特惠活动');
+    if (!p) throw new MerchantError('not_found', "Couldn't find that deal");
     const on = active === true || active === 'true' ? true : active === false || active === 'false' ? false : null;
-    if (on === null) throw new MerchantError('invalid_active', 'active 需要是 true（开启）或 false（关闭）');
+    if (on === null) throw new MerchantError('invalid_active', 'active needs to be true (on) or false (off)');
     if (on === p.active) return p;
     const t = nowMs();
     const next = on
@@ -342,7 +344,7 @@ export function createPromotionBook({ store, clock = { now: () => new Date() }, 
  *           bookings: { ordersForHotel }, stays: { listHotelStays, listHotelRequests, frontDeskCheckIn, advanceRequest, replyReview },
  *           hotels: { getHotel }, clock?: { now: () => Date }, promotions?: ReturnType<typeof createPromotionBook>,
  *           ids?: Partial<typeof defaultIds> }} deps
- *   promotions defaults to a promotion book over the same store (the one the hotel service prices with).
+ *   promotions defaults to a deal book over the same store (the one the hotel service prices with).
  */
 export function createMerchantService({ store, bookings, stays, hotels, clock = { now: () => new Date() }, promotions, ids } = {}) {
   if (!store) throw new Error('createMerchantService: store is required');
@@ -353,12 +355,12 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
   const roomMarks = store.collection('merchant_rooms');
   const ticketMarks = store.collection('merchant_tickets');
   const replies = store.collection('merchant_replies');
-  // Read only: which hotels 小宿 guests booked (bookings.js owns the collection).
+  // Read only: which hotels NanaHotel guests booked (bookings.js owns the collection).
   const orderRecords = store.collection('orders');
   const nowMs = () => clock.now().getTime();
   const models = new Map();
 
-  /** A stays.js error keeps its code, status and Chinese message. */
+  /** A stays.js error keeps its code, status and message. */
   function viaStays(fn) {
     try {
       return fn();
@@ -378,17 +380,17 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
     } catch {
       hotel = null;
     }
-    if (!hotel) throw new MerchantError('hotel_not_found', '没有找到这家酒店，请重新选择');
+    if (!hotel) throw new MerchantError('hotel_not_found', "Couldn't find that hotel; please pick another one");
     return hotel;
   }
 
   function modelOf(hotel) {
     let m = models.get(hotel.id);
     if (m) return m;
-    const category = CATEGORIES.includes(hotel.category) ? hotel.category : 'comfort';
+    const category = CATEGORIES.includes(hotel.category) ? hotel.category : 'midscale';
     const city = findCity(hotel.city);
     const area = city?.areas.find((a) => a.name === hotel.businessArea) || null;
-    const lowRise = area ? area.kind === 'inn' : /民宿|客栈|小院|院子/.test(hotel.name || '');
+    const lowRise = isInn(hotel);
     const kind = area?.kind || 'shopping';
     let offer = null;
     try {
@@ -398,10 +400,10 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
     }
     const [dLo, dHi] = lowRise ? INN_FLOORS : FLOORS[category];
     let types = (offer?.roomTypes || []).map((rt) => {
-      const f = /^(\d+)-(\d+)层$/.exec(rt.floor || '');
-      return { roomId: rt.roomId, name: rt.name, lo: f ? Number(f[1]) : dLo, hi: f ? Number(f[2]) : dHi };
+      const f = parseFloors(rt.floor);
+      return { roomId: rt.roomId, name: rt.name, lo: f ? f[0] : dLo, hi: f ? f[1] : dHi };
     });
-    if (!types.length) types = [{ roomId: 'R1', name: '标准间', lo: dLo, hi: dHi }];
+    if (!types.length) types = [{ roomId: 'R1', name: 'Standard room', lo: dLo, hi: dHi }];
     const perFloor = lowRise ? 8 : 28;
     const rooms = [];
     const bottom = Math.min(...types.map((t) => t.lo));
@@ -417,28 +419,30 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
       });
     }
     if (!rooms.length) for (let i = 1; i <= perFloor; i++) rooms.push(makeRoom(hotel.id, bottom, i, types[0]));
-    const issues = Object.keys(ISSUES).filter((k) => !(lowRise && k === 'aircon'));
+    const issues = Object.keys(ISSUES);
     const weak = [issues[hashString(`${hotel.id}|weak1`) % issues.length]];
     const second = issues[hashString(`${hotel.id}|weak2`) % issues.length];
     if (second !== weak[0]) weak.push(second);
-    const view = (hotel.tags || []).find((t) => /景房$/.test(t));
+    const view = (hotel.tags || []).find((t) => / view$/.test(t));
     m = {
       id: hotel.id,
       hotel,
       category,
       lowRise,
       kind,
-      tier: city?.tier || 'tier2',
+      city,
+      zone: resolveTimeZone(hotel.timeZone || city?.zone, DEFAULT_TIME_ZONE),
+      market: city?.market || 'mixed',
       season: Array.isArray(city?.season) ? city.season : null,
       business: BUSINESS_KINDS.has(kind),
       // Leisure stays are longer than business trips.
       cont: LONG_STAY_KINDS.has(kind) ? 0.72 : BUSINESS_KINDS.has(kind) ? 0.5 : 0.6,
-      baseOcc: BASE_OCCUPANCY[category] + (hash01(`${hotel.id}|occ`) - 0.5) * 0.1 + ((Number(hotel.rating) || 4.5) - 4.5) * 0.08,
+      baseOcc: BASE_OCCUPANCY[category] + (hash01(`${hotel.id}|occ`) - 0.5) * 0.1 + ((Number(hotel.rating) || 4.3) - 4.3) * 0.08,
       types,
       rooms,
       byNumber: new Map(rooms.map((r) => [r.number, r])),
-      landmark: area?.landmarks?.[0]?.name || area?.short || '景点',
-      view: view ? view.replace(/房$/, '') : '',
+      landmark: area?.landmarks?.[0]?.name || area?.short || 'the sights',
+      view: view ? view.toLowerCase() : '',
       weak,
       occCache: new Map(),
       priceCache: new Map(),
@@ -456,6 +460,9 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
     return modelOf(requireHotel(hotelId));
   }
 
+  /** Epoch ms of a wall-clock time at the hotel. */
+  const at = (m, date, hhmmText) => zonedTimeMs(date, hhmmText, m.zone);
+
   /**
    * Share of rooms sold on the night of `date`: the category's level, then demand — leisure hotels fill up on
    * weekends and holidays (pricing.js dayFactor), business hotels on weekdays — the city's season and a weekly wobble.
@@ -466,9 +473,9 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
     let demand;
     if (m.business) {
       const dow = dayOfWeek(date);
-      demand = holidayOn(date) ? (m.kind === 'cbd' ? 0.86 : 1.08) : dow === 5 ? 0.93 : dow === 6 ? 0.86 : 1.05;
+      demand = holidayOn(date, m.city?.code) ? 0.88 : dow === 5 ? 0.93 : dow === 6 ? 0.86 : dow === 0 ? 0.9 : 1.05;
     } else {
-      demand = 1 + (dayFactor(date, m.tier) - 1) * 0.8;
+      demand = 1 + (dayFactor(date, m.market, m.city) - 1) * 0.8;
     }
     const season = m.season ? 1 + ((m.season[monthOf(date) - 1] || 1) - 1) * 0.6 : 1;
     const monday = addDays(date, -((dayOfWeek(date) + 6) % 7));
@@ -489,7 +496,7 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
     } catch {
       // no simulated prices: the fallback below
     }
-    const fallback = Math.round((Number(m.hotel.priceHint) || FALLBACK_PRICE[m.category]) * dayFactor(date, m.tier));
+    const fallback = Math.round((Number(m.hotel.priceHint) || FALLBACK_PRICE[m.category]) * dayFactor(date, m.market, m.city));
     const out = (roomId) => prices.get(roomId) || fallback;
     if (m.priceCache.size > 800) m.priceCache.clear();
     m.priceCache.set(date, out);
@@ -501,12 +508,12 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
   const simOcc = (m, room, date) => hash01(`${m.id}|${room.number}|${date}|o`) < occRate(m, date);
   /** The guest of the night before stays on (never across the room's changeover day). */
   const continues = (m, room, date) => dayIndex(date) % STAY_CYCLE_DAYS !== room.cycleDay && hash01(`${m.id}|${room.number}|${date}|c`) < m.cont;
-  /** A 小宿 guest holds this room on `date` (from arrival through the day they leave). */
-  const heldByXiaosu = (real, number, date) => (real.byRoom.get(number) || []).some((r) => r.start <= date && date <= r.end);
-  const occAt = (m, real, room, date) => !heldByXiaosu(real, room.number, date) && simOcc(m, room, date);
+  /** A NanaHotel guest holds this room on `date` (from arrival through the day they leave). */
+  const heldByGuest = (real, number, date) => (real.byRoom.get(number) || []).some((r) => r.start <= date && date <= r.end);
+  const occAt = (m, real, room, date) => !heldByGuest(real, room.number, date) && simOcc(m, room, date);
 
   function guestName(m, room, start) {
-    return `${biasedPick(SURNAMES, hash01(`${m.id}|${room.number}|${start}|name`))}*`;
+    return simGuestName(hash01(`${m.id}|${room.number}|${start}|name`), hash01(`${m.id}|${room.number}|${start}|last`));
   }
 
   /** The simulated guest staying the night of `date` (which must be occupied): arrival, departure, masked name. */
@@ -522,9 +529,9 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
     return { checkIn: start, checkOut: addDays(last, 1), name: guestName(m, room, start) };
   }
 
-  /** Today's times of a simulated room: the leaving guest goes 07:00–12:00, housekeeping follows, arrivals 14:00–22:00. */
+  /** Today's times of a simulated room: the leaving guest goes 7–11 AM, housekeeping follows, arrivals 3–10 PM. */
   function departAt(m, room, date) {
-    return cnTimeMs(date, '07:00') + Math.round(300 * Math.sqrt(hash01(`${m.id}|${room.number}|${date}|dep`))) * MIN;
+    return at(m, date, '07:00') + Math.round(240 * Math.sqrt(hash01(`${m.id}|${room.number}|${date}|dep`))) * MIN;
   }
 
   function cleanedAt(m, room, date) {
@@ -532,18 +539,18 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
   }
 
   function etaOf(m, room, date) {
-    const minutes = Math.round((14 * 60 + 480 * hash01(`${m.id}|${room.number}|${date}|eta`) ** 1.3) / 30) * 30;
-    return { at: cnTimeMs(date, '00:00') + minutes * MIN, time: hhmm(minutes) };
+    const minutes = Math.round((15 * 60 + 420 * hash01(`${m.id}|${room.number}|${date}|eta`) ** 1.3) / 30) * 30;
+    return { at: at(m, date, '00:00') + minutes * MIN, time: hhmm(minutes) };
   }
 
-  // ---- 小宿 guests --------------------------------------------------------------------------------------------
+  // ---- NanaHotel guests --------------------------------------------------------------------------------------
 
-  /** This hotel's confirmed 小宿 orders with their rooms (stays.js), and the days each holds its room. */
+  /** This hotel's confirmed NanaHotel orders with their rooms (stays.js), and the days each holds its room. */
   function realOf(m, today) {
     const list = viaStays(() => stays.listHotelStays(m.id)).map(({ order, roomNumber, floor, stay }) => {
-      // On the hotel's business day: a check-in at 05:20 belongs to the night in progress, like the grid's today.
-      const inDate = stay?.checkedInAt ? earliestCheckIn(new Date(stay.checkedInAt)) : null;
-      const outDate = stay?.checkedOutAt ? cnDate(stay.checkedOutAt) : null;
+      // On the hotel's business day: a check-in at 5:20 AM belongs to the night in progress, like the grid's today.
+      const inDate = stay?.checkedInAt ? earliestCheckIn(new Date(stay.checkedInAt), m.zone) : null;
+      const outDate = stay?.checkedOutAt ? dateIn(stay.checkedOutAt, m.zone) : null;
       // Still in after the check-out date: the room is theirs until they leave.
       const end = outDate || (stay && today > order.checkOut ? today : order.checkOut);
       return { order, roomNumber, floor, stay, inDate, outDate, start: inDate && inDate < order.checkIn ? inDate : order.checkIn, end, nightsUntil: outDate || order.checkOut };
@@ -556,7 +563,7 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
     return { list, byRoom };
   }
 
-  /** The 小宿 stay holding a room on `date`: in the room first, then expected, then just left. */
+  /** The NanaHotel stay holding a room on `date`: in the room first, then expected, then just left. */
   function holderOf(real, number, date) {
     const rank = (r) => (r.stay && !r.outDate ? 0 : !r.stay ? 1 : 2);
     let best = null;
@@ -565,11 +572,11 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
   }
 
   /**
-   * Everything one call needs about now: the hotel's day (`today`: the night in progress, so before 06:00 the
-   * previous date), 小宿 stays and requests, the day's room marks, the tickets.
+   * Everything one call needs about now: the hotel's day (`today`: the night in progress, so before 6 AM the
+   * previous date), NanaHotel stays and requests, the day's room marks, the tickets.
    */
   function dayContext(m, t) {
-    const today = earliestCheckIn(new Date(t));
+    const today = earliestCheckIn(new Date(t), m.zone);
     const marks = new Map();
     for (const mk of roomMarks.values()) if (mk.hotelId === m.id && mk.date === today) marks.set(mk.number, mk);
     const ctx = { today, now: t, real: realOf(m, today), requests: viaStays(() => stays.listHotelRequests(m.id)), marks };
@@ -579,12 +586,12 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
     return ctx;
   }
 
-  /** The grid's rooms plus any room a 小宿 guest was given outside it (never for simulated hotels). */
+  /** The grid's rooms plus any room a NanaHotel guest was given outside it (never for simulated hotels). */
   function gridRooms(m, ctx) {
     const extra = [];
     for (const r of ctx.real.list) {
       if (m.byNumber.has(r.roomNumber) || extra.some((x) => x.number === r.roomNumber)) continue;
-      extra.push({ number: r.roomNumber, floor: r.floor, type: { roomId: r.order.room?.roomId, name: r.order.room?.name || '客房' }, cycleDay: 0 });
+      extra.push({ number: r.roomNumber, floor: r.floor, type: { roomId: r.order.room?.roomId, name: r.order.room?.name || 'Room' }, cycleDay: 0 });
     }
     return extra.length ? [...m.rooms, ...extra] : m.rooms;
   }
@@ -599,7 +606,7 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
   function roomView(m, ctx, room, date) {
     const holder = holderOf(ctx.real, room.number, date);
     let view;
-    if (holder) view = xiaosuRoom(holder, room, date, ctx);
+    if (holder) view = guestRoom(holder, room, date, ctx);
     else if (date === ctx.today && ctx.marks.get(room.number)?.ooo) view = { number: room.number, roomType: room.type.name, status: 'ooo' };
     else view = simRoom(m, ctx, room, date);
     const open = date === ctx.today ? ctx.openTickets.get(room.number) : 0;
@@ -607,11 +614,11 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
     return view;
   }
 
-  function xiaosuRoom(r, room, date, ctx) {
+  function guestRoom(r, room, date, ctx) {
     const { order, stay } = r;
     const base = { number: room.number, roomType: order.room?.name || room.type.name };
     if (r.outDate) {
-      // Left today: dirty until housekeeping (the front desk's 打扫) has been.
+      // Left today: dirty until housekeeping (the front desk's Clean) has been.
       const mark = date === ctx.today ? ctx.marks.get(room.number) : null;
       const cleaned = mark?.cleanedAt && Date.parse(mark.cleanedAt) >= Date.parse(stay.checkedOutAt);
       return { ...base, roomType: room.type.name, status: cleaned ? 'vacant' : 'dirty' };
@@ -625,7 +632,7 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
     return {
       ...base,
       status,
-      guest: { name: maskName(order.guests?.[0]), orderId: order.id, checkIn: order.checkIn, checkOut: order.checkOut, source: 'xiaosu' },
+      guest: { name: maskName(order.guests?.[0]), orderId: order.id, checkIn: order.checkIn, checkOut: order.checkOut, source: 'nanahotel' },
     };
   }
 
@@ -662,14 +669,14 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
   function rooms(hotelId, { date } = {}) {
     const m = modelFor(hotelId);
     const t = nowMs();
-    const today = todayCN(new Date(t));
+    const today = todayIn(m.zone, t);
     const last = addDays(today, ROOM_DAYS_AHEAD);
-    const day = date === undefined || date === null || date === '' ? today : requireDate(date, '房态日期');
+    const day = date === undefined || date === null || date === '' ? today : requireDate(date, 'room grid date');
     const ctx = dayContext(m, t);
     if (day < ctx.today || day > last) {
-      throw new MerchantError('invalid_date', `房态只能看今天到 ${ROOM_DAYS_AHEAD} 天后（${formatDateCN(today)}–${formatDateCN(last)}）`);
+      throw new MerchantError('invalid_date', `The room grid covers today to ${ROOM_DAYS_AHEAD} days ahead (${formatDate(today)} – ${formatDate(last)})`);
     }
-    // Before 06:00 "today" is the night still in progress.
+    // Before 6 AM "today" is the night still in progress.
     const night = day <= today ? ctx.today : day;
     const counts = { vacant: 0, dirty: 0, occupied: 0, arriving: 0, departing: 0, ooo: 0 };
     const byFloor = new Map();
@@ -685,31 +692,32 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
   }
 
   /**
-   * POST rooms/:number: `clean` (空脏 → 空净), `ooo` (an empty room → 维修), `release` (维修 → 空净) for today, or
-   * `check_in` a 小宿 order at the front desk — in the room stays.js gives it (else 409 wrong_room with the right one).
+   * POST rooms/:number: `clean` (vacant dirty → vacant clean), `ooo` (an empty room → out of order), `release`
+   * (out of order → vacant clean) for today, or `check_in` a NanaHotel order at the front desk — in the room stays.js
+   * gives it (else 409 wrong_room with the right one).
    * @returns {{ room, event? }}  event: { kind: 'front_desk_checkin', userId, sessionId, stay }
    */
   function roomAction(hotelId, number, body = {}) {
     const m = modelFor(hotelId);
     const action = str(body.action, 20);
-    if (!ROOM_ACTIONS.includes(action)) throw new MerchantError('unknown_action', '房间操作需要是 clean（打扫）、ooo（维修）、release（恢复可售）或 check_in（办入住）');
+    if (!ROOM_ACTIONS.includes(action)) throw new MerchantError('unknown_action', 'The room action needs to be clean, ooo (out of order), release (back in service) or check_in');
     const t = nowMs();
     const ctx = dayContext(m, t);
     const { today } = ctx;
     const room = findRoom(m, ctx, number);
-    if (!room) throw new MerchantError('room_not_found', `这家酒店没有 ${str(number, 10)} 房`);
+    if (!room) throw new MerchantError('room_not_found', `This hotel has no room ${str(number, 10)}`);
     if (action === 'check_in') return frontDeskCheckIn(m, ctx, room, body.orderId);
     const view = roomView(m, ctx, room, today);
     const key = `${m.id}|${today}|${room.number}`;
     const mark = roomMarks.get(key) || { hotelId: m.id, date: today, number: room.number };
     if (action === 'clean') {
-      if (view.status !== 'dirty') throw new MerchantError('invalid_action', `${room.number} 房不是空脏房，不用打扫`);
+      if (view.status !== 'dirty') throw new MerchantError('invalid_action', `Room ${room.number} isn't vacant and dirty, so it doesn't need cleaning`);
       roomMarks.set(key, { ...mark, cleanedAt: iso(t) });
     } else if (action === 'ooo') {
-      if (view.status !== 'vacant' && view.status !== 'dirty') throw new MerchantError('invalid_action', `${room.number} 房有客人，只有空房才能设为维修`);
+      if (view.status !== 'vacant' && view.status !== 'dirty') throw new MerchantError('invalid_action', `Room ${room.number} has a guest; only a vacant room can be taken out of order`);
       roomMarks.set(key, { ...mark, ooo: true, oooAt: iso(t) });
     } else {
-      if (view.status !== 'ooo') throw new MerchantError('invalid_action', `${room.number} 房不在维修中`);
+      if (view.status !== 'ooo') throw new MerchantError('invalid_action', `Room ${room.number} isn't out of order`);
       roomMarks.set(key, { ...mark, ooo: false, cleanedAt: iso(t) });
     }
     return { room: roomView(m, dayContext(m, t), room, today) };
@@ -717,15 +725,15 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
 
   function frontDeskCheckIn(m, ctx, room, orderIdRaw) {
     const orderId = str(orderIdRaw, 80).toUpperCase();
-    if (!orderId || !ID_RE.test(orderId)) throw new MerchantError('invalid_order', '办入住需要订单号（orderId）');
+    if (!orderId || !ID_RE.test(orderId)) throw new MerchantError('invalid_order', 'Checking a guest in needs the order number (orderId)');
     const entry = ctx.real.list.find((r) => r.order.id === orderId);
     if (!entry) {
       const other = bookings.ordersForHotel(m.id).find((o) => o.id === orderId);
-      if (!other) throw new MerchantError('not_found', '这家酒店没有这个订单');
-      throw new MerchantError('order_not_confirmed', other.status === 'cancelled' ? '这个订单已经取消了，不能办入住' : '这个订单还没支付或已关闭，不能办入住');
+      if (!other) throw new MerchantError('not_found', "This hotel has no booking with that number");
+      throw new MerchantError('order_not_confirmed', other.status === 'cancelled' ? "This booking was cancelled, so it can't be checked in" : "This booking isn't paid or has closed, so it can't be checked in");
     }
     if (entry.roomNumber !== room.number) {
-      throw new MerchantError('wrong_room', `这一单的房号是 ${entry.roomNumber}，请在 ${entry.roomNumber} 房办理`, { roomNumber: entry.roomNumber });
+      throw new MerchantError('wrong_room', `This booking is in room ${entry.roomNumber}; check the guest in there`, { roomNumber: entry.roomNumber });
     }
     const out = viaStays(() => stays.frontDeskCheckIn(orderId));
     const fresh = dayContext(m, nowMs());
@@ -740,7 +748,7 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
   const RANK = { new: 0, doing: 1, done: 2, declined: 2 };
 
   function serviceTitle(items) {
-    return items.map((i) => (TASK_RE.test(i.name) && i.qty <= 1 ? i.name : `${i.name} ×${i.qty}`)).join('、');
+    return items.map((i) => (TASK_RE.test(i.name) && i.qty <= 1 ? i.name : `${i.name} ×${i.qty}`)).join(', ');
   }
 
   function actionsFor(kind, status, title) {
@@ -751,9 +759,9 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
     return kind === 'early_checkin' && status === 'new' ? ['approve', 'decline'] : [];
   }
 
-  /** A 小宿 guest's request as a ticket (null for kinds the hotel does not handle, or ones cancelled at check-out). */
-  function xiaosuTicket(r, order, roomNumber) {
-    const common = { id: r.id, roomNumber, guest: maskName(order.guests?.[0]), source: 'xiaosu', orderId: order.id };
+  /** A NanaHotel guest's request as a ticket (null for kinds the hotel does not handle, or ones cancelled at check-out). */
+  function guestTicket(m, r, order, roomNumber) {
+    const common = { id: r.id, roomNumber, guest: maskName(order.guests?.[0]), source: 'nanahotel', orderId: order.id };
     let ticket = null;
     if (r.kind === 'service') {
       const status = { accepted: 'new', on_the_way: 'doing', done: 'done' }[r.status];
@@ -762,14 +770,14 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
       const status = { pending: 'new', confirmed: 'done', declined: 'declined' }[r.status];
       if (!status) return null;
       ticket = {
-        kind: 'early_checkin', title: `提前入住 ${r.arrivalTime}`, note: `${formatDateCN(r.date)}（${weekdayCN(r.date)}）到店`,
-        createdAt: r.createdAt, dueAt: iso(cnTimeMs(r.date, r.arrivalTime)), status,
+        kind: 'early_checkin', title: `Early check-in ${formatTime(r.arrivalTime)}`, note: `Arriving ${formatDate(r.date)}`,
+        createdAt: r.createdAt, dueAt: iso(at(m, r.date, r.arrivalTime)), status,
       };
     } else if (r.kind === 'wakeup' && r.status !== 'cancelled') {
-      ticket = { kind: 'wakeup', title: `叫醒 ${hhmmOf(r.at)}`, createdAt: r.createdAt, dueAt: r.at, status: r.status === 'done' ? 'done' : 'doing' };
+      ticket = { kind: 'wakeup', title: `Wake-up call ${formatTime(timeIn(r.at, m.zone))}`, createdAt: r.createdAt, dueAt: r.at, status: r.status === 'done' ? 'done' : 'doing' };
     } else if (r.kind === 'dining' && r.status !== 'cancelled') {
       ticket = {
-        kind: 'dining', title: `${r.kindLabel} ${r.people}位 ${hhmmOf(r.at)}`, note: [r.note, `${r.place} ${r.restaurant} · ${r.table}`].filter(Boolean).join(' · '),
+        kind: 'dining', title: `${r.kindLabel} for ${r.people} at ${formatTime(timeIn(r.at, m.zone))}`, note: [r.note, `${r.restaurant}, ${r.place} · ${r.table}`].filter(Boolean).join(' · '),
         createdAt: r.createdAt, dueAt: r.at, status: r.status === 'done' ? 'done' : 'doing',
       };
     }
@@ -778,20 +786,21 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
 
   /**
    * The front desk's simulated requests created on `day` (by phone): 4–12 a day by hotel size, in rooms whose
-   * simulated guests are in (an early check-in: a guest arriving that day). Each moves on with the clock — a
-   * delivery waits 2–30 minutes for someone to take it — unless the console moved it first.
+   * simulated guests are in (an early check-in: a guest arriving that day). Each moves on with the clock — a delivery
+   * waits 2–30 minutes for someone to take it — unless the console moved it first.
    */
   function simTickets(m, ctx, day) {
     const prev = addDays(day, -1);
     const inHouse = [];
     const arriving = [];
     for (const room of m.rooms) {
-      if (!simOcc(m, room, day) || heldByXiaosu(ctx.real, room.number, day) || heldByXiaosu(ctx.real, room.number, prev)) continue;
+      if (!simOcc(m, room, day) || heldByGuest(ctx.real, room.number, day) || heldByGuest(ctx.real, room.number, prev)) continue;
       (simOcc(m, room, prev) && continues(m, room, day) ? inHouse : arriving).push(room);
     }
     const h = (i, k) => hash01(`${m.id}|${day}|t${i}|${k}`);
     const n = clamp(Math.round(m.rooms.length * occRate(m, day) * 0.045 * (0.7 + 0.6 * hash01(`${m.id}|${day}|tickets`))), 4, 12);
-    const at = (hhmmText, minutes) => cnTimeMs(day, hhmmText) + Math.round(minutes) * MIN;
+    const after = (hhmmText, minutes) => at(m, day, hhmmText) + Math.round(minutes) * MIN;
+    const clock12 = (ms) => formatTime(timeIn(ms, m.zone));
     const out = [];
     for (let i = 0; i < n; i++) {
       const u = h(i, 'kind');
@@ -805,28 +814,28 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
       let timeStatus;
       if (kind === 'service') {
         const [name, qty] = SIM_ITEMS[Math.floor(h(i, 'item') * SIM_ITEMS.length)];
-        const created = at('07:30', 930 * h(i, 'at'));
+        const created = after('07:30', 930 * h(i, 'at'));
         const taken = created + (2 + Math.round(28 * h(i, 'wait') ** 1.5)) * MIN;
         const brought = taken + (5 + Math.round(10 * h(i, 'walk'))) * MIN;
         const note = h(i, 'note') < 0.3 ? SIM_NOTES[Math.floor(h(i, 'which') * SIM_NOTES.length)] : '';
         ticket = { kind, title: serviceTitle([{ name, qty }]), ...(note ? { note } : {}), createdAt: iso(created), dueAt: iso(brought) };
         timeStatus = ctx.now < taken ? 'new' : ctx.now < brought ? 'doing' : 'done';
       } else if (kind === 'wakeup') {
-        const due = cnTimeMs(addDays(day, 1), '06:00') + Math.round(10 * h(i, 'due')) * 15 * MIN;
-        ticket = { kind, title: `叫醒 ${hhmmOf(iso(due))}`, createdAt: iso(at('20:00', 210 * h(i, 'at'))), dueAt: iso(due) };
+        const due = at(m, addDays(day, 1), '06:00') + Math.round(10 * h(i, 'due')) * 15 * MIN;
+        ticket = { kind, title: `Wake-up call ${clock12(due)}`, createdAt: iso(after('20:00', 210 * h(i, 'at'))), dueAt: iso(due) };
         timeStatus = ctx.now < due ? 'doing' : 'done';
       } else if (kind === 'dining') {
         const breakfast = h(i, 'meal') < 0.3;
         const due = breakfast
-          ? cnTimeMs(addDays(day, 1), '07:00') + Math.round(4 * h(i, 'due')) * 30 * MIN
-          : cnTimeMs(day, '18:00') + Math.round(5 * h(i, 'due')) * 30 * MIN;
+          ? at(m, addDays(day, 1), '07:00') + Math.round(4 * h(i, 'due')) * 30 * MIN
+          : at(m, day, '18:00') + Math.round(5 * h(i, 'due')) * 30 * MIN;
         const people = 1 + Math.floor(4 * h(i, 'people'));
-        ticket = { kind, title: `${breakfast ? '早餐' : '晚餐'} ${people}位 ${hhmmOf(iso(due))}`, createdAt: iso(at('09:00', 540 * h(i, 'at'))), dueAt: iso(due) };
+        ticket = { kind, title: `${breakfast ? 'Breakfast' : 'Dinner'} for ${people} at ${clock12(due)}`, createdAt: iso(after('09:00', 540 * h(i, 'at'))), dueAt: iso(due) };
         timeStatus = ctx.now < due ? 'doing' : 'done';
       } else {
-        const created = at('07:00', 180 * h(i, 'at'));
-        const due = Math.max(cnTimeMs(day, '09:00') + Math.round(6 * h(i, 'due')) * 30 * MIN, Math.ceil((created + 30 * MIN) / (30 * MIN)) * 30 * MIN);
-        ticket = { kind, title: `提前入住 ${hhmmOf(iso(due))}`, note: `${formatDateCN(day)}（${weekdayCN(day)}）到店`, createdAt: iso(created), dueAt: iso(due) };
+        const created = after('07:00', 180 * h(i, 'at'));
+        const due = Math.max(at(m, day, '10:00') + Math.round(6 * h(i, 'due')) * 30 * MIN, Math.ceil((created + 30 * MIN) / (30 * MIN)) * 30 * MIN);
+        ticket = { kind, title: `Early check-in ${clock12(due)}`, note: `Arriving ${formatDate(day)}`, createdAt: iso(created), dueAt: iso(due) };
         // Nobody answered before the guest came: the front desk sorted it out on arrival.
         timeStatus = ctx.now < due ? 'new' : 'done';
       }
@@ -837,11 +846,11 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
     return out;
   }
 
-  /** Tickets newest first: 小宿 guests' requests and the simulated ones; finished ones only from the last 24 hours. */
+  /** Tickets newest first: NanaHotel guests' requests and the simulated ones; finished ones only from the last 24 hours. */
   function ticketList(m, ctx) {
     const out = [];
     for (const { request, order, roomNumber } of ctx.requests) {
-      const ticket = xiaosuTicket(request, order, roomNumber);
+      const ticket = guestTicket(m, request, order, roomNumber);
       if (ticket) out.push(ticket);
     }
     for (const day of [addDays(ctx.today, -1), ctx.today]) out.push(...simTickets(m, ctx, day));
@@ -858,31 +867,31 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
   }
 
   function whyNot(ticket, action) {
-    if (ticket.kind === 'wakeup' || ticket.kind === 'dining') return '叫醒和订餐到时间会自动完成，不用处理';
-    if (ticket.kind === 'early_checkin') return ticket.status === 'new' ? '提前入住只能同意或婉拒' : '这个提前入住申请已经处理过了';
-    if (ticket.status === 'done') return '这单已经完成了';
-    if (action === 'accept') return '这单已经接过了，正在配送';
-    return '送物工单只能接单、送达或完成';
+    if (ticket.kind === 'wakeup' || ticket.kind === 'dining') return 'Wake-up calls and table reservations finish on their own at their time';
+    if (ticket.kind === 'early_checkin') return ticket.status === 'new' ? 'An early check-in can only be approved or declined' : 'This early check-in was already answered';
+    if (ticket.status === 'done') return 'This one is already done';
+    if (action === 'accept') return 'This one was already accepted and is on its way';
+    return 'A delivery can only be accepted, delivered or marked done';
   }
 
   /**
-   * POST tickets/:id: a delivery `accept` (→ doing; the guest's card says 配送中) or `deliver` / `done` (→ done;
-   * 已送达); an early check-in `approve` / `decline`. Anything the ticket cannot do now is a 409 invalid_action.
+   * POST tickets/:id: a delivery `accept` (→ doing; the guest's card says on the way) or `deliver` / `done` (→ done;
+   * delivered); an early check-in `approve` / `decline`. Anything the ticket cannot do now is a 409 invalid_action.
    * @returns {{ ticket, event? }}  event: { kind: 'early_checkin_approved' | 'early_checkin_declined', userId, sessionId, request }
    */
   function ticketAction(hotelId, ticketId, body = {}) {
     const m = modelFor(hotelId);
     const action = str(body.action, 20);
-    if (!TICKET_ACTIONS.includes(action)) throw new MerchantError('unknown_action', '工单操作需要是 accept（接单）、deliver（送达）、done（完成）、approve（同意）或 decline（婉拒）');
+    if (!TICKET_ACTIONS.includes(action)) throw new MerchantError('unknown_action', 'The ticket action needs to be accept, deliver, done, approve or decline');
     const t = nowMs();
     const id = str(ticketId, 80);
     const ticket = dayContext(m, t).tickets.find((tk) => tk.id === id);
-    if (!ticket) throw new MerchantError('not_found', '没有找到这张工单（完成超过 24 小时的不再显示）');
+    if (!ticket) throw new MerchantError('not_found', "Couldn't find that ticket (finished ones disappear after 24 hours)");
     const finish = ticket.actions.find((a) => a === 'deliver' || a === 'done');
     const allowed = ticket.actions.includes(action) || (finish && (action === 'deliver' || action === 'done'));
     if (!allowed) throw new MerchantError('invalid_action', whyNot(ticket, action));
     let event;
-    if (ticket.source === 'xiaosu') {
+    if (ticket.source === 'nanahotel') {
       const out = viaStays(() => stays.advanceRequest(id, action));
       if (ticket.kind === 'early_checkin') {
         event = { kind: action === 'approve' ? 'early_checkin_approved' : 'early_checkin_declined', userId: out.userId, sessionId: out.sessionId, request: out.request };
@@ -897,20 +906,20 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
 
   // ---- reviews -----------------------------------------------------------------------------------------------
 
-  /** Shares of 5…1 stars for a hotel rated `rating` (4.0 → mostly 4–5 stars, 4.9 → nearly all 5). */
+  /** Shares of 5…1 stars for a hotel rated `rating` (3.6 → many 3–4 stars, 4.9 → nearly all 5). */
   function starShares(rating) {
-    const x = clamp(((Number(rating) || 4.5) - 4.0) / 0.9, 0, 1);
-    return { 5: 0.45 + 0.48 * x, 4: 0.3 - 0.25 * x, 3: 0.13 - 0.12 * x, 2: 0.07 - 0.065 * x, 1: 0.05 - 0.045 * x };
+    const x = clamp(((Number(rating) || 4.3) - 3.6) / 1.3, 0, 1);
+    return { 5: 0.4 + 0.53 * x, 4: 0.3 - 0.25 * x, 3: 0.15 - 0.14 * x, 2: 0.09 - 0.085 * x, 1: 0.06 - 0.055 * x };
   }
 
   function praiseKeys(m) {
     const keys = ['location', 'clean', 'service', 'bed', 'quiet'];
-    if (m.category !== 'economy') keys.push('breakfast');
-    if (m.category === 'economy' || m.category === 'comfort') keys.push('value');
+    if (m.category !== 'budget' || (m.hotel.amenities || []).includes('Free breakfast')) keys.push('breakfast');
+    if (m.category === 'budget' || m.category === 'midscale') keys.push('value');
     if (m.view) keys.push('view');
     if (m.kind === 'station' || m.kind === 'airport') keys.push('transit');
-    if (m.category === 'premium' || m.category === 'luxury') keys.push('facility');
-    if ((m.hotel.tags || []).includes('亲子')) keys.push('family');
+    if (m.category === 'upscale' || m.category === 'luxury') keys.push('facility');
+    if ((m.hotel.tags || []).includes('Family-friendly')) keys.push('family');
     return keys;
   }
 
@@ -920,13 +929,13 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
     const shares = starShares(m.hotel.rating);
     const perDay = clamp((Number(m.hotel.reviewCount) || 500) / 1800, 0.25, 1.5);
     const keys = praiseKeys(m);
-    const vars = { lm: m.landmark, view: m.view || '景观' };
+    const vars = { lm: m.landmark, view: m.view || 'view' };
     for (let i = 0; i < REVIEW_DAYS && out.length < MAX_SIM_REVIEWS; i++) {
       const day = addDays(today, -i);
       const count = (hash01(`${m.id}|${day}|rv1`) < perDay * 0.7 ? 1 : 0) + (hash01(`${m.id}|${day}|rv2`) < perDay * 0.3 ? 1 : 0);
       for (let k = 0; k < count && out.length < MAX_SIM_REVIEWS; k++) {
         const h = (key) => hash01(`${m.id}|${day}|rv${k}|${key}`);
-        const atMs = cnTimeMs(day, '08:00') + Math.round(930 * h('at')) * MIN;
+        const atMs = at(m, day, '08:00') + Math.round(930 * h('at')) * MIN;
         if (atMs > t) continue;
         let u = h('stars');
         let rating = 5;
@@ -956,22 +965,23 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
         let text;
         if (rating === 5) {
           praise = pickPraise(2 + (h('n') < 0.4 ? 1 : 0));
-          text = `${praise.map((key) => say(PRAISE[key][1], key)).join('，')}。${['下次来还住这里。', '推荐！', '整体非常满意。', '会推荐给朋友。', ''][Math.floor(h('end') * 5)]}`;
+          const ending = ['Would stay again.', 'Highly recommend!', 'Loved it overall.', "We'll be back.", ''][Math.floor(h('end') * 5)];
+          text = `${praise.map((key) => say(PRAISE[key][1], key)).join('. ')}. ${ending}`.trim();
         } else if (rating === 4) {
           praise = pickPraise(2);
           issues = h('minor') < 0.5 ? [pickIssue(0)] : [];
-          text = `${praise.map((key) => say(PRAISE[key][1], key)).join('，')}${issues.length ? `，就是${say(ISSUES[issues[0]].phrases, issues[0])}` : ''}。`;
+          text = `${praise.map((key) => say(PRAISE[key][1], key)).join('. ')}.${issues.length ? ` Only thing: ${lowerFirst(say(ISSUES[issues[0]].phrases, issues[0]))}.` : ''}`;
         } else if (rating === 3) {
           praise = pickPraise(1);
           issues = [pickIssue(0)];
-          text = `${say(PRAISE[praise[0]][1], praise[0])}，不过${say(ISSUES[issues[0]].phrases, issues[0])}，整体还行。`;
+          text = `${say(PRAISE[praise[0]][1], praise[0])}, but ${lowerFirst(say(ISSUES[issues[0]].phrases, issues[0]))}. Overall it was okay.`;
         } else {
           issues = [...new Set([pickIssue(0), pickIssue(1)])];
-          text = `${issues.map((key) => say(ISSUES[key].phrases, key)).join('，')}，${rating === 1 ? '体验很差，不会再来了。' : '有点失望。'}`;
+          text = `${issues.map((key) => say(ISSUES[key].phrases, key)).join('. ')}. ${rating === 1 ? "A really bad experience; we won't be back." : 'A bit disappointing.'}`;
         }
         const id = `R-${m.id}-${day.replace(/-/g, '')}-${k + 1}`;
         const review = {
-          id, source: 'sim', guest: `${biasedPick(SURNAMES, h('name'))}*`, rating, text,
+          id, source: 'sim', guest: simGuestName(h('name'), h('last')), rating, text: capitalize(text),
           tags: [...praise.map((key) => PRAISE[key][0]), ...issues.map((key) => ISSUES[key].tag)].slice(0, 3),
           roomType: m.types[Math.min(m.types.length - 1, Math.floor(m.types.length * h('room') ** 1.8))].name,
           at: iso(atMs), issues,
@@ -996,10 +1006,10 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
     const real = requests
       .filter(({ request }) => request.kind === 'review' && request.status === 'published')
       .map(({ request: r, order }) => ({
-        id: r.id, source: 'xiaosu', guest: maskName(order.guests?.[0]), rating: r.rating, text: r.text, tags: [...(r.tags || [])],
+        id: r.id, source: 'nanahotel', guest: maskName(order.guests?.[0]), rating: r.rating, text: r.text, tags: [...(r.tags || [])],
         roomType: order.room?.name || undefined, at: r.publishedAt, ...(r.reply ? { reply: { ...r.reply } } : {}),
       }));
-    const sim = simReviews(m, todayCN(new Date(t)), t).map((rv) => {
+    const sim = simReviews(m, todayIn(m.zone, t), t).map((rv) => {
       const own = replies.get(rv.id);
       return own && own.hotelId === m.id ? { ...rv, reply: { text: own.text, at: own.at } } : rv;
     });
@@ -1012,23 +1022,23 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
     return out;
   }
 
-  /** Rating, count, star distribution and tags: the hotel's whole history (simulated) plus 小宿 guests' reviews. */
+  /** Rating, count, star distribution and tags: the hotel's whole history (simulated) plus NanaHotel guests' reviews. */
   function reviewSummary(m, list) {
-    const real = list.filter((rv) => rv.source === 'xiaosu');
-    const base = Math.max(0, Math.round(Number(m.hotel.reviewCount) || 0));
+    const real = list.filter((rv) => rv.source === 'nanahotel');
+    const baseCount = Math.max(0, Math.round(Number(m.hotel.reviewCount) || 0));
     const shares = starShares(m.hotel.rating);
-    const exact = [5, 4, 3, 2, 1].map((s) => shares[s] * base);
+    const exact = [5, 4, 3, 2, 1].map((s) => shares[s] * baseCount);
     const counts = exact.map(Math.floor);
-    let left = base - counts.reduce((a, b) => a + b, 0);
+    let left = baseCount - counts.reduce((a, b) => a + b, 0);
     const order = exact.map((x, i) => [x - Math.floor(x), i]).sort((a, b) => b[0] - a[0] || a[1] - b[1]);
     for (let k = 0; left > 0; k = (k + 1) % 5, left--) counts[order[k][1]]++;
     const distribution = { 5: counts[0], 4: counts[1], 3: counts[2], 2: counts[3], 1: counts[4] };
     for (const rv of real) distribution[rv.rating] = (distribution[rv.rating] || 0) + 1;
-    const count = base + real.length;
-    const rating = count ? round(((Number(m.hotel.rating) || 4.5) * base + real.reduce((s, rv) => s + rv.rating, 0)) / count, 1) : Number(m.hotel.rating) || null;
+    const count = baseCount + real.length;
+    const rating = count ? round(((Number(m.hotel.rating) || 4.3) * baseCount + real.reduce((s, rv) => s + rv.rating, 0)) / count, 1) : Number(m.hotel.rating) || null;
     const tagCounts = new Map();
-    praiseKeys(m).forEach((key, i) => tagCounts.set(PRAISE[key][0], Math.round(base * (0.06 + 0.16 * hash01(`${m.id}|tag|${key}`)) * (i < 3 ? 1.3 : 1))));
-    for (const key of m.weak) tagCounts.set(ISSUES[key].tag, Math.round(base * (shares[3] + shares[2]) * (0.25 + 0.2 * hash01(`${m.id}|tag|${key}`))));
+    praiseKeys(m).forEach((key, i) => tagCounts.set(PRAISE[key][0], Math.round(baseCount * (0.06 + 0.16 * hash01(`${m.id}|tag|${key}`)) * (i < 3 ? 1.3 : 1))));
+    for (const key of m.weak) tagCounts.set(ISSUES[key].tag, Math.round(baseCount * (shares[3] + shares[2]) * (0.25 + 0.2 * hash01(`${m.id}|tag|${key}`))));
     for (const rv of real) for (const tag of rv.tags || []) tagCounts.set(tag, (tagCounts.get(tag) || 0) + 1);
     const tags = [...tagCounts.entries()].filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).slice(0, 8).map(([tag, n]) => ({ tag, count: n }));
     return { rating, count, distribution, tags };
@@ -1044,24 +1054,32 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
   function findReview(m, reviewId) {
     const id = str(reviewId, 80);
     const review = ID_RE.test(id) ? reviewList(m, nowMs()).find((rv) => rv.id === id) : null;
-    if (!review) throw new MerchantError('not_found', '没有找到这条点评');
+    if (!review) throw new MerchantError('not_found', "Couldn't find that review");
     return review;
+  }
+
+  /** A hotel's short name for signing a reply: 'The Ashgrove Times Square' → 'The Ashgrove'. */
+  function shortName(hotel) {
+    const name = String(hotel.name || 'our hotel');
+    const area = findCity(hotel.city)?.areas.find((a) => a.name === hotel.businessArea);
+    const trimmed = area ? name.replace(new RegExp(`\\s+(?:${[area.short, hotel.city].map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})$`), '') : name;
+    return trimmed || name;
   }
 
   /** A reply by template from the rating and what the review praised or complained about (no LLM). */
   function draftText(m, review) {
-    const name = shortName(m.hotel.name);
+    const name = shortName(m.hotel);
     const v = hashString(`${review.id}|draft`) % 2;
     const [issue] = issuesOf(review);
-    const fix = issue ? `关于${ISSUES[issue].label}，${ISSUES[issue].remedy}。` : '';
+    const fix = issue ? `About ${ISSUES[issue].label}: ${ISSUES[issue].remedy}. ` : '';
     if (review.rating >= 4) {
-      const liked = LIKED.find(([key, re]) => (review.tags || []).includes(PRAISE[key]?.[0]) || re.test(review.text || ''))?.[2] || '服务';
+      const liked = LIKED.find(([key, re]) => (review.tags || []).includes(PRAISE[key]?.[0]) || re.test(review.text || ''))?.[2] || 'team';
       return v
-        ? `感谢您的好评！很高兴您喜欢我们的${liked}。${fix}期待您下次再来，${name}随时为您服务～`
-        : `谢谢您的认可！${liked}得到您的肯定，是对我们团队最大的鼓励。${fix}欢迎再次光临${name}。`;
+        ? `Thank you for the wonderful review! We're so glad you enjoyed our ${liked}. ${fix}We hope to welcome you back to ${name} soon.`
+        : `Thanks so much for your kind words! Hearing that you loved our ${liked} means a lot to the whole team. ${fix}We look forward to your next stay at ${name}.`;
     }
-    if (review.rating === 3) return `感谢您的入住和中肯的评价。${fix || '您提到的问题我们已经反馈给相关部门改进。'}希望下次能给您更好的体验，${name}期待再次为您服务。`;
-    return `非常抱歉这次没能让您满意。${fix || '我们已经把您的反馈转给值班经理跟进。'}如果方便，欢迎联系前台，我们一定认真处理，期待有机会弥补。`;
+    if (review.rating === 3) return `Thank you for staying with us and for the honest feedback. ${fix || "We've shared your comments with the team so we can do better. "}We hope to give you a better experience next time at ${name}.`;
+    return `We're very sorry your stay didn't meet your expectations. ${fix || 'Our manager on duty is looking into your feedback. '}If you're open to it, please contact the front desk so we can make this right.`;
   }
 
   /** POST reviews/:id/draft-reply → { text }: a reply drafted from the review, for the hotel to edit. */
@@ -1071,36 +1089,36 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
   }
 
   /**
-   * POST reviews/:id/reply { text } (1–300 characters) → { review }. A 小宿 guest's review carries the reply on
+   * POST reviews/:id/reply { text } (1–500 characters) → { review }. A NanaHotel guest's review carries the reply on
    * their review card too, and they hear about it (event, when the text is new).
    * @returns {{ review, event? }}  event: { kind: 'review_replied', userId, sessionId, review }
    */
   function replyReview(hotelId, reviewId, body = {}) {
     const m = modelFor(hotelId);
     const text = cleanText(body.text);
-    if (!text) throw new MerchantError('invalid_reply', '回复内容不能为空');
-    if (text.length > MAX_REPLY_CHARS) throw new MerchantError('invalid_reply', `回复最多${MAX_REPLY_CHARS}字（现在${text.length}字），精简一下吧`);
+    if (!text) throw new MerchantError('invalid_reply', 'The reply needs some text');
+    if (text.length > MAX_REPLY_CHARS) throw new MerchantError('invalid_reply', `Replies can be up to ${MAX_REPLY_CHARS} characters (this one has ${text.length}); make it shorter`);
     const review = findReview(m, reviewId);
-    if (review.source === 'xiaosu') {
+    if (review.source === 'nanahotel') {
       const out = viaStays(() => stays.replyReview(review.id, text));
       const updated = { ...review, reply: { ...out.review.reply } };
       const event = out.changed ? { kind: 'review_replied', userId: out.userId, sessionId: out.sessionId, review: out.review } : null;
       return { review: publicReview(updated), ...(event ? { event } : {}) };
     }
-    const at = iso(nowMs());
-    replies.set(review.id, { id: review.id, hotelId: m.id, text, at });
-    return { review: publicReview({ ...review, reply: { text, at } }) };
+    const atText = iso(nowMs());
+    replies.set(review.id, { id: review.id, hotelId: m.id, text, at: atText });
+    return { review: publicReview({ ...review, reply: { text, at: atText } }) };
   }
 
-  // ---- promotions --------------------------------------------------------------------------------------------
+  // ---- deals -------------------------------------------------------------------------------------------------
 
-  /** Views accrue while a promotion is on (until it ends), more for bigger hotels and deeper discounts; 小宿 orders are real. */
-  function promotionView(m, p, t, xiaosuOrders) {
-    const endMs = cnTimeMs(addDays(p.to, 1), '00:00');
+  /** Views accrue while a deal is on (until it ends), more for bigger hotels and deeper discounts; NanaHotel orders are real. */
+  function promotionView(m, p, t, guestOrders) {
+    const endMs = at(m, addDays(p.to, 1), '00:00');
     const onMs = (p.activeMs || 0) + (p.active && p.activeSince ? Math.max(0, Math.min(t, endMs) - Date.parse(p.activeSince)) : 0);
     const perHour = (4 + 10 * hash01(`${p.id}|views`)) * (1 + (1 - p.discount) * 2) * clamp(m.rooms.length / 200, 0.4, 2);
     const views = Math.floor((onMs / HOUR) * perHour);
-    const orders = xiaosuOrders.filter((o) => o.rate?.promo?.id === p.id).length + Math.floor(views * (0.02 + 0.03 * hash01(`${p.id}|conv`)));
+    const orders = guestOrders.filter((o) => o.rate?.promo?.id === p.id).length + Math.floor(views * (0.02 + 0.03 * hash01(`${p.id}|conv`)));
     return { id: p.id, title: p.title, discount: p.discount, from: p.from, to: p.to, active: Boolean(p.active), createdAt: p.createdAt, stats: { views, orders } };
   }
 
@@ -1119,7 +1137,7 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
   /** POST promotions { title, discount, from, to } → { promotion }. */
   function createPromotion(hotelId, body = {}) {
     const m = modelFor(hotelId);
-    const p = promos.create(m.id, body || {});
+    const p = promos.create(m.id, body || {}, m.zone);
     return { promotion: promotionView(m, p, nowMs(), confirmedOrders(m)) };
   }
 
@@ -1132,14 +1150,14 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
 
   // ---- overview ----------------------------------------------------------------------------------------------
 
-  /** Rooms sold, room revenue, F&B and 小宿 room nights for the night of `date`; channels when asked. */
+  /** Rooms sold, room revenue, F&B and NanaHotel room nights for the night of `date`; channels when asked. */
   function nightStats(m, real, date, channels) {
     const price = pricesOn(m, date);
     const rate = occRate(m, date);
     let sold = 0;
     let revenue = 0;
     for (const room of m.rooms) {
-      if (heldByXiaosu(real, room.number, date) || hash01(`${m.id}|${room.number}|${date}|o`) >= rate) continue;
+      if (heldByGuest(real, room.number, date) || hash01(`${m.id}|${room.number}|${date}|o`) >= rate) continue;
       sold++;
       revenue += price(room.type.roomId) * (0.9 + 0.2 * hash01(`${m.id}|${room.number}|${date}|rate`));
       if (channels) {
@@ -1147,28 +1165,28 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
         channels[ch] = (channels[ch] || 0) + 1;
       }
     }
-    let xiaosu = 0;
+    let ours = 0;
     for (const r of real.list) {
       if (!(r.start <= date && date < r.nightsUntil)) continue;
-      const rooms = Number(r.order.rooms) || 1;
-      sold += rooms;
+      const roomsBooked = Number(r.order.rooms) || 1;
+      sold += roomsBooked;
       const night = (r.order.nightly || []).find((n) => n.date === date);
       if (night) {
-        revenue += night.price * rooms;
-        xiaosu += rooms;
+        revenue += night.price * roomsBooked;
+        ours += roomsBooked;
       }
     }
-    if (channels) channels.xiaosu = (channels.xiaosu || 0) + xiaosu;
+    if (channels) channels.nanahotel = (channels.nanahotel || 0) + ours;
     const fnb = sold * FNB_PER_ROOM[m.category] * (0.75 + 0.5 * hash01(`${m.id}|${date}|fnb`));
-    return { sold, occupancy: Math.min(1, sold / m.rooms.length), roomRevenue: revenue, fnb, xiaosu };
+    return { sold, occupancy: Math.min(1, sold / m.rooms.length), roomRevenue: revenue, fnb, nanahotel: ours };
   }
 
   function channelWeights(m) {
     const w = { ...CHANNEL_MIX };
-    if (m.category === 'economy') Object.assign(w, { meituan: w.meituan + 0.12, ctrip: w.ctrip - 0.04, direct: w.direct - 0.08 });
-    if (m.category === 'luxury') Object.assign(w, { direct: w.direct + 0.1, meituan: w.meituan - 0.12, ctrip: w.ctrip + 0.02 });
-    if (['scenic', 'resort', 'beach', 'inn'].includes(m.kind)) Object.assign(w, { fliggy: w.fliggy + 0.06, direct: w.direct - 0.06 });
-    if (m.kind === 'cbd') Object.assign(w, { direct: w.direct + 0.06, fliggy: w.fliggy - 0.04 });
+    if (m.category === 'budget') Object.assign(w, { expedia: w.expedia + 0.04, booking: w.booking + 0.06, direct: w.direct - 0.1 });
+    if (m.category === 'luxury') Object.assign(w, { direct: w.direct + 0.12, booking: w.booking - 0.08, expedia: w.expedia - 0.04 });
+    if (['scenic', 'resort', 'beach', 'inn'].includes(m.kind)) Object.assign(w, { google: w.google + 0.05, direct: w.direct - 0.05 });
+    if (m.kind === 'cbd') Object.assign(w, { direct: w.direct + 0.06, google: w.google - 0.03, booking: w.booking - 0.03 });
     for (const k of Object.keys(w)) w[k] = Math.max(0.02, w[k] * (0.85 + 0.3 * hash01(`${m.id}|mix|${k}`)));
     return w;
   }
@@ -1181,10 +1199,10 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
       if (x < w) return k;
       x -= w;
     }
-    return 'ctrip';
+    return 'expedia';
   }
 
-  /** Today's arrivals: 小宿 guests first, then the simulated ones by arrival time. */
+  /** Today's arrivals: NanaHotel guests first, then the simulated ones by arrival time. */
   function arrivalsToday(m, ctx) {
     const out = [];
     for (const r of ctx.real.list) {
@@ -1193,10 +1211,10 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
       const arrivedToday = stay && order.checkIn === ctx.today;
       if (!arriving && !arrivedToday) continue;
       const early = ctx.requests.find((x) => x.order.id === order.id && x.request.kind === 'early_checkin' && x.request.status !== 'cancelled')?.request;
-      const eta = HHMM_RE.test(order.arrivalTime || '') ? order.arrivalTime.replace('：', ':').padStart(5, '0') : early?.arrivalTime;
+      const eta = HHMM_RE.test(order.arrivalTime || '') ? order.arrivalTime.padStart(5, '0') : early?.arrivalTime;
       out.push({
         orderId: order.id, guest: maskName(order.guests?.[0]), roomType: order.room?.name || '', nights: order.nights,
-        ...(eta ? { eta } : {}), source: 'xiaosu', status: stay ? 'checked_in' : 'arriving',
+        ...(eta ? { eta } : {}), source: 'nanahotel', status: stay ? 'checked_in' : 'arriving',
       });
     }
     const sim = [];
@@ -1217,10 +1235,10 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
   }
 
   function whenText(date, today) {
-    if (date === today) return '今晚';
-    if (date === addDays(today, 1)) return '明天';
-    if (date <= addDays(today, 6)) return weekdayCN(date);
-    return formatDateCN(date);
+    if (date === today) return 'Tonight';
+    if (date === addDays(today, 1)) return 'Tomorrow';
+    if (date <= addDays(today, 6)) return weekdayLong(date);
+    return formatDate(date);
   }
 
   /** 2–4 suggestions from rules over the numbers, the tickets and the reviews. */
@@ -1231,9 +1249,9 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
     if (waiting.length) {
       const oldest = waiting.reduce((a, b) => (a.createdAt <= b.createdAt ? a : b));
       out.push({
-        id: 'tickets-waiting', level: 'warn', title: `${waiting.length} 张工单还没人接`,
-        text: `最早一张已经等了 ${Math.round((ctx.now - Date.parse(oldest.createdAt)) / MIN)} 分钟：${oldest.roomNumber} 房 ${oldest.title}`,
-        action: { tab: 'tickets', label: '去处理' },
+        id: 'tickets-waiting', level: 'warn', title: `${plural(waiting.length, 'request')} not picked up`,
+        text: `The oldest has waited ${Math.round((ctx.now - Date.parse(oldest.createdAt)) / MIN)} minutes: room ${oldest.roomNumber}, ${oldest.title}`,
+        action: { tab: 'tickets', label: 'Handle them' },
       });
     }
     const since = ctx.now - 30 * 24 * HOUR;
@@ -1246,24 +1264,25 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
     if (topIssue && topIssue[1] >= 2) {
       const issue = ISSUES[topIssue[0]];
       out.push({
-        id: `reviews-${topIssue[0]}`, level: 'warn', title: `${topIssue[1]} 条点评提到${issue.label}`,
-        text: `最近 30 天的中差评里有 ${topIssue[1]} 条提到${issue.label}，${issue.advice}。`, action: { tab: 'reviews', label: '去回复' },
+        id: `reviews-${topIssue[0]}`, level: 'warn', title: `${topIssue[1]} reviews mention ${issue.label}`,
+        text: `${topIssue[1]} critical reviews in the last 30 days mention ${issue.label}: ${issue.advice}.`, action: { tab: 'reviews', label: 'Reply' },
       });
     }
-    const xiaosuWaiting = arrivals.filter((a) => a.source === 'xiaosu' && a.status === 'arriving');
-    if (xiaosuWaiting.length) {
+    const ourArrivals = arrivals.filter((a) => a.source === 'nanahotel' && a.status === 'arriving');
+    if (ourArrivals.length) {
+      const first = ourArrivals[0];
       out.push({
-        id: 'xiaosu-arrivals', level: 'tip', title: `今天有 ${xiaosuWaiting.length} 位小宿客人到店`,
-        text: `${xiaosuWaiting[0].guest} · ${xiaosuWaiting[0].roomType}${xiaosuWaiting[0].eta ? `，预计 ${xiaosuWaiting[0].eta} 到` : ''}；到店后在房态里点房间就能办入住。`,
-        action: { tab: 'rooms', label: '去房态' },
+        id: 'nanahotel-arrivals', level: 'tip', title: `${plural(ourArrivals.length, 'NanaHotel guest')} arriving today`,
+        text: `${first.guest} · ${first.roomType}${first.eta ? `, expected around ${formatTime(first.eta)}` : ''}; check them in from the room grid when they arrive.`,
+        action: { tab: 'rooms', label: 'Open rooms' },
       });
     }
     const full = forecast.find((f) => f.occupancy >= 0.9);
     if (full) {
       out.push({
-        id: `full-${full.date}`, level: 'tip', title: `${whenText(full.date, today)}预计满房`,
-        text: `${formatDateCN(full.date)}（${weekdayCN(full.date)}）预测入住率 ${Math.round(full.occupancy * 100)}%，可以把${m.types[0].name}上调 8–12%，低价渠道少放几间。`,
-        action: { tab: 'reviews', label: '去营销' },
+        id: `full-${full.date}`, level: 'tip', title: `${whenText(full.date, today)} looks full`,
+        text: `${formatDate(full.date)} is forecast at ${Math.round(full.occupancy * 100)}%: consider raising the ${m.types[0].name} rate 8–12% and holding back rooms from discount channels.`,
+        action: { tab: 'reviews', label: 'Promotions' },
       });
     }
     const active = promos.activeFor(m.id);
@@ -1271,42 +1290,42 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
       .sort((a, b) => a.occupancy - b.occupancy)[0];
     if (low) {
       out.push({
-        id: `low-${low.date}`, level: 'tip', title: `${whenText(low.date, today)}入住率偏低`,
-        text: `${formatDateCN(low.date)}（${weekdayCN(low.date)}）预测只有 ${Math.round(low.occupancy * 100)}%，可以开一个限时特惠（如 85 折），小宿的旅客搜索时就能看到。`,
-        action: { tab: 'reviews', label: '开特惠' },
+        id: `low-${low.date}`, level: 'tip', title: `${whenText(low.date, today)} looks quiet`,
+        text: `${formatDate(low.date)} is forecast at only ${Math.round(low.occupancy * 100)}%: a limited-time deal (like 15% off) shows up when NanaHotel travelers search.`,
+        action: { tab: 'reviews', label: 'Start a deal' },
       });
     }
     const week = (from, to) => orders.filter((o) => {
-      const at = Date.parse(o.createdAt);
-      return at >= from && at < to;
+      const created = Date.parse(o.createdAt);
+      return created >= from && created < to;
     });
     const thisWeek = week(ctx.now - 7 * 24 * HOUR, ctx.now + 1);
     const lastWeek = week(ctx.now - 14 * 24 * HOUR, ctx.now - 7 * 24 * HOUR);
     if (thisWeek.length > lastWeek.length) {
       const nights = thisWeek.reduce((s, o) => s + (Number(o.nights) || 0) * (Number(o.rooms) || 1), 0);
       out.push({
-        id: 'xiaosu-up', level: 'good', title: `小宿订单本周 +${thisWeek.length - lastWeek.length} 单`,
-        text: `本周来自小宿的订单 ${thisWeek.length} 单（上周 ${lastWeek.length} 单），共 ${nights} 间夜。`,
+        id: 'nanahotel-up', level: 'good', title: `NanaHotel bookings up ${thisWeek.length - lastWeek.length} this week`,
+        text: `${plural(thisWeek.length, 'booking')} from NanaHotel this week (last week ${lastWeek.length}), ${plural(nights, 'room night')}.`,
       });
     }
     const unreplied = reviewsList.filter((rv) => !rv.reply && Date.parse(rv.at) >= ctx.now - 7 * 24 * HOUR);
     if (unreplied.length) {
       out.push({
-        id: 'reviews-unreplied', level: 'tip', title: `${unreplied.length} 条新点评还没回复`,
-        text: '及时回复差评能挽回不少印象分，好评也值得一句感谢；可以让小宿先起草一段。', action: { tab: 'reviews', label: '去回复' },
+        id: 'reviews-unreplied', level: 'tip', title: `${plural(unreplied.length, 'new review')} without a reply`,
+        text: 'A quick reply to a critical review wins back goodwill, and good ones deserve a thank-you; NanaHotel can draft one for you.', action: { tab: 'reviews', label: 'Reply' },
       });
     }
     const recent = reviewsList.filter((rv) => Date.parse(rv.at) >= since);
     const good = recent.filter((rv) => rv.rating >= 4).length;
     out.push({
-      id: 'reviews-good', level: 'good', title: recent.length ? `近 30 天好评率 ${Math.round((good / recent.length) * 100)}%` : `评分 ${m.hotel.rating}`,
-      text: recent.length ? `${recent.length} 条新点评里 ${good} 条 4 星以上，保持住～` : '最近还没有新点评，可以在客人退房时提醒他们写一写。',
+      id: 'reviews-good', level: 'good', title: recent.length ? `${Math.round((good / recent.length) * 100)}% positive in the last 30 days` : `Rated ${m.hotel.rating}`,
+      text: recent.length ? `${good} of ${recent.length} new reviews are 4 stars or more; keep it up.` : 'No new reviews lately; remind guests at check-out to leave one.',
     });
     return out.slice(0, 4);
   }
 
   /**
-   * GET overview?days=30: today's KPIs, the last `days` nights (old → new, today last), the next 14 nights'
+   * GET overview?days=30: today's KPIs, the last `days` nights (old → new, tonight last), the next 14 nights'
    * forecast, the channel mix over those days, today's arrivals and 2–4 suggestions. See docs/MERCHANT.md §2.
    */
   function overview(hotelId, { days } = {}) {
@@ -1314,14 +1333,14 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
     let n = DEFAULT_DAYS;
     if (!(days === undefined || days === null || days === '')) {
       n = typeof days === 'number' ? days : Number(String(days).trim());
-      if (!Number.isInteger(n) || n < 1 || n > MAX_DAYS) throw new MerchantError('invalid_days', `days 需要是 1–${MAX_DAYS} 之间的整数`);
+      if (!Number.isInteger(n) || n < 1 || n > MAX_DAYS) throw new MerchantError('invalid_days', `days needs to be a whole number from 1 to ${MAX_DAYS}`);
     }
     const t = nowMs();
     const ctx = dayContext(m, t);
-    // Tonight is the night in progress (before 06:00 the one that began yesterday); `date` is the calendar date.
+    // Tonight is the night in progress (before 6 AM the one that began yesterday); `date` is the calendar date.
     const { today } = ctx;
     const total = m.rooms.length;
-    const dining = diningByDate(ctx.requests);
+    const dining = diningByDate(m, ctx.requests);
     const diningOn = (date) => dining.get(date) || 0;
     const channels = {};
     const series = [];
@@ -1330,7 +1349,7 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
       const s = nightStats(m, ctx.real, date, channels);
       series.push({
         date, occupancy: round(s.occupancy, 3), revenue: Math.round(s.roomRevenue + s.fnb + diningOn(date)),
-        adr: s.sold ? Math.round(s.roomRevenue / s.sold) : 0, xiaosu: s.xiaosu,
+        adr: s.sold ? Math.round(s.roomRevenue / s.sold) : 0, xiaosu: s.nanahotel, nanahotel: s.nanahotel,
       });
     }
     const forecast = [];
@@ -1354,8 +1373,9 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
     const summary = reviewSummary(m, list);
     const nightsTotal = Object.values(channels).reduce((a, b) => a + b, 0) || 1;
     return {
-      hotel: { id: m.id, name: m.hotel.name, city: String(m.hotel.city || '').replace(/市$/, ''), category: m.category, rating: m.hotel.rating ?? null, rooms: total },
-      date: todayCN(new Date(t)),
+      hotel: { id: m.id, name: m.hotel.name, city: m.hotel.city || '', category: m.category, rating: m.hotel.rating ?? null, rooms: total, timeZone: m.zone },
+      date: todayIn(m.zone, t),
+      currency: 'USD',
       kpis: {
         occupancy: round(tonight.occupancy, 3),
         revenue: Math.round(revenue),
@@ -1380,12 +1400,12 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
     };
   }
 
-  /** 小宿 guests' meals served, on the room bill, by date (simulated F&B is in nightStats). */
-  function diningByDate(requests) {
+  /** NanaHotel guests' meals served, on the room bill, by date (simulated F&B is in nightStats). */
+  function diningByDate(m, requests) {
     const byDate = new Map();
     for (const { request: r } of requests) {
       if (r.kind !== 'dining' || r.status !== 'done' || !(r.price > 0)) continue;
-      const date = cnDate(r.at);
+      const date = dateIn(r.at, m.zone);
       byDate.set(date, (byDate.get(date) || 0) + r.price * Math.max(0, r.people - (Number(r.covered) || 0)));
     }
     return byDate;
@@ -1408,35 +1428,34 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
     return null;
   }
 
-  /** 杭州西湖边的第一家模拟酒店: the console's hotel before anyone has booked. */
+  /** The first simulated hotel near Times Square: the console's hotel before anyone has booked. */
   function demoHotel() {
-    const area = findCity('杭州')?.areas.find((a) => a.landmarks.some((l) => l.name === '西湖'));
-    return firstHotel('hz', (h) => !area || h.businessArea === area.name);
+    const area = findCity('New York')?.areas.find((a) => a.landmarks.some((l) => l.name === 'Times Square'));
+    return firstHotel('nyc', (h) => !area || h.businessArea === area.name);
   }
 
   /**
-   * GET hotels → { hotels: [{ id, name, city, category, rating, rooms, hasGuests }], current }: hotels 小宿 guests
-   * booked (most recent first), the demo hotel and a few other kinds (a luxury hotel, a courtyard inn, an economy
-   * one). `current` is the hotel of the latest confirmed order, else the demo hotel.
+   * GET hotels → { hotels: [{ id, name, city, category, rating, rooms, hasGuests }], current }: hotels NanaHotel
+   * guests booked (most recent first), the demo hotel and a few other kinds (a luxury resort, a historic inn, a
+   * budget hotel). `current` is the hotel of the latest confirmed order, else the demo hotel.
    */
   function listHotels() {
     const t = nowMs();
-    const today = todayCN(new Date(t));
     const latest = new Map();
     const guests = new Set();
     for (const o of orderRecords.values()) {
       if (o.status !== 'confirmed' || !o.hotel?.id) continue;
-      const at = o.payment?.paidAt || o.updatedAt || o.createdAt || '';
-      if (!latest.has(o.hotel.id) || latest.get(o.hotel.id) < at) latest.set(o.hotel.id, at);
-      if (o.checkOut >= today) guests.add(o.hotel.id);
+      const when = o.payment?.paidAt || o.updatedAt || o.createdAt || '';
+      if (!latest.has(o.hotel.id) || latest.get(o.hotel.id) < when) latest.set(o.hotel.id, when);
+      if (o.checkOut >= todayIn(resolveTimeZone(o.hotel.timeZone, DEFAULT_TIME_ZONE), t)) guests.add(o.hotel.id);
     }
     const booked = [...latest.entries()].sort((a, b) => (a[1] < b[1] ? 1 : a[1] > b[1] ? -1 : 0)).map(([id]) => id);
     const demo = demoHotel();
     const samples = [
       demo,
-      firstHotel('sh', (h) => h.category === 'luxury'),
-      firstHotel('lj', (h) => h.businessArea === '大研古城' && h.category === 'comfort'),
-      firstHotel('cd', (h) => h.category === 'economy'),
+      firstHotel('lv', (h) => h.category === 'luxury'),
+      firstHotel('nola', (h) => h.businessArea === 'French Quarter' && h.category === 'midscale'),
+      firstHotel('orl', (h) => h.category === 'budget'),
     ].filter(Boolean).map((h) => h.id);
     const list = [];
     for (const id of [...booked, ...samples]) {
@@ -1450,7 +1469,7 @@ export function createMerchantService({ store, bookings, stays, hotels, clock = 
       if (!hotel) continue;
       const m = modelOf(hotel);
       list.push({
-        id: hotel.id, name: hotel.name, city: String(hotel.city || '').replace(/市$/, ''), category: m.category,
+        id: hotel.id, name: hotel.name, city: hotel.city || '', category: m.category,
         rating: hotel.rating ?? null, rooms: m.rooms.length, hasGuests: guests.has(hotel.id),
       });
     }

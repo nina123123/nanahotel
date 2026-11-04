@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "xiaosu"
+rootProject.name = "nanahotel"
 include(":app")

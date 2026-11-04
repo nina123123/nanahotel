@@ -1,19 +1,22 @@
 import * as defaultIds from '../util/ids.js';
-import { todayCN, earliestCheckIn, checkStay, formatDateTimeCN, nightsBetween } from '../util/dates.js';
-import { guestNameProblem } from '../util/names.js';
+import { todayIn, earliestCheckIn, checkStay, formatDate, formatDateTime, nightsBetween, resolveTimeZone, DEFAULT_TIME_ZONE } from '../util/dates.js';
+import { guestNameProblem, namePartProblem, splitFullName, cleanName } from '../util/names.js';
+import { formatUsd } from '../util/money.js';
 
 /**
  * Quotes → orders → simulated payment → cancellation. Everything is simulated: no money moves.
- * A quote is created only by prepareBooking (agent side) and turned into an order only by an explicit
- * user tap (confirmQuote), so the model can never book on its own.
+ * A quote is created only by prepareBooking (agent side) and turned into an order only by an explicit user tap
+ * (confirmQuote), so the model can never book on its own.
  *
- * Methods are synchronous (callers may `await` them). Time comes from the injected clock, and expiry
- * is applied lazily whenever a quote/order is read, so there are no timers.
+ * Methods are synchronous (callers may `await` them). Time comes from the injected clock, and expiry is applied
+ * lazily whenever a quote/order is read, so there are no timers. Dates are checked in the hotel's time zone.
  */
 
 const QUOTE_TTL_MS = 15 * 60 * 1000;
 const PAY_TTL_MS = 15 * 60 * 1000;
-const PHONE_RE = /^1[3-9]\d{9}$/;
+// North American numbers: area code and exchange start with 2–9. Stored as E.164.
+const US_PHONE_RE = /^\+1[2-9]\d{2}[2-9]\d{6}$/;
+const EMAIL_RE = /^[^\s@"<>()[\]\\,;:]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*\.[A-Za-z]{2,}$/;
 const MAX_CHILDREN = 6;
 
 const STATUS = {
@@ -22,7 +25,7 @@ const STATUS = {
   order_closed: 409, order_cancelled: 409, not_cancellable: 409,
 };
 
-/** Typed booking error; `message` is user-facing Chinese. */
+/** Typed booking error; `message` is user-facing English. */
 export class BookingError extends Error {
   constructor(code, message, details) {
     super(message);
@@ -33,26 +36,56 @@ export class BookingError extends Error {
   }
 }
 
-export const QUOTE_STATUS_LABELS = Object.freeze({ pending: '待确认', confirmed: '已确认', expired: '已过期', superseded: '已失效' });
-export const ORDER_STATUS_LABELS = Object.freeze({ pending_payment: '待支付', confirmed: '已确认', cancelled: '已取消', closed: '已关闭' });
-export const PAYMENT_METHOD_LABELS = Object.freeze({ wechat: '微信支付', alipay: '支付宝' });
+export const QUOTE_STATUS_LABELS = Object.freeze({ pending: 'Awaiting confirmation', confirmed: 'Confirmed', expired: 'Expired', superseded: 'Replaced' });
+export const ORDER_STATUS_LABELS = Object.freeze({ pending_payment: 'Awaiting payment', confirmed: 'Confirmed', cancelled: 'Cancelled', closed: 'Closed' });
+export const PAYMENT_METHOD_LABELS = Object.freeze({ card: 'Credit or debit card', apple_pay: 'Apple Pay' });
+export const PHONE_MESSAGE = 'Please enter a 10-digit US phone number';
+export const NAME_MESSAGE = 'Please enter a first and last name';
+export const EMAIL_MESSAGE = "That email doesn't look right";
 
-/** '13812345678' → '138****5678'. Non-phone strings are masked conservatively. */
+/** '+14155550123' → '***-***-0123'. Other strings are masked conservatively. */
 export function maskPhone(phone) {
-  const s = String(phone ?? '').replace(/\s+/g, '');
-  if (!s) return '';
-  if (s.length >= 7) return `${s.slice(0, 3)}****${s.slice(-4)}`;
+  const raw = String(phone ?? '').trim();
+  // Already masked (a public quote passed through again): keep it.
+  if (/^\*{3}-\*{3}-\d{4}$/.test(raw)) return raw;
+  const digits = raw.replace(/\D/g, '');
+  if (!digits) return '';
+  if (digits.length >= 7) return `***-***-${digits.slice(-4)}`;
   return '****';
 }
 
-/** Normalizes '+86 138-1234-5678' → '13812345678'; returns null when not a mainland mobile number. */
+/** '+14155550123' → '(415) 555-0123'. */
+export function formatPhone(phone) {
+  const s = String(phone ?? '');
+  if (!US_PHONE_RE.test(s)) return s;
+  return `(${s.slice(2, 5)}) ${s.slice(5, 8)}-${s.slice(8)}`;
+}
+
+/**
+ * '(415) 555-0123', '415-555-0123', '415.555.0123', '+1 415 555 0123', '1-415-555-0123' → '+14155550123';
+ * null when it is not a valid 10-digit US number.
+ */
 export function normalizePhone(phone) {
-  // Chinese IMEs often produce full-width digits, plus signs and dashes.
-  const s = String(phone ?? '')
-    .replace(/[０-９＋]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))
-    .replace(/[\s\-－‐-―()（）]/g, '')
-    .replace(/^(\+?86)(?=1\d{10}$)/, '');
-  return PHONE_RE.test(s) ? s : null;
+  const raw = String(phone ?? '')
+    // Full-width digits, signs and brackets come from some keyboards and pasted text.
+    .replace(/[\uFF01-\uFF5E]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))
+    .replace(/\u3000/g, ' ')
+    .trim();
+  if (!raw || /[^\d\s().+\-‐-―]/.test(raw)) return null;
+  let digits = raw.replace(/\D/g, '');
+  if (digits.length === 11 && digits.startsWith('1')) digits = digits.slice(1);
+  else if (raw.startsWith('+') && !raw.replace(/\s/g, '').startsWith('+1')) return null;
+  if (digits.length !== 10) return null;
+  const e164 = `+1${digits}`;
+  return US_PHONE_RE.test(e164) ? e164 : null;
+}
+
+/** A plausible email address, trimmed (the domain lower-cased); null when it does not look like one. */
+export function normalizeEmail(email) {
+  const s = String(email ?? '').trim();
+  if (!s || s.length > 254 || !EMAIL_RE.test(s)) return null;
+  const at = s.lastIndexOf('@');
+  return `${s.slice(0, at)}@${s.slice(at + 1).toLowerCase()}`;
 }
 
 /** Quote as sent to the browser / model: no userId, masked phone. */
@@ -80,8 +113,12 @@ function intOrNull(v) {
 }
 
 function parseGuests(guests) {
-  const list = Array.isArray(guests) ? guests : typeof guests === 'string' ? guests.split(/[,，、;；\n]+/) : [];
-  return list.map((g) => String(g ?? '').trim().replace(/\s+/g, ' ')).filter(Boolean);
+  const list = Array.isArray(guests) ? guests : typeof guests === 'string' ? guests.split(/[,;\n]+|\s+and\s+|\s*&\s*/) : [];
+  return list.map((g) => cleanName(g)).filter(Boolean);
+}
+
+function adultsText(adults, children) {
+  return `${adults} adult${adults === 1 ? '' : 's'}${children ? ` and ${children} ${children === 1 ? 'child' : 'children'}` : ''}`;
 }
 
 /** True when the rate's free-cancel deadline fell after `sinceIso` and has now passed: the terms shown no longer hold. */
@@ -90,18 +127,23 @@ function termsLapsed(rate, sinceIso, t) {
   return Number.isFinite(deadline) && Date.parse(sinceIso) < deadline && t >= deadline;
 }
 
-const TERMS_CHANGED_MSG = '免费取消时间已过，取消政策已变化，请重新报价';
+const TERMS_CHANGED_MSG = 'The free cancellation deadline has passed since this quote, so the terms changed; please get a new quote';
 
-/** '微信' / 'WeChat' / '支付宝' … → 'wechat' | 'alipay', or null. */
+/** 'card' / 'credit card' / 'Visa' / 'Apple Pay' … → 'card' | 'apple_pay', or null. */
 export function normalizeMethod(method) {
-  const m = String(method || '').trim().toLowerCase();
-  if (['wechat', 'weixin', 'wxpay', '微信', '微信支付'].includes(m)) return 'wechat';
-  if (['alipay', 'zhifubao', '支付宝'].includes(m)) return 'alipay';
+  const m = String(method || '').trim().toLowerCase().replace(/[\s_-]+/g, ' ');
+  if (['card', 'credit card', 'debit card', 'credit', 'debit', 'credit or debit card', 'visa', 'mastercard', 'amex', 'american express', 'discover'].includes(m)) return 'card';
+  if (['apple pay', 'applepay', 'apple'].includes(m)) return 'apple_pay';
   return null;
 }
 
+/** The time zone a booking's dates are checked in: its hotel's. */
+function zoneOf(order) {
+  return resolveTimeZone(order?.hotel?.timeZone, DEFAULT_TIME_ZONE);
+}
+
 /**
- * @param {{ store: { collection(name: string) }, hotels: { priceCheck(args): { hotel, roomType, rate } },
+ * @param {{ store: { collection(name: string) }, hotels: { priceCheck(args): { hotel, roomType, rate }, zoneOfHotel?(hotel) },
  *           clock?: { now: () => Date }, ids?: Partial<typeof defaultIds> }} deps
  */
 export function createBookingService({ store, hotels, clock = { now: () => new Date() }, ids } = {}) {
@@ -115,7 +157,7 @@ export function createBookingService({ store, hotels, clock = { now: () => new D
 
   function requireUser(userId) {
     const u = str(userId, 100);
-    if (!u) throw new BookingError('unauthorized', '缺少用户身份，请刷新页面后重试');
+    if (!u) throw new BookingError('unauthorized', 'Your user id is missing; please reload the page and try again');
     return u;
   }
 
@@ -151,51 +193,74 @@ export function createBookingService({ store, hotels, clock = { now: () => new D
 
   function loadQuote(userId, quoteId) {
     const q = ownQuote(requireUser(userId), quoteId);
-    if (!q) throw new BookingError('not_found', '没有找到这个预订单');
+    if (!q) throw new BookingError('not_found', "Couldn't find that booking quote");
     return q;
   }
 
   function loadOrder(userId, orderId) {
     const o = ownOrder(requireUser(userId), orderId);
-    if (!o) throw new BookingError('not_found', '没有找到这个订单');
+    if (!o) throw new BookingError('not_found', "Couldn't find that order");
     return o;
+  }
+
+  function guestError(g, problem) {
+    const name = g.slice(0, 40);
+    if (problem === 'placeholder') return new BookingError('invalid_guest_name', `"${name}" isn't a full name; ask the user for each guest's first and last name as on their ID`);
+    if (problem === 'incomplete') return new BookingError('invalid_guest_name', `"${name}" needs a last name too: each guest needs a first and last name`);
+    return new BookingError('invalid_guest_name', `"${name}" doesn't look like a name; use a first and last name (letters only)`);
+  }
+
+  /** The person booking: the given holder, else the first guest; the email is needed for the confirmation. */
+  function holderOf(input, guests) {
+    const h = input.holder && typeof input.holder === 'object' ? input.holder : {};
+    let firstName = cleanName(h.firstName);
+    let lastName = cleanName(h.lastName);
+    if (!firstName && !lastName) ({ firstName, lastName } = splitFullName(guests[0]));
+    if (!firstName || !lastName || namePartProblem(firstName) || namePartProblem(lastName)) throw new BookingError('invalid_name', NAME_MESSAGE);
+    const rawEmail = str(h.email ?? input.email, 254);
+    if (!rawEmail) throw new BookingError('missing_email', 'An email address is needed for the booking confirmation');
+    const email = normalizeEmail(rawEmail);
+    if (!email) throw new BookingError('invalid_email', EMAIL_MESSAGE);
+    return { firstName, lastName, email };
   }
 
   function validateInput(input, now) {
     const hotelId = str(input.hotelId, 80);
-    if (!hotelId) throw new BookingError('invalid_request', '缺少酒店编号（hotel_id）');
+    if (!hotelId) throw new BookingError('invalid_request', 'The hotel id (hotel_id) is missing');
     const rateId = str(input.rateId, 40);
-    if (!rateId) throw new BookingError('invalid_request', '缺少价格方案编号（rate_id），请先查看房型');
+    if (!rateId) throw new BookingError('invalid_request', 'The rate id (rate_id) is missing; look at the rooms first');
 
-    const stay = checkStay(input.checkIn, input.checkOut, todayCN(now), { allowDefaults: false, earliestCheckIn: earliestCheckIn(now) });
+    const hotel = typeof hotels.getHotel === 'function' ? hotels.getHotel(hotelId) : null;
+    const zone = resolveTimeZone(hotel?.timeZone, DEFAULT_TIME_ZONE);
+    const stay = checkStay(input.checkIn, input.checkOut, todayIn(zone, now), { allowDefaults: false, earliestCheckIn: earliestCheckIn(now, zone) });
     if (stay.error) throw new BookingError('invalid_dates', stay.error);
 
     const rooms = intOrNull(input.rooms) ?? 1;
-    if (!Number.isInteger(rooms) || rooms < 1 || rooms > 5) throw new BookingError('invalid_rooms', '房间数需要在1-5间之间');
+    if (!Number.isInteger(rooms) || rooms < 1 || rooms > 5) throw new BookingError('invalid_rooms', 'Rooms need to be between 1 and 5');
     const children = intOrNull(input.children) ?? 0;
-    if (!Number.isInteger(children) || children < 0 || children > MAX_CHILDREN) throw new BookingError('invalid_guests', `儿童人数需要在0-${MAX_CHILDREN}之间`);
+    if (!Number.isInteger(children) || children < 0 || children > MAX_CHILDREN) throw new BookingError('invalid_guests', `Children need to be between 0 and ${MAX_CHILDREN}`);
 
     const guests = parseGuests(input.guests);
-    if (!guests.length) throw new BookingError('missing_guest', '需要入住人姓名（每间房至少1位）');
+    if (!guests.length) throw new BookingError('missing_guest', 'A guest name is needed (at least one per room)');
     for (const g of guests) {
       const problem = guestNameProblem(g);
-      if (problem === 'placeholder') throw new BookingError('invalid_guest_name', `入住人「${g.slice(0, 20)}」不是完整姓名，请向用户确认与身份证一致的全名`);
-      if (problem) throw new BookingError('invalid_guest_name', `入住人姓名「${g.slice(0, 20)}」不正确，需为2-20个字的真实姓名`);
+      if (problem) throw guestError(g, problem);
     }
     // Every named guest occupies a bed, so an omitted adult count covers the named people too.
     const adults = intOrNull(input.adults) ?? Math.max(2, rooms, guests.length - children);
-    if (!Number.isInteger(adults) || adults < 1) throw new BookingError('invalid_guests', '入住人数至少1位');
-    if (adults < rooms) throw new BookingError('invalid_guests', `订${rooms}间房至少需要${rooms}位成人入住（每间至少1位）`);
-    if (guests.length < rooms) throw new BookingError('need_more_guests', `订${rooms}间房需要至少${rooms}位入住人姓名（每间1位），现在只有${guests.length}位`);
+    if (!Number.isInteger(adults) || adults < 1) throw new BookingError('invalid_guests', 'At least one adult is needed');
+    if (adults < rooms) throw new BookingError('invalid_guests', `${rooms} rooms need at least ${rooms} adults (one per room)`);
+    if (guests.length < rooms) throw new BookingError('need_more_guests', `${rooms} rooms need at least ${rooms} guest names (one per room); there ${guests.length === 1 ? 'is 1' : `are ${guests.length}`}`);
     if (guests.length > adults + children) {
-      throw new BookingError('guest_count_mismatch', `入住人有${guests.length}位，但人数填的是${adults}位成人${children ? `、${children}名儿童` : ''}，请和用户确认实际入住人数`);
+      throw new BookingError('guest_count_mismatch', `There are ${guests.length} guest names but the party is ${adultsText(adults, children)}; please check with the user how many people are staying`);
     }
 
     const contactPhone = normalizePhone(input.contactPhone);
-    if (!contactPhone) throw new BookingError('invalid_phone', '请提供正确的11位中国大陆手机号');
+    if (!contactPhone) throw new BookingError('invalid_phone', PHONE_MESSAGE);
+    const holder = holderOf(input, guests);
 
     return {
-      hotelId, rateId, ...stay, rooms, adults, children, guests, contactPhone,
+      hotelId, rateId, ...stay, rooms, adults, children, guests, contactPhone, holder,
       arrivalTime: str(input.arrivalTime, 20),
       specialRequests: str(input.specialRequests, 200),
     };
@@ -211,7 +276,7 @@ export function createBookingService({ store, hotels, clock = { now: () => new D
     });
     const occupants = v.adults + v.children;
     if (occupants > v.rooms * roomType.maxOccupancy) {
-      throw new BookingError('too_many_guests', `${roomType.name}每间最多住${roomType.maxOccupancy}人，${occupants}位需要至少${Math.ceil(occupants / roomType.maxOccupancy)}间`);
+      throw new BookingError('too_many_guests', `The ${roomType.name} sleeps up to ${roomType.maxOccupancy}; ${occupants} people need at least ${Math.ceil(occupants / roomType.maxOccupancy)} rooms`);
     }
 
     // values().filter rather than find(): works with any store whose collections expose values().
@@ -225,11 +290,14 @@ export function createBookingService({ store, hotels, clock = { now: () => new D
       userId,
       sessionId,
       status: 'pending',
-      hotel: { id: hotel.id, name: hotel.name, address: hotel.address, tel: hotel.tel || '', city: hotel.city, district: hotel.district },
+      hotel: {
+        id: hotel.id, name: hotel.name, address: hotel.address, tel: hotel.tel || '', city: hotel.city, state: hotel.state || '', district: hotel.district,
+        timeZone: resolveTimeZone(hotel.timeZone, DEFAULT_TIME_ZONE),
+      },
       room: { roomId: roomType.roomId, name: roomType.name, bed: roomType.bed },
       rate: {
         rateId: rate.rateId, name: rate.name, breakfast: rate.breakfast, cancelPolicy: { ...rate.cancelPolicy },
-        // The hotel's 特惠 that priced some of these nights (merchant.js counts the orders it brought).
+        // The hotel's deal that priced some of these nights (merchant.js counts the orders it brought).
         ...(rate.promo ? { promo: { ...rate.promo } } : {}),
       },
       checkIn: v.checkIn,
@@ -239,11 +307,14 @@ export function createBookingService({ store, hotels, clock = { now: () => new D
       adults: v.adults,
       children: v.children,
       guests: v.guests,
+      holder: v.holder,
       contactPhone: v.contactPhone,
       arrivalTime: v.arrivalTime,
       specialRequests: v.specialRequests,
       nightly: rate.nightly.map((n) => ({ date: n.date, price: n.price })),
       totalPrice: rate.totalPrice,
+      taxesAndFees: Number.isFinite(rate.taxesAndFees) ? rate.taxesAndFees : 0,
+      currency: 'USD',
       createdAt: iso(t),
       expiresAt: iso(t + QUOTE_TTL_MS),
       orderId: null,
@@ -257,7 +328,7 @@ export function createBookingService({ store, hotels, clock = { now: () => new D
       const id = idgen.orderNo(new Date(t));
       if (!orders.get(id)) return id;
     }
-    throw new BookingError('internal', '生成订单号失败，请重试');
+    throw new BookingError('internal', "Couldn't create an order number; please try again");
   }
 
   function confirmQuote({ userId, quoteId } = {}) {
@@ -266,8 +337,8 @@ export function createBookingService({ store, hotels, clock = { now: () => new D
       const existing = quote.orderId ? refreshOrder(orders.get(quote.orderId)) : null;
       if (existing) return existing;
     }
-    if (quote.status === 'expired') throw new BookingError('expired', '这个报价已过期（15分钟内有效），我帮你重新查一下最新价格吧');
-    if (quote.status === 'superseded') throw new BookingError('superseded', '这个报价已被更新的预订替代，请以最新的为准');
+    if (quote.status === 'expired') throw new BookingError('expired', 'This quote expired (quotes are good for 15 minutes); let me get you a fresh price');
+    if (quote.status === 'superseded') throw new BookingError('superseded', 'A newer quote replaced this one; please use the latest');
     if (termsLapsed(quote.rate, quote.createdAt, nowMs())) {
       throw new BookingError('terms_changed', TERMS_CHANGED_MSG, { freeUntil: quote.rate.cancelPolicy.freeUntil });
     }
@@ -281,12 +352,12 @@ export function createBookingService({ store, hotels, clock = { now: () => new D
       });
     } catch (err) {
       if (err instanceof BookingError && (err.code === 'sold_out' || err.code === 'rate_not_found')) {
-        throw new BookingError('sold_out', '刚刚这个房型被订完了，换个房型或日期看看？');
+        throw new BookingError('sold_out', 'That room just sold out; want to try another room or other dates?');
       }
       throw err;
     }
     if (check.rate.totalPrice !== quote.totalPrice) {
-      throw new BookingError('price_changed', `价格有变动：刚才是 ¥${quote.totalPrice}，现在是 ¥${check.rate.totalPrice}，需要重新确认`, {
+      throw new BookingError('price_changed', `The price changed: it was ${formatUsd(quote.totalPrice)} and is now ${formatUsd(check.rate.totalPrice)}; please confirm again`, {
         oldPrice: quote.totalPrice, newPrice: check.rate.totalPrice,
       });
     }
@@ -308,11 +379,14 @@ export function createBookingService({ store, hotels, clock = { now: () => new D
       adults: quote.adults,
       children: quote.children ?? 0,
       guests: [...quote.guests],
+      holder: { ...quote.holder },
       contactPhone: quote.contactPhone,
       arrivalTime: quote.arrivalTime,
       specialRequests: quote.specialRequests,
       nightly: quote.nightly.map((n) => ({ ...n })),
       totalPrice: quote.totalPrice,
+      taxesAndFees: quote.taxesAndFees ?? 0,
+      currency: 'USD',
       payment: null,
       confirmationNo: null,
       cancellation: null,
@@ -328,17 +402,17 @@ export function createBookingService({ store, hotels, clock = { now: () => new D
   function payOrder({ userId, orderId, method } = {}) {
     const order = loadOrder(userId, orderId);
     if (order.status === 'confirmed') return order;
-    if (order.status === 'closed') throw new BookingError('order_closed', '订单已超时关闭（15分钟内未支付），需要的话我帮你重新下单');
-    if (order.status === 'cancelled') throw new BookingError('order_cancelled', '订单已取消，不能再支付');
+    if (order.status === 'closed') throw new BookingError('order_closed', "This order closed because it wasn't paid within 15 minutes; I can book it again if you like");
+    if (order.status === 'cancelled') throw new BookingError('order_cancelled', "This order was cancelled and can't be paid");
     const t = nowMs();
     if (termsLapsed(order.rate, order.createdAt, t)) {
       throw new BookingError('terms_changed', TERMS_CHANGED_MSG, { freeUntil: order.rate.cancelPolicy.freeUntil });
     }
-    if (order.checkIn < earliestCheckIn(new Date(t))) {
-      throw new BookingError('invalid_dates', `入住日期 ${order.checkIn} 已经过去了，这个订单不能再支付，请重新预订`);
+    if (order.checkIn < earliestCheckIn(new Date(t), zoneOf(order))) {
+      throw new BookingError('invalid_dates', `Check-in on ${formatDate(order.checkIn)} has passed, so this order can't be paid anymore; please book again`);
     }
     const m = normalizeMethod(method);
-    if (!m) throw new BookingError('invalid_payment_method', '请选择微信支付或支付宝');
+    if (!m) throw new BookingError('invalid_payment_method', 'Please choose a credit or debit card or Apple Pay');
     const paid = {
       ...order,
       status: 'confirmed',
@@ -354,30 +428,34 @@ export function createBookingService({ store, hotels, clock = { now: () => new D
   function assess(order, t) {
     const total = order.totalPrice;
     if (order.status === 'cancelled') {
-      return { cancellable: false, penalty: order.cancellation?.penalty ?? 0, refund: order.cancellation?.refund ?? 0, policyText: '订单已取消' };
+      return { cancellable: false, penalty: order.cancellation?.penalty ?? 0, refund: order.cancellation?.refund ?? 0, policyText: 'This order is already cancelled' };
     }
-    if (order.status === 'closed') return { cancellable: false, penalty: 0, refund: 0, policyText: '订单已超时关闭，无需取消' };
-    if (order.status === 'pending_payment') return { cancellable: true, penalty: 0, refund: 0, policyText: '订单还没支付，取消不产生任何费用' };
+    if (order.status === 'closed') return { cancellable: false, penalty: 0, refund: 0, policyText: 'This order already closed, so there is nothing to cancel' };
+    if (order.status === 'pending_payment') return { cancellable: true, penalty: 0, refund: 0, policyText: "This order hasn't been paid, so cancelling costs nothing" };
     // The guest is (or was) in the room: the stay is under way, whatever the dates or the policy say.
-    if (order.checkedInAt) return { cancellable: false, penalty: total, refund: 0, policyText: '已办理入住，无法在线取消，如有问题请联系酒店' };
+    if (order.checkedInAt) return { cancellable: false, penalty: total, refund: 0, policyText: "You've checked in, so this booking can't be cancelled online; please talk to the front desk" };
 
-    // Until 06:00 the night in progress still belongs to the previous date (凌晨入住).
-    const today = earliestCheckIn(new Date(t));
-    if (today >= order.checkOut) return { cancellable: false, penalty: total, refund: 0, policyText: '已过离店日期，订单无法取消' };
-    if (today > order.checkIn) return { cancellable: false, penalty: total, refund: 0, policyText: '已过入住日期，无法在线取消，如有问题请联系酒店' };
+    const zone = zoneOf(order);
+    // Until 6 AM at the hotel the night in progress still belongs to the previous date.
+    const today = earliestCheckIn(new Date(t), zone);
+    if (today >= order.checkOut) return { cancellable: false, penalty: total, refund: 0, policyText: 'The stay has ended, so this order can no longer be cancelled' };
+    if (today > order.checkIn) return { cancellable: false, penalty: total, refund: 0, policyText: "The check-in date has passed, so this booking can't be cancelled online; please contact the hotel" };
 
     const policy = order.rate.cancelPolicy || { type: 'none' };
     if (policy.type === 'none') {
-      return { cancellable: true, penalty: total, refund: 0, policyText: `该价格不可取消，现在取消将扣除全部房费 ¥${total}，不退款` };
+      return { cancellable: true, penalty: total, refund: 0, policyText: `This rate is non-refundable: cancelling now forfeits the full ${formatUsd(total)}, with no refund` };
     }
     const deadline = Date.parse(policy.freeUntil);
-    const when = formatDateTimeCN(policy.freeUntil);
+    const when = formatDateTime(policy.freeUntil, zone, { abbr: true });
     if (Number.isFinite(deadline) && t < deadline) {
-      return { cancellable: true, penalty: 0, refund: total, policyText: `${when}前可免费取消，现在取消全额退款 ¥${total}` };
+      return { cancellable: true, penalty: 0, refund: total, policyText: `Free cancellation until ${when}: cancelling now refunds the full ${formatUsd(total)}` };
     }
-    // Both 免费取消 and 限时取消 charge the first night once their free window has passed.
+    // Both the free and the limited rate charge the first night once their free window has passed.
     const penalty = Math.min(total, (order.nightly[0]?.price ?? 0) * order.rooms);
-    return { cancellable: true, penalty, refund: total - penalty, policyText: `已过免费取消时间（${when}），现在取消收取首晚房费 ¥${penalty}，退款 ¥${total - penalty}` };
+    return {
+      cancellable: true, penalty, refund: total - penalty,
+      policyText: `The free cancellation deadline (${when}) has passed: cancelling now costs the first night, ${formatUsd(penalty)}, and refunds ${formatUsd(total - penalty)}`,
+    };
   }
 
   function previewCancellation({ userId, orderId } = {}) {
@@ -432,7 +510,7 @@ export function createBookingService({ store, hotels, clock = { now: () => new D
    */
   function markCheckedIn({ userId, orderId, at } = {}) {
     const order = loadOrder(userId, orderId);
-    if (order.status !== 'confirmed') throw new BookingError('order_closed', '只有已确认的订单才能办理入住');
+    if (order.status !== 'confirmed') throw new BookingError('order_closed', 'Only a confirmed order can be checked in');
     if (order.checkedInAt) return order;
     const t = nowMs();
     const marked = { ...order, checkedInAt: typeof at === 'string' && Number.isFinite(Date.parse(at)) ? at : iso(t), updatedAt: iso(t) };
@@ -459,13 +537,13 @@ export function createBookingService({ store, hotels, clock = { now: () => new D
    * check-out, nights, nightly prices and total move; the extension's own payment is kept in `extensions`.
    * `nightly` holds per-room prices like the order's, `amount` is the extension total for all rooms.
    */
-  function extendOrder({ userId, orderId, fromDate, toDate, nightly, amount, payment, extensionId } = {}) {
+  function extendOrder({ userId, orderId, fromDate, toDate, nightly, amount, taxesAndFees = 0, payment, extensionId } = {}) {
     const order = loadOrder(userId, orderId);
-    if (order.status !== 'confirmed') throw new BookingError('order_closed', '只有已确认的订单才能续住');
+    if (order.status !== 'confirmed') throw new BookingError('order_closed', 'Only a confirmed order can be extended');
     // A second extension confirmed in between moved the check-out: this one was priced for the old one.
-    if (order.checkOut !== fromDate) throw new BookingError('superseded', '订单的离店日期已经变了，这个续住报价失效了，请重新报价');
+    if (order.checkOut !== fromDate) throw new BookingError('superseded', 'The check-out date of this order changed, so this extension quote no longer applies; please get a new one');
     const added = Array.isArray(nightly) ? nightly.map((n) => ({ date: n.date, price: n.price })) : [];
-    if (!added.length || nightsBetween(fromDate, toDate) !== added.length) throw new BookingError('invalid_dates', '续住日期不对，请重新报价');
+    if (!added.length || nightsBetween(fromDate, toDate) !== added.length) throw new BookingError('invalid_dates', 'The extension dates are off; please get a new quote');
     const t = nowMs();
     const extended = {
       ...order,
@@ -473,6 +551,7 @@ export function createBookingService({ store, hotels, clock = { now: () => new D
       nights: order.nights + added.length,
       nightly: [...order.nightly.map((n) => ({ ...n })), ...added],
       totalPrice: order.totalPrice + amount,
+      taxesAndFees: (order.taxesAndFees || 0) + (Number(taxesAndFees) || 0),
       extensions: [...(order.extensions || []), { id: extensionId, fromDate, toDate, nights: added.length, amount, payment: payment ? { ...payment } : null }],
       updatedAt: iso(t),
     };

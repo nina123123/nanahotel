@@ -1,6 +1,6 @@
 // node:fs/promises subset for json-store.js, persisted in IndexedDB so conversations and orders survive
 // closing the app. Files are kept in memory and written through; directories are implicit.
-const DB_NAME = 'xiaosu-files';
+const DB_NAME = 'nanahotel-files';
 const STORE = 'files';
 
 const files = new Map();
@@ -31,7 +31,7 @@ function open() {
       keys.forEach((k, i) => files.set(String(k), values[i]));
     } catch (err) {
       // Private browsing can refuse IndexedDB; the app still works, it just forgets on reload.
-      console.warn('[xiaosu] 本地存储不可用，数据只保存在本次打开期间：', err);
+      console.warn('[nanahotel] Local storage is unavailable; data lasts only until the app closes:', err);
       db = null;
     }
   })();

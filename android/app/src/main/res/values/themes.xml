@@ -1,5 +1,5 @@
 <resources>
-    <style name="Theme.Xiaosu" parent="android:Theme.Material.Light.NoActionBar">
+    <style name="Theme.NanaHotel" parent="android:Theme.Material.Light.NoActionBar">
         <item name="android:windowBackground">@color/bg</item>
         <item name="android:statusBarColor">@color/bg</item>
         <item name="android:navigationBarColor">@color/bg</item>

@@ -1,7 +1,7 @@
-// 小宿's mascot: a calm capybara with an orange on its head. Static, trusted SVG markup only (never server data).
-// Each part has a class so style.css can animate it; the mood is a data-mood attribute on the <svg>
+// Nana, NanaHotel's mascot: a calm capybara with an orange on its head. Static, trusted SVG markup only (never server
+// data). Each part has a class so style.css can animate it; the mood is a data-mood attribute on the <svg>
 // (one of PET_MOODS) and a poke is the .is-poked class. tools/build-pet-riv.mjs turns this same drawing into
-// public/art/xiaosu.riv, the animated Rive version the app plays when it can.
+// public/art/nana.riv, the animated Rive version the app plays when it can.
 
 /** The pet's moods, in the order of the Rive state machine's `mood` input values. */
 export const PET_MOODS = ['idle', 'listening', 'thinking', 'talking', 'happy', 'sleepy', 'oops'];

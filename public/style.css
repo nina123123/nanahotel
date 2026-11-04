@@ -1,4 +1,4 @@
-/* 小宿 — warm cream and amber, like a call with a friend who books hotels. */
+/* NanaHotel — warm cream and amber, like a call with a friend who books hotels. */
 
 :root {
   --bg: #fbf5ea;
@@ -24,8 +24,8 @@
   --warn: #a4500a;
   --danger: #c8322f;
   --hangup: #f04438;
-  --wechat: #07c160;
-  --alipay: #1677ff;
+  --pay-card: #1f4ea8;
+  --pay-apple: #111111;
   --pet-bg: #fbe3bf;
   --glass: rgba(251, 245, 234, 0.84);
   --backdrop: rgba(42, 33, 24, 0.42);
@@ -38,6 +38,9 @@
   --bottom-h: 96px;
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  /* English first: the platform's UI face (SF Pro, Segoe UI, Roboto), emoji last. */
+  --font: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif,
+    "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji";
   color-scheme: light;
 }
 
@@ -85,9 +88,10 @@ html, body {
 body {
   background: radial-gradient(130% 55% at 50% -12%, var(--bg-glow) 0%, transparent 62%) var(--bg);
   color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  font-family: var(--font);
   font-size: 16px;
   line-height: 1.5;
+  letter-spacing: -0.003em;
   -webkit-font-smoothing: antialiased;
   -webkit-tap-highlight-color: transparent;
   -webkit-text-size-adjust: 100%;
@@ -164,6 +168,7 @@ a { color: var(--accent-ink); }
   font-size: 17px;
   font-weight: 750;
   line-height: 1.25;
+  letter-spacing: -0.01em;
 }
 
 .topbar-status {
@@ -217,7 +222,7 @@ a { color: var(--accent-ink); }
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  max-width: 230px;
+  max-width: 260px;
   padding: 6px 12px 6px 8px;
   border: 1px solid var(--line);
   border-radius: 999px;
@@ -361,8 +366,8 @@ a { color: var(--accent-ink); }
 .welcome-title, .welcome-sub { position: relative; display: grid; margin: 0; }
 .welcome-title .ghost, .welcome-title .typed, .welcome-sub .ghost, .welcome-sub .typed { grid-area: 1 / 1; }
 .ghost { visibility: hidden; }
-.welcome-title { font-size: 16px; font-weight: 700; line-height: 1.45; }
-.welcome-sub { margin-top: 3px; font-size: 14.5px; line-height: 1.55; color: var(--text-2); }
+.welcome-title { font-size: 17px; font-weight: 700; line-height: 1.35; letter-spacing: -0.01em; }
+.welcome-sub { margin-top: 4px; font-size: 15px; line-height: 1.45; color: var(--text-2); text-wrap: pretty; }
 
 .chips { display: grid; gap: 8px; width: 100%; margin-top: 14px; }
 
@@ -371,6 +376,7 @@ a { color: var(--accent-ink); }
   align-items: center;
   gap: 10px;
   padding: 11px 14px;
+  line-height: 1.35;
   border: 1px solid var(--line);
   border-radius: 16px;
   background: var(--surface);
@@ -401,6 +407,7 @@ a { color: var(--accent-ink); }
   color: var(--on-accent);
   font-size: 17px;
   font-weight: 750;
+  letter-spacing: -0.005em;
   transition: transform 0.12s var(--ease);
 }
 
@@ -447,8 +454,9 @@ a { color: var(--accent-ink); }
   padding: 10px 14px;
   border-radius: var(--radius);
   font-size: 16px;
-  line-height: 1.55;
+  line-height: 1.45;
   overflow-wrap: anywhere;
+  text-wrap: pretty;
 }
 
 .turn-body .bubble { max-width: min(92%, 480px); }
@@ -611,14 +619,15 @@ a { color: var(--accent-ink); }
   overflow: hidden;
   font-size: 12px;
   font-weight: 650;
+  letter-spacing: 0.01em;
   color: var(--accent-ink);
   white-space: nowrap;
   text-overflow: ellipsis;
 }
 
-.card-title { margin: 1px 0 0; font-size: 17px; font-weight: 750; line-height: 1.35; }
-.card-sub { margin: 2px 0 0; font-size: 13.5px; color: var(--text-2); word-break: keep-all; overflow-wrap: anywhere; }
-.card-text { margin: 10px 0 0; font-size: 14.5px; line-height: 1.6; color: var(--text); }
+.card-title { margin: 1px 0 0; font-size: 17px; font-weight: 750; line-height: 1.3; letter-spacing: -0.01em; text-wrap: balance; }
+.card-sub { margin: 2px 0 0; font-size: 13.5px; line-height: 1.4; color: var(--text-2); overflow-wrap: anywhere; }
+.card-text { margin: 10px 0 0; font-size: 14.5px; line-height: 1.5; color: var(--text); text-wrap: pretty; }
 .card-note { margin: 0; text-align: center; font-size: 12px; color: var(--text-3); }
 
 .pill {
@@ -637,7 +646,7 @@ a { color: var(--accent-ink); }
 .card-actions { display: grid; gap: 8px; margin-top: 12px; }
 
 .kvs { display: grid; gap: 8px; margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--line-strong); }
-.kv { display: grid; grid-template-columns: 3.4em minmax(0, 1fr) auto; align-items: center; gap: 10px; font-size: 14px; }
+.kv { display: grid; grid-template-columns: 5.9em minmax(0, 1fr) auto; align-items: center; gap: 10px; font-size: 14px; line-height: 1.4; }
 .kv-k { color: var(--text-3); }
 .kv-v { min-width: 0; overflow-wrap: anywhere; }
 
@@ -664,12 +673,14 @@ a { color: var(--accent-ink); }
   color: var(--text-2);
 }
 
+.pick-tags .tag, .rate-name .tag { white-space: nowrap; }
+
 .tag-promo { background: var(--accent-soft); color: var(--accent-ink); font-weight: 700; }
 .rate-name .tag-promo { margin-left: 6px; padding: 0 6px; font-size: 11px; vertical-align: 1px; }
 .card-reply { display: grid; gap: 2px; margin-top: 10px; padding: 8px 12px; border-left: 3px solid var(--accent); border-radius: 0 12px 12px 0; background: var(--surface-2); font-size: 13.5px; color: var(--text-2); }
 .card-reply-who { font-size: 12px; font-weight: 750; color: var(--accent-ink); }
-.price { font-size: 17px; font-weight: 800; color: var(--accent-ink); font-variant-numeric: tabular-nums; }
-.per { font-size: 11.5px; color: var(--text-3); }
+.price { font-size: 17px; font-weight: 800; line-height: 1.2; color: var(--accent-ink); font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+.per { font-size: 11.5px; line-height: 1.25; color: var(--text-3); }
 
 /* Photos: generated pictures, or a tinted placeholder until they arrive. */
 .photo {
@@ -732,11 +743,11 @@ a { color: var(--accent-ink); }
 
 .pick-row:active:not(:disabled) { transform: scale(0.985); border-color: var(--accent); }
 .pick-main { flex: 1; display: grid; gap: 2px; min-width: 0; }
-.pick-name { overflow: hidden; display: -webkit-box; font-size: 15px; font-weight: 700; line-height: 1.35; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.pick-name { overflow: hidden; display: -webkit-box; font-size: 15px; font-weight: 700; line-height: 1.3; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .pick-meta { font-size: 12.5px; color: var(--text-2); }
 .pick-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
 .pick-tags .tag { padding: 1px 6px; font-size: 11px; }
-.pick-price { display: grid; justify-items: end; padding-right: 4px; }
+.pick-price { display: grid; justify-items: end; padding-right: 4px; white-space: nowrap; }
 .pick-off { font-size: 13px; color: var(--text-3); }
 
 /* Rooms: each room type with its best plans. */
@@ -763,18 +774,19 @@ a { color: var(--accent-ink); }
 
 .rate-row:active:not(:disabled) { transform: scale(0.985); }
 .rate-main { flex: 1; display: grid; min-width: 0; }
-.rate-name { font-size: 14px; font-weight: 650; }
+.rate-name { font-size: 14px; font-weight: 650; line-height: 1.35; }
 .rate-cancel { font-size: 12px; color: var(--text-3); }
 .rate-cancel.is-free { color: var(--ok); }
-.rate-price { display: grid; justify-items: end; }
+.rate-price { display: grid; justify-items: end; white-space: nowrap; }
 .rate-price .price { font-size: 15px; }
 
 .rate-go {
   display: grid;
   place-items: center;
-  width: 34px;
+  min-width: 34px;
   height: 34px;
-  border-radius: 50%;
+  padding: 0 12px;
+  border-radius: 999px;
   background: var(--accent);
   color: var(--on-accent);
   font-size: 14px;
@@ -794,12 +806,14 @@ a { color: var(--accent-ink); }
 .line-main { font-size: 14.5px; font-weight: 650; }
 .line-sub { grid-column: 1; font-size: 12.5px; color: var(--text-2); }
 .line-end { grid-column: 2; grid-row: 1 / span 2; align-self: center; font-size: 12.5px; color: var(--accent-ink); font-weight: 650; }
+.line-end.pill-ok { color: var(--ok); }
+.line-end.pill-muted { color: var(--text-3); }
 
 /* A booked stay in my plans. */
 .trip-top { display: flex; align-items: flex-start; gap: 12px; margin-top: 12px; }
 .trip-top .photo { width: 72px; height: 72px; }
 .trip-kvs { flex: 1; min-width: 0; margin-top: 0; padding-top: 0; border-top: 0; }
-.trip-kvs .kv { grid-template-columns: 3.2em minmax(0, 1fr); font-size: 13.5px; }
+.trip-kvs .kv { grid-template-columns: 4.6em minmax(0, 1fr); font-size: 13.5px; }
 
 /* Itinerary: times down the left, a line through the dots. */
 .timeline { margin: 12px 0 0; padding: 0; list-style: none; }
@@ -807,7 +821,7 @@ a { color: var(--accent-ink); }
 .timeline li {
   position: relative;
   display: grid;
-  grid-template-columns: 46px 14px minmax(0, 1fr);
+  grid-template-columns: 62px 14px minmax(0, 1fr);
   gap: 8px;
   padding-bottom: 12px;
 }
@@ -815,14 +829,14 @@ a { color: var(--accent-ink); }
 .timeline li:not(:last-child)::after {
   content: "";
   position: absolute;
-  left: 60px;
+  left: 74px;
   top: 16px;
   bottom: 0;
   width: 2px;
   background: var(--line-strong);
 }
 
-.tl-time { font-size: 13.5px; font-weight: 750; color: var(--accent-ink); font-variant-numeric: tabular-nums; }
+.tl-time { font-size: 13px; font-weight: 750; color: var(--accent-ink); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .tl-dot { width: 10px; height: 10px; margin-top: 5px; border: 2px solid var(--accent); border-radius: 50%; background: var(--surface); }
 .tl-body { display: grid; }
 .tl-title { font-size: 14.5px; font-weight: 650; }
@@ -853,13 +867,14 @@ a { color: var(--accent-ink); }
 .driver-car { font-size: 12.5px; color: var(--text-2); }
 
 .plate {
-  padding: 5px 10px;
-  border-radius: 9px;
-  background: #1f4ea8;
-  color: #fff;
-  font-size: 16px;
+  padding: 4px 9px;
+  border: 2px solid #1f2a44;
+  border-radius: 8px;
+  background: #fff;
+  color: #1f2a44;
+  font-size: 15px;
   font-weight: 800;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.06em;
   font-variant-numeric: tabular-nums;
 }
 
@@ -870,6 +885,7 @@ a { color: var(--accent-ink); }
   padding-top: 10px;
   text-align: center;
   font-size: 12px;
+  line-height: 1.3;
   color: var(--text-3);
 }
 
@@ -909,7 +925,8 @@ a { color: var(--accent-ink); }
 .key-btn .icon { width: 19px; height: 19px; }
 
 .bigtime { display: flex; align-items: baseline; gap: 10px; margin-top: 10px; }
-.bigtime-num { font-size: 40px; font-weight: 850; line-height: 1; font-variant-numeric: tabular-nums; }
+.bigtime-num { font-size: 40px; font-weight: 850; line-height: 1; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.bigtime-ampm { font-size: 20px; font-weight: 750; letter-spacing: 0; }
 .bigtime-sub { font-size: 14px; color: var(--text-2); }
 
 .bill-lines { display: grid; gap: 7px; margin: 12px 0 0; padding-top: 10px; border-top: 1px dashed var(--line-strong); }
@@ -942,7 +959,7 @@ a { color: var(--accent-ink); }
   color: #2a1a05;
 }
 
-.level-silver { background: linear-gradient(135deg, #eef1f4, #c7ced6); }
+.level-member { background: linear-gradient(135deg, #eef1f4, #c7ced6); }
 .level-gold { background: linear-gradient(135deg, #ffe39a, #f2b53c); }
 .level-platinum { background: linear-gradient(135deg, #e6e1f5, #a99ed6); }
 .level-name { font-size: 13px; font-weight: 750; opacity: 0.8; }
@@ -957,9 +974,9 @@ a { color: var(--accent-ink); }
 
 /* The booking and cancellation confirmations: receipts with one button. */
 .card-rows { display: grid; gap: 7px; margin: 12px 0 0; padding: 10px 0 0; border-top: 1px dashed var(--line-strong); }
-.card-row { display: grid; grid-template-columns: 3.6em 1fr; gap: 10px; font-size: 14px; }
+.card-row { display: grid; grid-template-columns: 6.6em minmax(0, 1fr); gap: 10px; font-size: 14px; line-height: 1.4; }
 .card-row dt { color: var(--text-3); }
-.card-row dd { margin: 0; color: var(--text); }
+.card-row dd { margin: 0; color: var(--text); overflow-wrap: anywhere; }
 .card-row.is-warn dd, .confirm-note.is-warn { color: var(--warn); }
 
 .card-total {
@@ -973,7 +990,7 @@ a { color: var(--accent-ink); }
   color: var(--text-2);
 }
 
-.card-amount { font-size: 24px; font-weight: 850; color: var(--text); font-variant-numeric: tabular-nums; }
+.card-amount { font-size: 24px; font-weight: 850; letter-spacing: -0.01em; color: var(--text); font-variant-numeric: tabular-nums; }
 .confirm-actions { display: grid; gap: 8px; margin-top: 12px; }
 
 .confirm-note {
@@ -1216,7 +1233,7 @@ a { color: var(--accent-ink); }
 
 .sheet-grabber { width: 36px; height: 5px; margin: 2px auto 0; border-radius: 3px; background: var(--line-strong); }
 .sheet-head { display: flex; align-items: center; justify-content: space-between; min-height: 48px; }
-.sheet-title { margin: 0; font-size: 17px; font-weight: 750; }
+.sheet-title { margin: 0; font-size: 17px; font-weight: 750; letter-spacing: -0.01em; }
 .modal-close { margin-right: -10px; color: var(--text-3); }
 .sheet-body .card, .sheet-body .card-slot { width: 100%; }
 .sheet-body .card { box-shadow: none; }
@@ -1229,7 +1246,7 @@ a { color: var(--accent-ink); }
 
 .pay-head { text-align: center; }
 .pay-merchant { margin: 0; font-size: 13px; color: var(--text-3); }
-.pay-amount { margin: 4px 0 0; font-size: 42px; font-weight: 850; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; }
+.pay-amount { margin: 4px 0 0; font-size: 42px; font-weight: 850; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
 .pay-desc { margin: 4px 0 20px; font-size: 14px; color: var(--text-2); }
 .pay-options { display: grid; overflow: hidden; border: 1px solid var(--line); border-radius: 18px; }
 .pay-option { display: flex; align-items: center; gap: 12px; padding: 14px 16px; cursor: pointer; }
@@ -1242,12 +1259,11 @@ a { color: var(--accent-ink); }
   place-items: center;
   border-radius: 8px;
   color: #ffffff;
-  font-size: 14px;
-  font-weight: 700;
 }
 
-.pay-mark-wechat { background: var(--wechat); }
-.pay-mark-alipay { background: var(--alipay); }
+.pay-mark .icon { width: 18px; height: 18px; }
+.pay-mark-card { background: var(--pay-card); }
+.pay-mark-apple_pay { background: var(--pay-apple); box-shadow: inset 0 0 0 1px var(--line-strong); }
 .pay-name { flex: 1; font-size: 16px; }
 .pay-option input { width: 20px; height: 20px; margin: 0; accent-color: var(--accent); }
 .pay-note { margin: 14px 0; text-align: center; font-size: 12.5px; color: var(--text-3); }
@@ -1282,8 +1298,9 @@ a { color: var(--accent-ink); }
 .keycard-note { margin: 12px 0 0; text-align: center; font-size: 12.5px; color: var(--text-3); }
 
 .form { display: grid; gap: 14px; }
-.form-intro { margin: 0; font-size: 14px; color: var(--text-2); }
-.field { display: grid; gap: 6px; }
+.form-intro { margin: 0; font-size: 14px; color: var(--text-2); text-wrap: pretty; }
+.field { display: grid; gap: 6px; min-width: 0; }
+.field-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .field label { font-size: 14px; font-weight: 650; }
 
 .field input, .field select, .field textarea {
@@ -1300,6 +1317,7 @@ a { color: var(--accent-ink); }
 
 .field textarea { resize: vertical; }
 .field input:focus, .field select:focus, .field textarea:focus { border-color: var(--accent); }
+.field [aria-invalid="true"] { border-color: var(--danger); }
 .field input::placeholder, .field textarea::placeholder { color: var(--text-3); }
 .field-hint { margin: 0; font-size: 12.5px; color: var(--text-3); }
 .form-error { margin: 0; font-size: 14px; color: var(--danger); }
@@ -1329,7 +1347,7 @@ a { color: var(--accent-ink); }
 
 .noscript { padding: 24px; text-align: center; }
 
-/* ---------- The pet: 小宿 the capybara (markup in pet.js) ---------- */
+/* ---------- The pet: Nana the capybara (markup in pet.js) ---------- */
 
 .pet { display: block; overflow: visible; color: var(--text-3); }
 

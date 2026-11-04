@@ -1,9 +1,9 @@
-// 小宿 — browser client, laid out like a call with 小宿: the thread in the middle, the call bar at the bottom
-// (talk, type, call / hang up) and "my plans" under the header. Speech recognition is simulated: the mic offers
-// sentences to "say". In a call, replies are read aloud where the browser has a Chinese voice.
+// NanaHotel — browser client, laid out like a call with Nana: the thread in the middle, the call bar at the bottom
+// (talk, type, call / hang up) and "My trips" under the header. Speech recognition is simulated: the mic offers
+// sentences to "say". In a call, replies are read aloud where the browser has an English (en-US) voice.
 // Cards (cards.js) show what the agent found or arranged. Anything that spends money or publishes something waits
 // for the user's own tap: a booking, a ride, an extension, a review.
-// The guide is 小宿 the capybara (pet.js): it sits in the header with a status line, signs each reply,
+// The guide is Nana the capybara (pet.js): it sits in the header with a status line, signs each reply,
 // thinks while a reply is on its way, celebrates a paid booking in a hot spring, and dozes when left alone.
 // Where it moves (header, welcome, the reply being written, the sticker) the Rive version takes over once it has
 // loaded (pet-rive.js); the SVG drawing is the fallback and the still pictures.
@@ -12,54 +12,62 @@
 import { petNode } from './pet.js';
 import { loadRivePet, mountRivePet, rivePetReady } from './pet-rive.js';
 import { icon } from './icons.js';
-import { createCards, dayTime, STATUS_LABELS } from './cards.js';
+import { createCards, STATUS_LABELS } from './cards.js';
+import {
+  clockTime, dayOf, dayTime, formatDate, formatMoney, formatPhoneInput, formatRange, localYmd, normalizePhoneInput,
+  partyPhrase, plural, US_PHONE_RE, userTimeZone,
+} from './format.js';
 
-const KEY_USER = 'xiaosu.userId';
-const KEY_SESSION = 'xiaosu.sessionId';
+const KEY_USER = 'nanahotel.userId';
+const KEY_SESSION = 'nanahotel.sessionId';
 const NEAR_BOTTOM_PX = 120;
 const MAX_MESSAGE_CHARS = 2000;
+// The assistant; the app's name (NanaHotel) comes from the server.
+const PET_NAME = 'Nana';
 
 const SUGGESTIONS = [
-  { emoji: '🏞️', text: '这周五去杭州西湖边，住两晚，预算600' },
-  { emoji: '🌃', text: '明晚上海外滩附近，两个大人一个小孩' },
-  { emoji: '🌶️', text: '成都春熙路附近，今晚，便宜点' },
+  { emoji: '🗽', text: 'This Friday in New York near Times Square, two nights, under $300' },
+  { emoji: '🎰', text: 'Tonight in Las Vegas on the Strip, cheap' },
+  { emoji: '🏖️', text: 'Next weekend in Miami Beach, 2 adults and 1 kid' },
 ];
-const WELCOME_SUB = '头顶橘子、情绪稳定的卡皮巴拉。想住哪儿、哪天、预算多少，打给我或者直接说～';
+const WELCOME_SUB = "I'm a calm capybara with an orange on my head. Tell me where, when and your budget, or just give me a call.";
 // The home screen's examples once something is booked: what fits where the trip is.
 const TRIP_SUGGESTIONS = {
-  booked: [{ emoji: '🗺️', text: '帮我规划一下那天的行程' }, { emoji: '🚕', text: '帮我叫车去酒店' }, { emoji: '🛎️', text: '我到了，帮我办入住' }],
-  staying: [{ emoji: '🧺', text: '送两条毛巾' }, { emoji: '⏰', text: '明早7点叫醒我' }, { emoji: '🍳', text: '订明天的早餐' }],
-  left: [{ emoji: '🧾', text: '开发票' }, { emoji: '⭐', text: '写个好评' }, { emoji: '👑', text: '我的积分' }],
+  booked: [{ emoji: '🗺️', text: 'Plan my day' }, { emoji: '🚕', text: 'Get me a ride to the hotel' }, { emoji: '🛎️', text: "I'm here, check me in" }],
+  staying: [{ emoji: '🧺', text: 'Two more towels please' }, { emoji: '⏰', text: 'Wake me up at 7am' }, { emoji: '🍳', text: 'Book breakfast for tomorrow' }],
+  left: [{ emoji: '🧾', text: 'Email me a receipt' }, { emoji: '⭐', text: 'Write a review' }, { emoji: '👑', text: 'My points' }],
 };
 // What you could "say" (speech recognition is simulated), by where the trip is.
 const VOICE_SAYS = {
   start: SUGGESTIONS.map((s) => s.text),
-  booked: ['帮我规划一下那天的行程', '帮我叫车去酒店', '能提前入住吗？中午12点到', '我到了，帮我办入住'],
-  staying: ['送两条毛巾', 'Wi-Fi 密码多少', '明早7点叫醒我', '订明天的早餐', '再住一晚', '我要退房'],
-  left: ['开发票', '写个好评', '我的积分'],
+  booked: ['Plan my day', 'Get me a ride to the hotel', 'Can I check in early? I land at noon', "I'm here, check me in"],
+  staying: ['Two more towels please', "What's the Wi-Fi password?", 'Wake me up at 7am', 'Book breakfast for tomorrow', 'One more night', "I'd like to check out"],
+  left: ['Email me a receipt', 'Write a review', 'My points'],
 };
-// Requests that move on by themselves; while one is on its way, my plans are refreshed every PLAN_POLL_MS.
+// Requests that move on by themselves; while one is on its way, My trips is refreshed every PLAN_POLL_MS.
 // A ride booked for later only starts moving near its pickup time: until then one refresh is set for then.
 const PLAN_POLL_MS = 15000;
 // While the guest arrives today or is staying, the hotel may act (check them in, deliver, reply): look every 30 s.
 const PLAN_IDLE_MS = 30000;
 const RIDE_SOON_MS = 30 * 60 * 1000;
 const PLAN_WAIT_MAX_MS = 6 * 60 * 60 * 1000;
-const MOVING = { ride: ['confirmed', 'arriving'], service: ['accepted', 'on_the_way'], invoice: ['issuing'] };
-// Notices from the user's own taps and from the hotel's console (docs/MERCHANT.md).
-const NOTICE_KINDS = new Set(['ride_confirmed', 'extended', 'review_published', 'front_desk_checkin', 'early_checkin_approved',
-  'early_checkin_declined', 'review_replied']);
-const PET_IDLE = '情绪稳定中';
-const PET_POKES = ['橘子差点掉了…', '别闹～在帮你看酒店呢', '摸摸头，收到 (｡•ᴗ•｡)', '情绪稳定，继续营业', '我在呢～', '嘿嘿，有点痒'];
-const BREAKFAST_LABELS = ['不含早', '含单早', '含双早'];
-const PAY_METHODS = { wechat: '微信支付', alipay: '支付宝' };
+const MOVING = { ride: ['confirmed', 'arriving'], service: ['accepted', 'on_the_way'], receipt: ['sending'] };
+// Every notice in a session says what it is in `kind` (docs/US-CONTRACT.md §6); its text is only displayed.
+const NOTICE_KINDS = new Set(['pending', 'paid', 'cancelled', 'ride_confirmed', 'extended', 'review_published',
+  'front_desk_checkin', 'early_checkin_approved', 'early_checkin_declined', 'review_replied']);
+const PET_IDLE = 'Feeling calm';
+const PET_POKES = ['Careful, my orange!', 'Still here!', 'Hehe, that tickles', 'Boop! Back to hotel hunting', 'Calm as ever', "I'm all ears"];
+const BREAKFAST_LABELS = ['Room only', 'Breakfast for 1', 'Breakfast for 2'];
+const PAY_METHODS = { card: 'Credit or debit card', apple_pay: 'Apple Pay' };
+const DEFAULT_PAY_METHOD = 'card';
+const TEST_MODE_NOTE = "Test mode — you won't be charged";
 // Confirm/pay failures that a fresh quote fixes; anything else can simply be retried.
 const REQUOTE_CODES = new Set(['expired', 'superseded', 'price_changed', 'sold_out', 'terms_changed', 'invalid_dates',
   'rate_not_found', 'hotel_not_found', 'not_found']);
-const MSG_NETWORK = '网络好像断了，检查一下网络再试。';
+const MSG_NETWORK = "Looks like you're offline. Check your connection and try again.";
 // Like iMessage: a time line above a message that comes after a pause or on a new day.
 const STAMP_GAP_MS = 20 * 60 * 1000;
-const MSG_STREAM_CUT = '连接中断了，回复可能不完整。';
+const MSG_STREAM_CUT = 'The connection dropped, so the reply may be incomplete.';
 
 // ---------------------------------------------------------------------------
 // Pure helpers (exported so they can be unit-tested outside the browser)
@@ -255,34 +263,7 @@ export function newUuid(cryptoObj = globalThis.crypto) {
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-export function formatYuan(n) {
-  if (typeof n !== 'number' || !Number.isFinite(n)) return '—';
-  return `¥${Math.round(n).toLocaleString('zh-CN')}`;
-}
-
-const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-
-/** The current year in China time. */
-export function cnYear(nowMs = serverNow()) {
-  return Number(new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric' }).format(new Date(nowMs)));
-}
-
-/** '2026-10-30' → '10月30日 周五'; the year is shown only when it differs from refYear. */
-export function formatDate(ymd, withWeekday = true, refYear = cnYear()) {
-  if (!ISO_DATE_RE.test(String(ymd || ''))) return String(ymd || '');
-  const [y, m, d] = ymd.split('-').map(Number);
-  const wd = WEEKDAYS[new Date(Date.UTC(y, m - 1, d)).getUTCDay()];
-  return `${y !== refYear ? `${y}年` : ''}${m}月${d}日${withWeekday ? ` ${wd}` : ''}`;
-}
-
-/** '10月30日 周五 – 11月1日 周日'; the check-out shows its year when it differs from the check-in's. */
-export function formatStay(checkIn, checkOut, refYear = cnYear()) {
-  if (!checkIn) return '';
-  const inYear = Number(String(checkIn).slice(0, 4)) || refYear;
-  return checkOut ? `${formatDate(checkIn, true, refYear)} – ${formatDate(checkOut, true, inYear)}` : formatDate(checkIn, true, refYear);
-}
 
 /** A free / limited cancellation whose deadline has passed is no longer free. */
 export function policyLapsed(policy, nowMs = serverNow()) {
@@ -291,74 +272,87 @@ export function policyLapsed(policy, nowMs = serverNow()) {
   return !Number.isNaN(until) && nowMs >= until;
 }
 
-/** '+86 138-1234-5678' / full-width digits → '13812345678' (the server applies the same rule). */
-export function normalizePhoneInput(value) {
-  return String(value ?? '')
-    .replace(/[０-９＋]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))
-    .replace(/[\s\-－‐-―()（）]/g, '')
-    .replace(/^(\+?86)(?=1\d{10}$)/, '');
+/** 'Fri, Nov 6 to Sun, Nov 8, 2 adults, 1 child' — the stay as a card tap tells the model (§5 of the contract). */
+export function stayPhrase(s = {}, refYear = undefined) {
+  return [formatRange(s.checkIn, s.checkOut, { sep: ' to ', refYear }), partyPhrase(s)].filter(Boolean).join(', ');
 }
 
-function stayPhrase(s) {
-  const year = cnYear();
-  const parts = [];
-  if (ISO_DATE_RE.test(String(s.checkIn || ''))) parts.push(`${formatDate(s.checkIn, false, year)}入住`);
-  if (ISO_DATE_RE.test(String(s.checkOut || ''))) parts.push(`${formatDate(s.checkOut, false, Number(String(s.checkIn).slice(0, 4)) || year)}离店`);
-  const adults = Number(s.adults) || 0;
-  const children = Number(s.children) || 0;
-  if (adults) parts.push(`${adults}位成人${children ? `，${children}名儿童` : ''}`);
-  if (Number(s.rooms)) parts.push(`${Number(s.rooms)}间`);
-  return parts.join('，');
+// The ids tail is ASCII and always last: ' (hotel_id: X, rate_id: Y, check_in: YYYY-MM-DD, check_out: YYYY-MM-DD)'.
+function idsTail({ hotelId, rateId, checkIn, checkOut }) {
+  const ids = [
+    hotelId ? `hotel_id: ${hotelId}` : null,
+    rateId ? `rate_id: ${rateId}` : null,
+    ISO_DATE_RE.test(String(checkIn || '')) ? `check_in: ${checkIn}` : null,
+    ISO_DATE_RE.test(String(checkOut || '')) ? `check_out: ${checkOut}` : null,
+  ].filter(Boolean);
+  return ids.length ? ` (${ids.join(', ')})` : '';
+}
+
+// A name inside "…" must not close the quotes early.
+const quoted = (name) => `"${String(name || '').replace(/"/g, "'")}"`;
+const withStay = (s, refYear) => {
+  const stay = stayPhrase(s, refYear);
+  return stay ? ` — ${stay}` : '';
+};
+
+/** A tap on a hotel: 'Show me rooms at "…" — Fri, Nov 6 to Sun, Nov 8, 2 adults (hotel_id: …, check_in: …, check_out: …)'. */
+export function roomsMessage(hotel = {}, query = {}, refYear = undefined) {
+  return `Show me rooms at ${quoted(hotel.name)}${withStay(query, refYear)}${idsTail({ hotelId: hotel.id, checkIn: query.checkIn, checkOut: query.checkOut })}`;
+}
+
+/** A tap on a rate: 'Book "…" · King Room · Room only — dates, party (hotel_id: …, rate_id: …, check_in: …, check_out: …)'. */
+export function bookMessage(hotel = {}, roomType = {}, rate = {}, offer = {}, refYear = undefined) {
+  const what = [quoted(hotel.name), roomType.name, rate.name].filter(Boolean).join(' · ');
+  return `Book ${what}${withStay(offer, refYear)}${idsTail({ hotelId: hotel.id, rateId: rate.rateId, checkIn: offer.checkIn, checkOut: offer.checkOut })}`;
 }
 
 /** The message a stale confirmation sends to get a fresh quote for the same room (ids and dates verbatim). */
-export function requoteMessage(quote = {}) {
+export function requoteMessage(quote = {}, refYear = undefined) {
   const hotel = quote.hotel || {};
-  const room = quote.room || {};
   const rate = quote.rate || {};
-  const ids = [
-    hotel.id ? `hotel_id: ${hotel.id}` : null,
-    rate.rateId ? `rate_id: ${rate.rateId}` : null,
-    ISO_DATE_RE.test(String(quote.checkIn || '')) ? `check_in: ${quote.checkIn}` : null,
-    ISO_DATE_RE.test(String(quote.checkOut || '')) ? `check_out: ${quote.checkOut}` : null,
-  ].filter(Boolean).join('，');
-  const what = [room.name, rate.name].filter(Boolean).join(' · ');
-  const stay = stayPhrase(quote);
-  return `报价失效了，请帮我重新报价：「${hotel.name || ''}」的 ${what}${stay ? `：${stay}` : ''}${ids ? `（${ids}）` : ''}`;
+  const what = [quoted(hotel.name), quote.room?.name, rate.name].filter(Boolean).join(' · ');
+  return `That quote expired, please quote it again: ${what}${withStay(quote, refYear)}`
+    + idsTail({ hotelId: hotel.id, rateId: rate.rateId, checkIn: quote.checkIn, checkOut: quote.checkOut });
 }
 
-// A tap on a hotel or a room sends the model the ids and dates too: 「…」的 房型：11月6日入住…（hotel_id: …）.
-const IDS_TAIL_RE = /(?:：[^：\n]*)?（(?:hotel_id|rate_id|check_in): [^）\n]*）\s*$/;
+const IDS_TAIL_RE = /\s*\((?:hotel_id|rate_id|check_in|check_out): [^()\n]*\)\s*$/;
 
-/** A sent message as its bubble shows it: without the ids-and-dates tail a card tap adds for the model. */
+/** A sent message as its bubble shows it: without the ids tail a card tap adds for the model. */
 export function displayText(text) {
   const s = String(text ?? '');
   const shown = s.replace(IDS_TAIL_RE, '').trim();
   return shown || s.trim();
 }
 
-// 回复「订第1家」, 说「好」…: the short answers a reply suggests, offered as buttons under it.
-const REPLY_CUE_RE = /(?:回复|回个?|说|发|输入)\s*((?:「[^」\n]{1,16}」\s*(?:[、，,/]|或者?|和|还是)?\s*)+)/g;
-const PICK_RE = /第\s*([0-9]+|[NnXx几])\s*(家|个|间|单|晚)/;
+// Reply "Book #1", Say "Yes" or "Show cheaper ones": the short answers a reply suggests, offered as buttons under it.
+// The phrases follow the cue word directly, one after another ("…", "…" or "…"); `Tap "…"` names a button on a
+// card and is never one, and neither is a room type in quotes.
+const QUOTE_RE = /["“]([^"“”\n]{1,40})["”]/g;
+const REPLY_CUE_RE = /\b(?<!\b(?:room|bed)\s)(?:reply|say|type|send)(?:\s+(?:with|back))?\s*:?\s*((?:["“][^"“”\n]{1,40}["”](?:\s*(?:,|\/|\bor\b|\band\b)\s*)*)+)/gi;
+const PICK_RE = /#\s?(\d{1,2}|N)\b/i;
 
 /**
- * The quick replies a message offers in 「」 after 回复/说/发 (never 点「…」, which names a button).
- * A single pick like 「订第1家」 under a numbered list of n items becomes one reply per item (up to 4), and a
- * template like 「取消第N单」 is filled in the same way or dropped when there is no list. Picks the message
- * spells out one by one (「第2个」「第3个」) are kept as they are.
+ * The quick replies a message offers in "…" after Reply / Say / Type / Send.
+ * A single pick with #1 ("Book #1") over a list or card of n items becomes one reply per item (up to 4), and a
+ * template with #N ("Cancel #N") is filled in the same way or dropped when there is no list. Picks the message
+ * spells out one by one ("#2", "#3") are kept as they are.
  */
 export function quickReplies(text, listCount = 0) {
   const phrases = [];
   for (const cue of String(text ?? '').matchAll(REPLY_CUE_RE)) {
-    for (const [, raw] of cue[1].matchAll(/「([^」\n]{1,16})」/g)) if (raw.trim()) phrases.push(raw.trim());
+    for (const [, raw] of cue[1].matchAll(QUOTE_RE)) {
+      const phrase = raw.trim().replace(/[.,;:]+$/, '').trim();
+      if (phrase) phrases.push(phrase);
+    }
   }
   const expand = phrases.filter((p) => PICK_RE.test(p)).length === 1;
   const out = [];
   for (const phrase of phrases) {
     const pick = PICK_RE.exec(phrase);
-    const isTemplate = Boolean(pick) && !/\d/.test(pick[1]);
-    if (pick && expand && listCount >= (isTemplate ? 1 : 2)) {
-      for (let i = 1; i <= Math.min(listCount, 4); i += 1) out.push(phrase.replace(PICK_RE, (_, __, unit) => `第${i}${unit}`));
+    const isTemplate = Boolean(pick) && /^n$/i.test(pick[1]);
+    const isFirst = Boolean(pick) && pick[1] === '1';
+    if (expand && (isTemplate || isFirst) && listCount >= (isTemplate ? 1 : 2)) {
+      for (let i = 1; i <= Math.min(listCount, 4); i += 1) out.push(phrase.replace(PICK_RE, `#${i}`));
     } else if (!isTemplate) {
       out.push(phrase);
     }
@@ -366,13 +360,12 @@ export function quickReplies(text, listCount = 0) {
   return [...new Set(out)].slice(0, 5);
 }
 
-/** 小宿's hello for the hour of the day. */
-export function greeting(hour = new Date().getHours()) {
-  if (hour < 5) return '这么晚还没睡呀';
-  if (hour < 11) return '早上好呀';
-  if (hour < 14) return '中午好呀';
-  if (hour < 18) return '下午好呀';
-  return '晚上好呀';
+/** Nana's hello for the hour of the day: 'Good evening, I'm Nana'. */
+export function greeting(hour = new Date().getHours(), name = PET_NAME) {
+  if (hour < 5) return `Hey, night owl! I'm ${name}`;
+  if (hour < 12) return `Good morning, I'm ${name}`;
+  if (hour < 18) return `Good afternoon, I'm ${name}`;
+  return `Good evening, I'm ${name}`;
 }
 
 export const MAX_PREFERENCES_CHARS = 60;
@@ -414,7 +407,7 @@ const spinner = () => h('span', { class: 'spinner', 'aria-hidden': 'true' });
 const state = {
   userId: '',
   sessionId: null,
-  appName: '小宿',
+  appName: 'NanaHotel',
   busy: false,
   abort: null,
   epoch: 0,
@@ -486,13 +479,13 @@ class ApiError extends Error {
 }
 
 function httpMessage(status) {
-  if (status === 409) return '上一条还在处理，稍等一下再发。';
-  if (status === 401) return '身份信息无效，请刷新页面后重试。';
-  if (status === 404) return '内容不存在或已失效。';
-  if (status === 413) return '内容太长了，精简一下再试。';
-  if (status === 429) return '操作太频繁了，稍后再试。';
-  if (status >= 500) return '服务暂时不可用，稍后再试。';
-  return `请求失败（${status}），稍后再试。`;
+  if (status === 409) return "I'm still on your last message. Give me a second.";
+  if (status === 401) return "Your session isn't valid anymore. Refresh the page and try again.";
+  if (status === 404) return "That isn't available anymore.";
+  if (status === 413) return "That's too long. Try something shorter.";
+  if (status === 429) return "That's a lot at once. Try again in a moment.";
+  if (status >= 500) return 'The service is having trouble. Try again soon.';
+  return `Something went wrong (${status}). Try again soon.`;
 }
 
 function toApiError(status, data) {
@@ -511,6 +504,10 @@ async function readJson(res) {
 
 function requestHeaders(json, accept = 'application/json') {
   const headers = { 'X-User-Id': state.userId, Accept: accept };
+  // The server reads "today", "tonight" and "this Friday" in the user's own zone (New York without it). Read each
+  // time: a phone can stay open across a flight.
+  const zone = userTimeZone();
+  if (zone) headers['X-Time-Zone'] = zone;
   if (json) headers['Content-Type'] = 'application/json';
   return headers;
 }
@@ -595,7 +592,7 @@ function setBusy(busy) {
   state.busy = busy;
   els.messages.setAttribute('aria-busy', String(busy));
   els.send.classList.toggle('is-stop', busy);
-  els.send.setAttribute('aria-label', busy ? '停止' : '发送');
+  els.send.setAttribute('aria-label', busy ? 'Stop' : 'Send');
   updateSendButton();
   for (const btn of document.querySelectorAll('[data-lock]')) btn.disabled = busy;
   updateCallLine();
@@ -612,7 +609,7 @@ function chatButton(label, message, { cls = 'chip', action } = {}) {
 // ---------------------------------------------------------------------------
 // The pet: one mood shared by every pet that is "on" ([data-live]: the header, the welcome screen, the reply
 // being written) and a status line under its name. The base line holds until something replaces it;
-// flashes (a tap, 醒啦) last a moment and fall back to it.
+// flashes (a tap, "I'm up!") last a moment and fall back to it.
 // ---------------------------------------------------------------------------
 
 const pet = { mood: 'idle', base: PET_IDLE, beforeSleep: PET_IDLE, flashTimer: 0, sleepTimer: 0, moodTimer: 0, lastPoke: -1 };
@@ -660,7 +657,7 @@ function petSleep() {
   }
   pet.beforeSleep = pet.base;
   petMood('sleepy');
-  petStatus('打个盹 zZ');
+  petStatus('Taking a nap zZ');
 }
 
 function petWake() {
@@ -669,7 +666,7 @@ function petWake() {
   if (pet.mood !== 'sleepy') return;
   petMood('idle');
   pet.base = pet.beforeSleep;
-  petFlash('醒啦！', 1500);
+  petFlash("I'm up!", 1500);
 }
 
 /** A tap on the pet (`host` holds it): it flinches, the orange falls off and goes back on, and it says something. */
@@ -706,7 +703,7 @@ function petPoke(host) {
 /** Booking paid: a happy pet for a few seconds. */
 function petCelebrate() {
   petMood('happy');
-  petFlash('订好啦！泡温泉去 ♨', 8000);
+  petFlash('Booked! Off to the hot spring ♨', 8000);
   pet.moodTimer = setTimeout(() => {
     if (pet.mood === 'happy') petMood('idle');
   }, 8000);
@@ -772,13 +769,11 @@ function append(el) {
 
 function stampText(ms) {
   const d = new Date(ms);
-  const now = new Date();
-  const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-  const days = Math.round((new Date(now.toDateString()) - new Date(d.toDateString())) / 86400000);
-  if (days === 0) return `今天 ${hm}`;
-  if (days === 1) return `昨天 ${hm}`;
-  const date = `${d.getMonth() + 1}月${d.getDate()}日 ${hm}`;
-  return d.getFullYear() === now.getFullYear() ? date : `${d.getFullYear()}年${date}`;
+  const time = clockTime(ms);
+  const days = Math.round((new Date(new Date().toDateString()) - new Date(d.toDateString())) / 86400000);
+  if (days === 0) return `Today ${time}`;
+  if (days === 1) return `Yesterday ${time}`;
+  return `${dayOf(ms)}, ${time}`;
 }
 
 /** The time line for a user message sent at `ms`, or null when it follows the previous one closely. */
@@ -795,16 +790,16 @@ function userTurn(text, prev, { voice = false } = {}) {
   // Back-to-back messages from the user read as one group, like a chat app.
   const cont = prev?.classList.contains('turn-user');
   return h('div', { class: `turn turn-user${cont ? ' is-cont' : ''}` },
-    h('span', { class: 'sr-only', text: voice ? '我（语音）：' : '我：' }),
+    h('span', { class: 'sr-only', text: voice ? 'You (voice): ' : 'You: ' }),
     h('div', { class: `bubble bubble-out${voice ? ' is-voice' : ''}`, text: displayText(text) }));
 }
 
-/** 小宿's turn: its avatar beside a column of bubbles. A live turn's avatar follows the pet's mood. */
+/** Nana's turn: its avatar beside a column of bubbles. A live turn's avatar follows the pet's mood. */
 function assistantTurn({ live = false } = {}) {
   const avatar = petNode('head');
   if (live) avatar.setAttribute('data-live', '');
   return h('div', { class: 'turn turn-in' },
-    h('span', { class: 'sr-only', text: `${state.appName}：` }),
+    h('span', { class: 'sr-only', text: `${PET_NAME}: ` }),
     h('div', { class: 'turn-avatar', 'data-pet-poke': '' }, avatar),
     h('div', { class: 'turn-body' }));
 }
@@ -820,10 +815,10 @@ function placeIn(turn, node, before = null) {
   return node;
 }
 
-/** The hot-spring sticker 小宿 sends when a booking is paid. */
+/** The hot-spring sticker Nana sends when a booking is paid. */
 function stickerTurn() {
   const turn = assistantTurn();
-  placeIn(turn, h('div', { class: 'sticker', role: 'img', 'aria-label': '小宿泡在温泉里庆祝' }, petNode('onsen')));
+  placeIn(turn, h('div', { class: 'sticker', role: 'img', 'aria-label': `${PET_NAME} celebrating in a hot spring` }, petNode('onsen')));
   return turn;
 }
 
@@ -846,14 +841,14 @@ function offerQuickReplies(turn) {
   const bubbles = turn.querySelectorAll('.bubble-in');
   const last = bubbles[bubbles.length - 1];
   if (!last || turn.querySelector('[data-card][data-status="pending"], [data-card][data-status="open"]')) return [];
-  // 「订第1家」 expands over the numbered list in the bubble, or else over the hotels (rooms) on the turn's card.
+  // "Book #1" expands over the numbered list in the bubble, or else over the hotels (rooms, bookings) on the turn's card.
   const lists = last.querySelectorAll('ol');
-  const picks = [...turn.querySelectorAll('[data-card="hotels"], [data-card="rooms"]')].pop();
+  const picks = [...turn.querySelectorAll('[data-card="hotels"], [data-card="rooms"], [data-card="orders"]')].pop();
   const count = lists.length ? lists[lists.length - 1].children.length
-    : picks ? picks.querySelectorAll('[data-action="pick-hotel"], .room-block').length : 0;
+    : picks ? picks.querySelectorAll('[data-action="pick-hotel"], .room-block, .line-list > li').length : 0;
   const replies = quickReplies(last.textContent, count);
   if (replies.length) {
-    turn.after(h('div', { class: 'quick', role: 'group', 'aria-label': '快捷回复' },
+    turn.after(h('div', { class: 'quick', role: 'group', 'aria-label': 'Quick replies' },
       replies.map((r) => chatButton(r, r, { cls: 'quick-chip', action: 'quick-reply' }))));
   }
   return replies;
@@ -861,14 +856,14 @@ function offerQuickReplies(turn) {
 
 /** What the pet's status line says once a reply is done: the next step, if there is one. */
 function guideFor(turn, replies) {
-  if (turn.querySelector('[data-card="booking_quote"][data-status="pending"]')) return '核对好就点「确认预订」哦';
-  if (turn.querySelector('[data-card="cancel_preview"][data-status="open"]')) return '确定的话点「确认取消」';
-  if (turn.querySelector('[data-card="ride_quote"][data-status="quoted"]')) return '没问题就点「确认叫车」';
-  if (turn.querySelector('[data-card="extension_quote"][data-status="pending"]')) return '点「确认续住」就续上啦';
-  if (turn.querySelector('[data-card="review_draft"][data-status="draft"]')) return '满意的话点「发布点评」';
-  if (turn.querySelector('[data-card="hotels"]')) return '点一家看看房型～';
-  if (turn.querySelector('[data-card="rooms"]')) return '挑好了点「订」';
-  if (replies.length) return '点下面的按钮就能回我～';
+  if (turn.querySelector('[data-card="booking_quote"][data-status="pending"]')) return 'Check it over, then tap Confirm booking';
+  if (turn.querySelector('[data-card="cancel_preview"][data-status="open"]')) return "If you're sure, tap Confirm cancellation";
+  if (turn.querySelector('[data-card="ride_quote"][data-status="quoted"]')) return 'Looks good? Tap Confirm ride';
+  if (turn.querySelector('[data-card="extension_quote"][data-status="pending"]')) return 'Tap Confirm extension to stay longer';
+  if (turn.querySelector('[data-card="review_draft"][data-status="draft"]')) return 'Happy with it? Tap Publish review';
+  if (turn.querySelector('[data-card="hotels"]')) return 'Tap a hotel to see its rooms';
+  if (turn.querySelector('[data-card="rooms"]')) return 'Pick a rate and tap Book';
+  if (replies.length) return 'Tap a button below to answer';
   return PET_IDLE;
 }
 
@@ -877,13 +872,13 @@ function textBubble(text) {
 }
 
 function typingDots() {
-  return h('div', { class: 'typing', 'aria-label': '正在输入' }, h('span'), h('span'), h('span'));
+  return h('div', { class: 'typing', 'aria-label': `${PET_NAME} is typing` }, h('span'), h('span'), h('span'));
 }
 
 function errorLine(message, retry) {
-  const line = h('div', { class: 'error-line', role: 'alert' }, h('span', { text: message || '出了点问题，稍后再试。' }));
+  const line = h('div', { class: 'error-line', role: 'alert' }, h('span', { text: message || 'Something went wrong. Try again soon.' }));
   if (retry) {
-    const btn = h('button', { type: 'button', class: 'link-btn', 'data-action': 'retry', 'data-lock': '' }, '重新发送');
+    const btn = h('button', { type: 'button', class: 'link-btn', 'data-action': 'retry', 'data-lock': '' }, 'Send again');
     btn.disabled = state.busy;
     btn.addEventListener('click', retry);
     line.append(btn);
@@ -932,16 +927,16 @@ function createReply() {
       }
       if (pet.mood !== 'talking') {
         petMood('talking');
-        petStatus('正在输入…');
+        petStatus('Typing…');
       }
       raw += text;
       if (!frame) frame = requestAnimationFrame(render);
     },
-    // A tool is running (正在查找杭州西湖附近的酒店…): the pet is busy thinking.
+    // A tool is running ("Searching hotels near Times Square…"): the pet is busy thinking.
     status(text) {
       if (ended || typeof text !== 'string' || !text.trim()) return;
       petMood('thinking');
-      petStatus(text.trim().slice(0, 40));
+      petStatus(text.trim().slice(0, 60));
     },
     card(card) {
       if (ended) return;
@@ -958,7 +953,7 @@ function createReply() {
     },
     stopped() {
       closeBubble();
-      add(h('p', { class: 'muted-line', text: '已停止' }));
+      add(h('p', { class: 'muted-line', text: 'Stopped' }));
     },
     // The provider flagged this reply: drop everything it showed before the canned answer arrives.
     retract() {
@@ -974,7 +969,7 @@ function createReply() {
       closeBubble();
       ended = true;
       dots.remove();
-      if (!el.querySelector('.bubble, .error-line, .muted-line')) add(h('p', { class: 'muted-line', text: '这次没有收到回复，换个说法再试试。' }));
+      if (!el.querySelector('.bubble, .error-line, .muted-line')) add(h('p', { class: 'muted-line', text: 'No reply this time. Try saying it another way.' }));
       // The reply is done: its avatar stops following the pet's mood and goes back to the still drawing.
       const host = el.querySelector('.turn-avatar');
       host?.petRive?.destroy();
@@ -1003,7 +998,7 @@ function cardRow(label, value, cls = '') {
   return h('div', { class: `card-row${cls ? ` ${cls}` : ''}` }, h('dt', { text: label }), h('dd', { text: value }));
 }
 
-/** 小宿 peeking over the top edge of a confirmation, paws on the edge; its face follows the card's state. */
+/** Nana peeking over the top edge of a confirmation, paws on the edge; its face follows the card's state. */
 function peekPet() {
   return h('div', { class: 'card-peek', 'data-pet-poke': '' }, petNode('peek'));
 }
@@ -1020,20 +1015,20 @@ function quoteBubble(card) {
   const room = q.room || {};
   const rate = q.rate || {};
   const policy = rate.cancelPolicy;
-  const guests = Array.isArray(q.guests) ? q.guests.join('、') : '';
-  const inYear = Number(String(q.checkIn || '').slice(0, 4)) || cnYear();
+  const guests = Array.isArray(q.guests) ? q.guests.join(', ') : '';
   const el = h('div', { class: 'card has-peek', 'data-card': 'booking_quote', 'data-quote-id': q.id || '' },
     peekPet(),
-    h('p', { class: 'card-kicker', text: '确认单' }),
-    h('p', { class: 'card-title', text: hotel.name || '预订确认' }),
+    h('p', { class: 'card-kicker', text: 'Booking summary' }),
+    h('p', { class: 'card-title', text: hotel.name || 'Your booking' }),
     h('p', { class: 'card-sub', text: [room.name, BREAKFAST_LABELS[rate.breakfast] || ''].filter(Boolean).join(' · ') }),
     h('dl', { class: 'card-rows' },
-      cardRow('入住', formatDate(q.checkIn)),
-      cardRow('离店', q.checkOut ? `${formatDate(q.checkOut, true, inYear)} · ${q.nights || 1}晚` : ''),
-      cardRow('房间', `${q.rooms || 1}间`),
-      cardRow('入住人', [guests, q.contactPhone].filter(Boolean).join(' · ')),
-      cardRow('取消', policy?.text, policy && (policy.type === 'none' || policyLapsed(policy)) ? 'is-warn' : '')),
-    h('div', { class: 'card-total' }, h('span', { text: '合计' }), h('span', { class: 'card-amount', text: formatYuan(q.totalPrice) })),
+      cardRow('Check-in', formatDate(q.checkIn)),
+      cardRow('Check-out', q.checkOut ? `${formatDate(q.checkOut)} · ${plural(q.nights || 1, 'night')}` : ''),
+      cardRow('Rooms', String(q.rooms || 1)),
+      cardRow('Guests', [guests, q.contactPhone].filter(Boolean).join(' · ')),
+      cardRow('Email', q.holder?.email || ''),
+      cardRow('Cancellation', policy?.text, policy && (policy.type === 'none' || policyLapsed(policy)) ? 'is-warn' : '')),
+    h('div', { class: 'card-total' }, h('span', { text: 'Total' }), h('span', { class: 'card-amount', text: formatMoney(q.totalPrice) })),
     h('div', { class: 'confirm-actions' }));
   quoteOf.set(el, q);
   renderQuoteState(el, q);
@@ -1061,15 +1056,15 @@ function renderQuoteState(el, q, failure = null) {
   // Waiting for you; delighted once it is booked; dozed off if you let it expire.
   setPeekMood(el, failure ? 'oops' : q.status === 'confirmed' ? 'happy' : expired ? 'sleepy' : 'idle');
   if (failure) {
-    box.append(h('p', { class: 'confirm-note is-warn', text: failure.message }), chatButton('重新报价', requoteMessage(q), { cls: 'btn btn-secondary', action: 'requote' }));
+    box.append(h('p', { class: 'confirm-note is-warn', text: failure.message }), chatButton('Get a new quote', requoteMessage(q), { cls: 'btn btn-secondary', action: 'requote' }));
   } else if (q.status === 'confirmed') {
-    box.append(h('p', { class: 'confirm-note' }, icon('paw'), h('span', { text: '已下单' })));
+    box.append(h('p', { class: 'confirm-note' }, icon('paw'), h('span', { text: 'Booked' })));
   } else if (q.status === 'superseded') {
-    box.append(h('p', { class: 'confirm-note', text: '已换成新的确认单' }));
+    box.append(h('p', { class: 'confirm-note', text: 'Replaced by a newer summary' }));
   } else if (expired) {
-    box.append(h('p', { class: 'confirm-note', text: '确认单已过期' }), chatButton('重新报价', requoteMessage(q), { cls: 'btn btn-secondary', action: 'requote' }));
+    box.append(h('p', { class: 'confirm-note', text: 'This quote has expired' }), chatButton('Get a new quote', requoteMessage(q), { cls: 'btn btn-secondary', action: 'requote' }));
   } else {
-    const btn = h('button', { type: 'button', class: 'btn btn-primary', 'data-action': 'confirm-pay' }, `确认预订 ${formatYuan(q.totalPrice)}`);
+    const btn = h('button', { type: 'button', class: 'btn btn-primary', 'data-action': 'confirm-pay' }, `Confirm booking ${formatMoney(q.totalPrice)}`);
     btn.addEventListener('click', () => {
       const current = quoteOf.get(el) || q;
       if (quoteExpired(current)) renderQuoteState(el, { ...current, status: 'expired' });
@@ -1102,17 +1097,18 @@ function openPaymentSheet(quote) {
     let outcome = null;
     let inflight = null;
     let finished = false;
-    const ctl = openModal({ title: '支付' });
+    const ctl = openModal({ title: 'Checkout' });
     const options = payOptions(`pay-${ctl.seq}`);
     const errorEl = h('p', { class: 'form-error', role: 'alert', hidden: true });
-    const payBtn = h('button', { type: 'button', class: 'btn btn-primary', 'data-action': 'pay' }, `支付 ${formatYuan(quote.totalPrice)}`);
+    const label = `Pay ${formatMoney(quote.totalPrice)}`;
+    const payBtn = h('button', { type: 'button', class: 'btn btn-primary', 'data-action': 'pay' }, label);
     ctl.body.append(
       h('div', { class: 'pay-head' },
-        h('p', { class: 'pay-merchant', text: `${state.appName} · 模拟收银台` }),
-        h('p', { class: 'pay-amount', text: formatYuan(quote.totalPrice) }),
-        h('p', { class: 'pay-desc', text: [hotel.name, `${formatDate(quote.checkIn)}入住`, `${quote.nights || 1}晚`].filter(Boolean).join(' · ') })),
+        h('p', { class: 'pay-merchant', text: `${state.appName} · Test checkout` }),
+        h('p', { class: 'pay-amount', text: formatMoney(quote.totalPrice) }),
+        h('p', { class: 'pay-desc', text: [hotel.name, `Check-in ${formatDate(quote.checkIn)}`, plural(quote.nights || 1, 'night')].filter(Boolean).join(' · ') })),
       options,
-      h('p', { class: 'pay-note', text: '模拟支付，不会扣款' }),
+      h('p', { class: 'pay-note', text: TEST_MODE_NOTE }),
       errorEl,
       payBtn);
 
@@ -1120,16 +1116,18 @@ function openPaymentSheet(quote) {
       ctl.lock(on);
       payBtn.disabled = on;
       for (const input of options.querySelectorAll('input')) input.disabled = on;
-      payBtn.replaceChildren(...(on ? [spinner(), '正在支付…'] : [`支付 ${formatYuan(quote.totalPrice)}`]));
+      payBtn.replaceChildren(...(on ? [spinner(), 'Paying…'] : [label]));
     };
     // Confirming is idempotent on the server, so a retry after a failed payment reuses the same order.
     const run = async () => {
-      const method = options.querySelector('input:checked')?.value || 'wechat';
+      const method = options.querySelector('input:checked')?.value || DEFAULT_PAY_METHOD;
       let order = (await api('POST', `/api/quotes/${enc(quote.id)}/confirm`, {})).order;
-      if (!order) throw new ApiError(0, 'bad_response', '下单失败，稍后再试。');
+      if (!order) throw new ApiError(0, 'bad_response', "Couldn't place the booking. Try again soon.");
       outcome = { order, paid: false };
       if (order.status === 'pending_payment') order = (await api('POST', `/api/orders/${enc(order.id)}/pay`, { method })).order || order;
-      if (order.status !== 'confirmed') throw new ApiError(0, order.status, order.status === 'closed' ? '订单已超时关闭，请重新报价。' : '订单状态变了，请重新报价。');
+      if (order.status !== 'confirmed') {
+        throw new ApiError(0, order.status, order.status === 'closed' ? 'This booking timed out and was closed. Get a new quote.' : 'This booking changed. Get a new quote.');
+      }
       return order;
     };
     payBtn.addEventListener('click', async () => {
@@ -1148,15 +1146,15 @@ function openPaymentSheet(quote) {
         ctl.close();
       } catch (err) {
         busy(false);
-        errorEl.textContent = err.message || '支付失败，稍后再试。';
+        errorEl.textContent = err.message || 'Payment failed. Try again soon.';
         errorEl.hidden = false;
         if (REQUOTE_CODES.has(err.code) || ['closed', 'cancelled'].includes(err.code)) {
           outcome = { ...(outcome?.order ? { order: outcome.order } : {}), error: { code: err.code, message: err.message } };
           finished = true;
           payBtn.dataset.action = 'requote';
-          payBtn.textContent = '重新报价';
+          payBtn.textContent = 'Get a new quote';
         } else {
-          payBtn.textContent = '重试';
+          payBtn.textContent = 'Try again';
         }
       } finally {
         inflight = null;
@@ -1170,13 +1168,13 @@ function openPaymentSheet(quote) {
   });
 }
 
-/** WeChat Pay / Alipay radio buttons for the simulated checkout. */
+/** Card / Apple Pay radio buttons for the simulated checkout. */
 function payOptions(group) {
-  return h('div', { class: 'pay-options', role: 'radiogroup', 'aria-label': '支付方式' },
-    Object.entries(PAY_METHODS).map(([key, label], i) => h('label', { class: 'pay-option', 'data-method': key },
-      h('span', { class: `pay-mark pay-mark-${key}`, 'aria-hidden': 'true', text: key === 'wechat' ? '微' : '支' }),
+  return h('div', { class: 'pay-options', role: 'radiogroup', 'aria-label': 'Payment method' },
+    Object.entries(PAY_METHODS).map(([key, label]) => h('label', { class: 'pay-option', 'data-method': key },
+      h('span', { class: `pay-mark pay-mark-${key}`, 'aria-hidden': 'true' }, icon(key === 'card' ? 'card' : 'contactless')),
       h('span', { class: 'pay-name', text: label }),
-      h('input', { type: 'radio', name: group, value: key, checked: i === 0 }))));
+      h('input', { type: 'radio', name: group, value: key, checked: key === DEFAULT_PAY_METHOD }))));
 }
 
 /**
@@ -1190,23 +1188,23 @@ function openPaySheet({ title, amount, desc, run }) {
     let finished = false;
     const ctl = openModal({ title });
     const options = payOptions(`pay-${ctl.seq}`);
-    const label = `支付 ${formatYuan(amount)}`;
+    const label = `Pay ${formatMoney(amount)}`;
     const errorEl = h('p', { class: 'form-error', role: 'alert', hidden: true });
     const payBtn = h('button', { type: 'button', class: 'btn btn-primary', 'data-action': 'pay' }, label);
     ctl.body.append(
       h('div', { class: 'pay-head' },
-        h('p', { class: 'pay-merchant', text: `${state.appName} · 模拟收银台` }),
-        h('p', { class: 'pay-amount', text: formatYuan(amount) }),
+        h('p', { class: 'pay-merchant', text: `${state.appName} · Test checkout` }),
+        h('p', { class: 'pay-amount', text: formatMoney(amount) }),
         h('p', { class: 'pay-desc', text: desc || '' })),
       options,
-      h('p', { class: 'pay-note', text: '模拟支付，不会扣款' }),
+      h('p', { class: 'pay-note', text: TEST_MODE_NOTE }),
       errorEl,
       payBtn);
     const busy = (on) => {
       ctl.lock(on);
       payBtn.disabled = on;
       for (const input of options.querySelectorAll('input')) input.disabled = on;
-      payBtn.replaceChildren(...(on ? [spinner(), '正在支付…'] : [label]));
+      payBtn.replaceChildren(...(on ? [spinner(), 'Paying…'] : [label]));
     };
     payBtn.addEventListener('click', async () => {
       if (finished) {
@@ -1215,18 +1213,18 @@ function openPaySheet({ title, amount, desc, run }) {
       }
       errorEl.hidden = true;
       busy(true);
-      inflight = Promise.resolve().then(() => run(options.querySelector('input:checked')?.value || 'wechat'));
+      inflight = Promise.resolve().then(() => run(options.querySelector('input:checked')?.value || DEFAULT_PAY_METHOD));
       try {
         result = await inflight;
         ctl.lock(false);
         ctl.close();
       } catch (err) {
         busy(false);
-        errorEl.textContent = err.message || '支付失败，稍后再试。';
+        errorEl.textContent = err.message || 'Payment failed. Try again soon.';
         errorEl.hidden = false;
         // Expired or sold out: paying again cannot help.
         finished = [409, 410].includes(err.status);
-        payBtn.textContent = finished ? '知道了' : '重试';
+        payBtn.textContent = finished ? 'Got it' : 'Try again';
       } finally {
         inflight = null;
       }
@@ -1241,28 +1239,29 @@ function openPaySheet({ title, amount, desc, run }) {
 
 /** The simulated digital key: hold the phone to the lock and the door opens. */
 function openKeySheet(stay) {
-  const ctl = openModal({ title: '电子房卡' });
-  const HINT = '把手机靠近门锁';
+  const ctl = openModal({ title: 'Digital key' });
+  const HINT = 'Hold your phone near the lock';
   const hint = h('span', { class: 'keycard-hint', text: HINT });
   const card = h('div', { class: 'keycard' },
     h('span', { class: 'keycard-hotel', text: stay.hotel?.name || '' }),
     h('span', { class: 'keycard-num', text: stay.roomNumber || '' }),
     h('span', { class: 'keycard-waves', 'aria-hidden': 'true' }, h('span'), h('span'), h('span'), icon('key')),
     hint);
-  const btn = h('button', { type: 'button', class: 'btn btn-primary', 'data-action': 'unlock' }, icon('door'), '开门');
+  const btn = h('button', { type: 'button', class: 'btn btn-primary', 'data-action': 'unlock' }, icon('door'), 'Unlock');
   btn.addEventListener('click', () => {
     card.classList.add('is-open');
-    hint.textContent = '门开啦，欢迎回来～';
+    hint.textContent = "You're in. Welcome back!";
     btn.disabled = true;
-    petFlash('门开啦，好好休息～', 3000);
+    petFlash('Door open. Rest well!', 3000);
     setTimeout(() => {
       card.classList.remove('is-open');
       hint.textContent = HINT;
       btn.disabled = false;
     }, 3000);
   });
+  const zone = stay.timeZone || stay.hotel?.timeZone;
   ctl.body.append(card,
-    h('p', { class: 'keycard-note', text: [stay.keyValidUntil ? `有效期至 ${dayTime(stay.keyValidUntil)}` : '', '模拟房卡，演示用'].filter(Boolean).join(' · ') }),
+    h('p', { class: 'keycard-note', text: [stay.keyValidUntil ? `Valid until ${dayTime(stay.keyValidUntil, zone)}` : '', 'Demo key, not a real one'].filter(Boolean).join(' · ') }),
     btn);
 }
 
@@ -1274,14 +1273,14 @@ function cancelBubble(card) {
   const refund = Number(card.refund) || 0;
   const el = h('div', { class: 'card has-peek', 'data-card': 'cancel_preview', 'data-order-id': orderId || '' },
     peekPet(),
-    h('p', { class: 'card-kicker', text: '取消订单' }),
-    h('p', { class: 'card-title', text: hotel.name || '订单' }),
+    h('p', { class: 'card-kicker', text: 'Cancel booking' }),
+    h('p', { class: 'card-title', text: hotel.name || 'Booking' }),
     h('dl', { class: 'card-rows' },
-      cardRow('订单号', orderId),
-      cardRow('入住', formatDate(order.checkIn)),
+      cardRow('Booking', orderId),
+      cardRow('Check-in', formatDate(order.checkIn)),
       order.payment
-        ? [cardRow('违约金', penalty > 0 ? formatYuan(penalty) : '免费取消', penalty > 0 ? 'is-warn' : ''), cardRow('退款', refund > 0 ? formatYuan(refund) : '不退款')]
-        : cardRow('费用', '还没付款，取消不收费')),
+        ? [cardRow('Fee', penalty > 0 ? formatMoney(penalty) : 'Free cancellation', penalty > 0 ? 'is-warn' : ''), cardRow('Refund', refund > 0 ? formatMoney(refund) : 'No refund')]
+        : cardRow('Fees', 'Not paid yet, so no charge')),
     h('div', { class: 'confirm-actions' }));
   renderCancelState(el, order.status === 'cancelled' ? 'cancelled' : card.cancellable === false ? 'blocked' : 'open', orderId);
   return el;
@@ -1292,24 +1291,24 @@ function renderCancelState(el, status, orderId) {
   box.replaceChildren();
   el.dataset.status = status;
   setPeekMood(el, status === 'cancelled' ? 'idle' : 'oops');
-  if (status === 'cancelled') box.append(h('p', { class: 'confirm-note' }, icon('check'), h('span', { text: '已取消' })));
-  else if (status === 'blocked') box.append(h('p', { class: 'confirm-note is-warn', text: '这单现在不能取消' }));
+  if (status === 'cancelled') box.append(h('p', { class: 'confirm-note' }, icon('check'), h('span', { text: 'Cancelled' })));
+  else if (status === 'blocked') box.append(h('p', { class: 'confirm-note is-warn', text: "This booking can't be cancelled now" }));
   else {
     const errorEl = h('p', { class: 'form-error', role: 'alert', hidden: true });
-    const btn = h('button', { type: 'button', class: 'btn btn-danger', 'data-action': 'confirm-cancel' }, '确认取消');
+    const btn = h('button', { type: 'button', class: 'btn btn-danger', 'data-action': 'confirm-cancel' }, 'Confirm cancellation');
     btn.addEventListener('click', async () => {
       btn.disabled = true;
-      btn.replaceChildren(spinner(), '正在取消…');
+      btn.replaceChildren(spinner(), 'Cancelling…');
       errorEl.hidden = true;
       try {
-        const data = await api('POST', `/api/orders/${enc(orderId)}/cancel`, { reason: '用户确认取消' });
+        const data = await api('POST', `/api/orders/${enc(orderId)}/cancel`, { reason: 'Cancelled by the guest' });
         renderCancelState(el, 'cancelled', orderId);
         refreshPlans();
-        petFlash('已经帮你取消好啦', 4000);
-        await syncNotices(data.order ? { kind: 'cancelled', cards: [{ type: 'order', order: data.order }] } : { kind: 'cancelled', text: '订单已取消。' });
+        petFlash('All cancelled for you', 4000);
+        await syncNotices({ kind: 'cancelled', cards: data.order ? [{ type: 'order', order: data.order }] : [] });
       } catch (err) {
         btn.disabled = false;
-        btn.textContent = '确认取消';
+        btn.textContent = 'Confirm cancellation';
         errorEl.textContent = err.message;
         errorEl.hidden = false;
       }
@@ -1319,29 +1318,20 @@ function renderCancelState(el, status, orderId) {
 }
 
 // ---------------------------------------------------------------------------
-// Notices (order paid / cancelled, reply stopped): small centered lines, as stored by the server
+// Notices (booked, cancelled, a ride, the hotel's replies…): small centered lines, as stored by the server. What
+// a notice is comes from its `kind`; its `text` is one short line to show, never read for meaning.
 // ---------------------------------------------------------------------------
-
-/** Which order event a notice reports, from the server's text (see src/server.js orderNoticeText). */
-function noticeKind(text) {
-  const s = String(text || '');
-  if (/已取消/.test(s)) return 'cancelled';
-  if (/支付成功/.test(s)) return 'paid';
-  if (/已提交/.test(s)) return 'pending';
-  return 'info';
-}
 
 const noticeKey = (item) => `${item.at || ''}#${item.text || ''}`;
 const noticeOrder = (item) => (Array.isArray(item.cards) ? item.cards.find((c) => c?.type === 'order')?.order : null) || null;
 
-// The server's notice is written for the model (status, payment, dates…); on screen one short line is enough.
-function noticeShort(kind, order) {
-  if (!order?.id) return '';
-  if (kind === 'paid') return `已订好 · 订单号 ${order.id}`;
-  if (kind === 'pending') return '已提交订单，等待支付';
+// Only for a notice this page makes itself (the session could not be read back): a line from the order.
+function noticeFallback(kind, order) {
+  if (kind === 'paid') return order?.id ? `Booked · Booking ${order.id}` : 'Booked';
+  if (kind === 'pending') return 'Booking placed, waiting for payment';
   if (kind === 'cancelled') {
-    const refund = Number(order.cancellation?.refund) || 0;
-    return `订单已取消 · ${refund > 0 ? `退款 ${formatYuan(refund)}（模拟）` : order.payment ? '按取消政策不退款' : '没有产生费用'}`;
+    const refund = Number(order?.cancellation?.refund) || 0;
+    return `Booking cancelled · ${refund > 0 ? `${formatMoney(refund)} refund (simulated)` : order?.payment ? 'No refund under the policy' : 'No charge'}`;
   }
   return '';
 }
@@ -1352,22 +1342,23 @@ const NOTICE_ICONS = {
 };
 
 function noticeLine(item) {
-  const kind = item.kind || noticeKind(item.text);
-  const short = noticeShort(kind, noticeOrder(item));
+  const kind = NOTICE_KINDS.has(item.kind) ? item.kind : 'info';
+  const text = String(item.text || '').trim() || noticeFallback(kind, noticeOrder(item));
   const el = h('div', { class: `notice notice-${kind}`, 'data-kind': kind },
     h('div', { class: 'notice-pill' },
       NOTICE_ICONS[kind] ? icon(NOTICE_ICONS[kind], 'icon notice-icon') : null,
-      short ? h('p', { class: 'notice-text', text: short }) : mdBlock(item.text || '', 'notice-text')));
+      mdBlock(text, 'notice-text')));
   if (item.at) el.dataset.key = noticeKey(item);
   return el;
 }
 
 const NOTICE_FLASH = {
-  ride_confirmed: '司机师傅接单啦', extended: '续住好啦，多住几天～', review_published: '谢谢你的点评 (｡•ᴗ•｡)',
-  front_desk_checkin: '前台帮你办好入住啦', early_checkin_approved: '可以提前入住啦', review_replied: '酒店回复你的点评啦',
+  ride_confirmed: 'Your driver is booked', extended: 'Stay extended. Enjoy!', review_published: 'Thanks for the review!',
+  front_desk_checkin: 'The front desk checked you in', early_checkin_approved: 'Early check-in approved!',
+  review_replied: 'The hotel replied to your review',
 };
 
-/** Shows a notice as it happens; a paid booking also gets 小宿's hot-spring sticker. */
+/** Shows a notice as it happens; a paid booking also gets Nana's hot-spring sticker. */
 function appendNotice(item) {
   const el = append(noticeLine(item));
   if (NOTICE_FLASH[el.dataset.kind]) petFlash(NOTICE_FLASH[el.dataset.kind], 4000);
@@ -1402,9 +1393,8 @@ async function syncNotices(fallback = null) {
   const shown = new Set([...els.messages.querySelectorAll('.notice[data-key]')].map((el) => el.dataset.key));
   let last = null;
   for (const item of items) {
-    const isOrderNotice = Array.isArray(item?.cards) && item.cards.some((c) => c?.type === 'order');
-    if (item?.role !== 'notice' || !(isOrderNotice || NOTICE_KINDS.has(item.kind)) || !item.at || shown.has(noticeKey(item))) continue;
-    // The server replaces 已提交 with 支付成功 when they arrive back to back.
+    if (item?.role !== 'notice' || !NOTICE_KINDS.has(item.kind) || !item.at || shown.has(noticeKey(item))) continue;
+    // The server replaces "pending" with "paid" when they arrive back to back.
     last = appendNotice(item);
   }
   if (last) {
@@ -1438,9 +1428,11 @@ function renderHistory(items) {
         if (node) placeIn(turn, node);
       }
     } else if (item.role === 'notice') {
-      // A stopped or failed reply belongs to its turn; order notices stand on their own.
-      if (turn && /^（.*）$/.test(String(item.text || '').trim())) turnBody(turn).append(h('p', { class: 'muted-line', text: String(item.text).trim().slice(1, -1) }));
-      else {
+      // A stopped or failed reply (a notice of no known kind) belongs to its turn; the others stand on their own.
+      if (turn && !NOTICE_KINDS.has(item.kind)) {
+        const text = String(item.text || '').trim().replace(/^[(（]\s*([\s\S]*?)\s*[)）]$/, '$1');
+        if (text) turnBody(turn).append(h('p', { class: 'muted-line', text }));
+      } else {
         turn = null;
         const notice = frag.appendChild(noticeLine(item));
         if (notice.dataset.kind === 'paid') frag.append(stickerTurn());
@@ -1451,7 +1443,7 @@ function renderHistory(items) {
 }
 
 // ---------------------------------------------------------------------------
-// Sheets: payment, more menu, 常用入住人
+// Sheets: payment, more menu, traveler details
 // ---------------------------------------------------------------------------
 
 let modalSeq = 0;
@@ -1461,7 +1453,7 @@ function openModal({ title }) {
   const seq = modalSeq;
   const titleId = `sheet-title-${seq}`;
   const previous = document.activeElement;
-  const closeBtn = h('button', { type: 'button', class: 'icon-btn modal-close', 'aria-label': '关闭' }, icon('close'));
+  const closeBtn = h('button', { type: 'button', class: 'icon-btn modal-close', 'aria-label': 'Close' }, icon('close'));
   const body = h('div', { class: 'sheet-body' });
   const panel = h('div', { class: 'sheet' },
     h('div', { class: 'sheet-grabber', 'aria-hidden': 'true' }),
@@ -1502,114 +1494,140 @@ function openModal({ title }) {
 }
 
 function openMenu() {
-  const ctl = openModal({ title: '更多' });
+  const ctl = openModal({ title: 'More' });
   const item = (label, action, fn) => h('button', { type: 'button', class: 'menu-item', 'data-action': action, onclick: () => {
     ctl.close();
     fn();
   } }, label);
   ctl.body.append(h('div', { class: 'menu' },
-    item('我的安排', 'open-plans', openPlans),
-    item('新对话', 'new-chat', newChat),
-    item('常用入住人', 'open-profile', openProfile),
-    state.merchant ? item('切换到商家端（演示）', 'open-merchant', () => { location.href = merchantUrl(); }) : null));
+    item('My trips', 'open-plans', openPlans),
+    item('New chat', 'new-chat', newChat),
+    item('Traveler details', 'open-profile', openProfile),
+    state.merchant ? item('Switch to hotel console (demo)', 'open-merchant', () => { location.href = merchantUrl(); }) : null));
 }
 
 /** The hotel's console: a page of its own on the server, the same app with ?view=merchant in the phone apps. */
 function merchantUrl() {
-  return globalThis.xiaosuApp ? '?view=merchant' : 'merchant';
+  return globalThis.nanahotelApp ? '?view=merchant' : 'merchant';
 }
 
 function openProfile() {
-  buildProfilePane(openModal({ title: '常用入住人' }).body);
+  buildProfilePane(openModal({ title: 'Traveler details' }).body);
 }
 
-const PHONE_RE = /^1[3-9]\d{9}$/;
-const PHONE_HINT = '酒店联系你用，订单里只显示部分号码。';
+const PHONE_HINT = 'So the hotel can reach you. Bookings show only the last 4 digits.';
+const PHONE_PLACEHOLDER = '(415) 555-0123';
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+// The server's rules (docs/US-CONTRACT.md §7), checked here first so the form can point at the field.
+const MSG_NAME = 'Please enter a first and last name';
+const MSG_EMAIL = "That email doesn't look right";
+const MSG_PHONE = 'Please enter a 10-digit US phone number';
 
 function buildProfilePane(pane) {
   const uid = modalSeq;
-  const nameInput = h('input', { id: `pf-name-${uid}`, name: 'guestName', type: 'text', maxlength: 20, autocomplete: 'name', placeholder: '与证件一致的姓名' });
-  const phoneInput = h('input', { id: `pf-phone-${uid}`, name: 'contactPhone', type: 'tel', inputmode: 'numeric', maxlength: 20, autocomplete: 'tel', placeholder: '11 位手机号' });
+  const field = (input, label, ...extra) => h('div', { class: 'field' }, h('label', { for: input.id, text: label }), input, ...extra);
+  const firstInput = h('input', { id: `pf-first-${uid}`, name: 'firstName', type: 'text', maxlength: 40, autocomplete: 'given-name', autocapitalize: 'words', spellcheck: 'false' });
+  const lastInput = h('input', { id: `pf-last-${uid}`, name: 'lastName', type: 'text', maxlength: 40, autocomplete: 'family-name', autocapitalize: 'words', spellcheck: 'false' });
+  const emailInput = h('input', { id: `pf-email-${uid}`, name: 'email', type: 'email', inputmode: 'email', maxlength: 120, autocomplete: 'email', autocapitalize: 'off', spellcheck: 'false', placeholder: 'you@example.com' });
+  const phoneInput = h('input', { id: `pf-phone-${uid}`, name: 'contactPhone', type: 'tel', inputmode: 'tel', maxlength: 20, autocomplete: 'tel', placeholder: PHONE_PLACEHOLDER });
   const phoneHint = h('p', { class: 'field-hint', id: `pf-phone-hint-${uid}`, text: PHONE_HINT });
   phoneInput.setAttribute('aria-describedby', phoneHint.id);
-  phoneInput.addEventListener('blur', () => {
-    const digits = normalizePhoneInput(phoneInput.value);
-    if (PHONE_RE.test(digits)) phoneInput.value = digits;
+  // (415) 555-0123 as you type at the end of the box; tidied on the way out.
+  phoneInput.addEventListener('input', (e) => {
+    const atEnd = phoneInput.selectionStart === phoneInput.value.length;
+    if (atEnd && e.inputType?.startsWith('insert')) phoneInput.value = formatPhoneInput(phoneInput.value);
   });
-  const clearPhoneBtn = h('button', { type: 'button', class: 'link-btn', 'data-action': 'clear-phone', hidden: true }, '删除已保存的号码');
-  const prefInput = h('textarea', { id: `pf-pref-${uid}`, name: 'preferences', rows: 2, maxlength: MAX_PREFERENCES_CHARS, placeholder: '比如：高楼层、安静、无烟房' });
+  phoneInput.addEventListener('blur', () => {
+    if (US_PHONE_RE.test(normalizePhoneInput(phoneInput.value))) phoneInput.value = formatPhoneInput(phoneInput.value);
+  });
+  const clearPhoneBtn = h('button', { type: 'button', class: 'link-btn', 'data-action': 'clear-phone', hidden: true }, 'Remove saved number');
+  const prefInput = h('textarea', { id: `pf-pref-${uid}`, name: 'preferences', rows: 2, maxlength: MAX_PREFERENCES_CHARS, placeholder: 'e.g. high floor, quiet, non-smoking' });
   const errorEl = h('p', { class: 'form-error', role: 'alert', hidden: true });
   const statusEl = h('p', { class: 'form-status', role: 'status' });
-  const saveBtn = h('button', { type: 'submit', class: 'btn btn-primary', disabled: true }, '保存');
+  const saveBtn = h('button', { type: 'submit', class: 'btn btn-primary', disabled: true }, 'Save');
   const form = h('form', { class: 'form', novalidate: true },
-    h('p', { class: 'form-intro', text: '保存后，订房时自动填好入住人和电话。' }),
-    h('div', { class: 'field' }, h('label', { for: nameInput.id, text: '姓名' }), nameInput),
-    h('div', { class: 'field' }, h('label', { for: phoneInput.id, text: '手机号' }), phoneInput, phoneHint, clearPhoneBtn),
-    h('div', { class: 'field' }, h('label', { for: prefInput.id, text: `住宿偏好（${MAX_PREFERENCES_CHARS} 字以内）` }), prefInput),
+    h('p', { class: 'form-intro', text: 'Saved details fill in your bookings automatically.' }),
+    h('div', { class: 'field-row' }, field(firstInput, 'First name'), field(lastInput, 'Last name')),
+    field(emailInput, 'Email'),
+    field(phoneInput, 'Mobile phone', phoneHint, clearPhoneBtn),
+    field(prefInput, `Preferences (up to ${MAX_PREFERENCES_CHARS} characters)`),
     errorEl, saveBtn, statusEl);
   // Only fields the user touched are sent (an omitted field keeps its saved value).
   const dirty = new Set();
-  for (const input of [nameInput, phoneInput, prefInput]) input.addEventListener('input', () => dirty.add(input));
+  for (const input of [firstInput, lastInput, emailInput, phoneInput, prefInput]) input.addEventListener('input', () => dirty.add(input));
   let loading = true;
   const fill = (raw, { keepDirty = false } = {}) => {
     const p = raw && typeof raw === 'object' ? (raw.profile && typeof raw.profile === 'object' ? raw.profile : raw) : {};
     const put = (input, value) => {
       if (!keepDirty || !dirty.has(input)) input.value = value;
     };
-    put(nameInput, p.guestName || '');
-    put(prefInput, Array.isArray(p.preferences) ? p.preferences.join('、') : p.preferences || '');
+    put(firstInput, typeof p.firstName === 'string' ? p.firstName : '');
+    put(lastInput, typeof p.lastName === 'string' ? p.lastName : '');
+    put(emailInput, typeof p.email === 'string' ? p.email : '');
+    put(prefInput, Array.isArray(p.preferences) ? p.preferences.join(', ') : p.preferences || '');
     put(phoneInput, '');
     if (!keepDirty) dirty.clear();
     const saved = Boolean(p.hasPhone && p.contactPhone);
-    phoneInput.placeholder = saved ? `已保存 ${p.contactPhone}` : '11 位手机号';
-    phoneHint.textContent = saved ? '留空表示不修改。' : PHONE_HINT;
+    phoneInput.placeholder = saved ? `Saved: ${p.contactPhone}` : PHONE_PLACEHOLDER;
+    phoneHint.textContent = saved ? 'Leave it blank to keep the saved number.' : PHONE_HINT;
     clearPhoneBtn.hidden = !saved;
   };
-  const showError = (message) => {
+  const showError = (message, input) => {
     errorEl.textContent = message;
     errorEl.hidden = !message;
+    for (const el of [firstInput, lastInput, emailInput, phoneInput, prefInput]) el.removeAttribute('aria-invalid');
+    if (input) {
+      input.setAttribute('aria-invalid', 'true');
+      input.focus();
+    }
   };
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     if (loading) return;
     showError('');
     statusEl.textContent = '';
-    const guestName = nameInput.value.trim();
+    const firstName = firstInput.value.trim().replace(/\s+/g, ' ');
+    const lastName = lastInput.value.trim().replace(/\s+/g, ' ');
+    const email = emailInput.value.trim();
     const phone = normalizePhoneInput(phoneInput.value);
     const preferences = prefInput.value.trim();
-    if (dirty.has(nameInput) && guestName && (guestName.length < 2 || guestName.length > 20)) {
-      showError('姓名需要 2–20 个字。');
-      nameInput.focus();
+    const nameDirty = dirty.has(firstInput) || dirty.has(lastInput);
+    if (nameDirty && Boolean(firstName) !== Boolean(lastName)) {
+      showError(MSG_NAME, firstName ? lastInput : firstInput);
       return;
     }
-    if (phone && !PHONE_RE.test(phone)) {
-      showError('请输入正确的 11 位手机号。');
-      phoneInput.focus();
+    if (dirty.has(emailInput) && email && !EMAIL_RE.test(email)) {
+      showError(MSG_EMAIL, emailInput);
+      return;
+    }
+    if (phone && !US_PHONE_RE.test(phone)) {
+      showError(MSG_PHONE, phoneInput);
       return;
     }
     if (dirty.has(prefInput) && preferences.length > MAX_PREFERENCES_CHARS) {
-      showError(`住宿偏好最多 ${MAX_PREFERENCES_CHARS} 个字。`);
-      prefInput.focus();
+      showError(`Preferences can be up to ${MAX_PREFERENCES_CHARS} characters.`, prefInput);
       return;
     }
     const body = {};
-    if (dirty.has(nameInput)) body.guestName = guestName;
+    // The two names travel together, so a saved pair never ends up half changed.
+    if (nameDirty) Object.assign(body, { firstName, lastName });
+    if (dirty.has(emailInput)) body.email = email;
     if (dirty.has(prefInput)) body.preferences = preferences;
     if (phone) body.contactPhone = phone;
     if (!Object.keys(body).length) {
-      statusEl.textContent = '没有需要保存的修改。';
+      statusEl.textContent = 'Nothing to save.';
       return;
     }
     saveBtn.disabled = true;
-    saveBtn.replaceChildren(spinner(), '保存中…');
+    saveBtn.replaceChildren(spinner(), 'Saving…');
     try {
       fill(await api('PUT', '/api/profile', body));
-      statusEl.textContent = '已保存';
+      statusEl.textContent = 'Saved';
     } catch (err) {
       showError(err.message);
     } finally {
       saveBtn.disabled = false;
-      saveBtn.textContent = '保存';
+      saveBtn.textContent = 'Save';
     }
   });
   clearPhoneBtn.addEventListener('click', async () => {
@@ -1617,7 +1635,7 @@ function buildProfilePane(pane) {
     clearPhoneBtn.disabled = true;
     try {
       fill(await api('PUT', '/api/profile', { contactPhone: null }), { keepDirty: true });
-      statusEl.textContent = '已删除保存的手机号';
+      statusEl.textContent = 'Saved number removed';
     } catch (err) {
       showError(err.message);
     } finally {
@@ -1626,7 +1644,7 @@ function buildProfilePane(pane) {
   });
   pane.append(form);
   api('GET', '/api/profile').then((data) => fill(data, { keepDirty: true })).catch((err) => {
-    if (err.status !== 404) showError(`没能读取已保存的信息：${err.message}`);
+    if (err.status !== 404) showError(`Couldn't load your saved details: ${err.message}`);
   }).finally(() => {
     loading = false;
     saveBtn.disabled = false;
@@ -1640,8 +1658,8 @@ function toast(message) {
 }
 
 // ---------------------------------------------------------------------------
-// My plans: booked stays and whatever is on its way, under the header (GET /api/stays). While a ride, a delivery or
-// an invoice is moving, it is refreshed every PLAN_POLL_MS, and the cards for it on screen follow.
+// My trips: booked stays and whatever is on its way, under the header (GET /api/stays). While a ride, a delivery or
+// a receipt is moving, it is refreshed every PLAN_POLL_MS, and the cards for it on screen follow.
 // ---------------------------------------------------------------------------
 
 let plansTimer = 0;
@@ -1659,18 +1677,18 @@ function planChip(iconName, text, live) {
 
 function movingChip(r) {
   const label = STATUS_LABELS[r.kind]?.[r.status] || '';
-  if (r.kind === 'ride') return planChip(r.rideKind === 'airport_pickup' ? 'plane' : 'car', `${r.driver?.name || r.kindLabel || '叫车'} · ${label}`, true);
-  if (r.kind === 'service') return planChip('box', `${r.items?.[0]?.name || '客房服务'} · ${label}`, true);
-  return planChip('invoice', `发票 · ${label}`, true);
+  if (r.kind === 'ride') return planChip(r.rideKind === 'airport_pickup' ? 'plane' : 'car', `${r.driver?.name || r.kindLabel || 'Ride'} · ${label}`, true);
+  if (r.kind === 'service') return planChip('box', `${r.items?.[0]?.name || 'Room service'} · ${label}`, true);
+  return planChip('mail', `Receipt · ${label}`, true);
 }
 
 function renderPlans() {
   const chips = [];
   for (const { order, stay, requests } of state.stays) {
-    const name = order?.hotel?.name || '酒店';
-    if (stay && !stay.checkedOutAt) chips.push(planChip('key', `${stay.roomNumber || ''} 房 · ${name}`, false));
-    else if (!stay) chips.push(planChip('hotel', `${formatDate(order?.checkIn, false)}入住 · ${name}`, false));
-    // After check-out only what still matters shows: an invoice, a ride away from the hotel.
+    const name = order?.hotel?.name || 'Hotel';
+    if (stay && !stay.checkedOutAt) chips.push(planChip('key', `Room ${stay.roomNumber || ''} · ${name}`, false));
+    else if (!stay) chips.push(planChip('hotel', `Check-in ${formatDate(order?.checkIn, false)} · ${name}`, false));
+    // After check-out only what still matters shows: a receipt, a ride away from the hotel.
     const left = Boolean(stay?.checkedOutAt);
     for (const r of Array.isArray(requests) ? requests : []) {
       if (!isMoving(r)) continue;
@@ -1706,9 +1724,9 @@ async function refreshPlans() {
   if (wait != null && !document.hidden) plansTimer = setTimeout(refreshPlans, wait);
 }
 
-/** How long until my plans should be looked at again (null: nothing is moving). */
+/** How long until My trips should be looked at again (null: nothing is moving). */
 function nextPlansRefresh() {
-  const today = new Date(serverNow() + 8 * 3600000).toISOString().slice(0, 10);
+  const today = localYmd(serverNow());
   const here = state.stays.some(({ order, stay }) => !stay?.checkedOutAt && order?.checkIn <= today && order?.checkOut >= today);
   let wait = here ? PLAN_IDLE_MS : null;
   for (const s of state.stays) {
@@ -1725,9 +1743,9 @@ function nextPlansRefresh() {
 
 /** Everything booked, one group per stay: the stay (with its key once checked in), then its requests, newest first. */
 function openPlans() {
-  const ctl = openModal({ title: '我的安排' });
+  const ctl = openModal({ title: 'My trips' });
   if (!state.stays.length) {
-    ctl.body.append(h('p', { class: 'form-intro', text: `还没有订好的酒店。跟${state.appName}说说想住哪儿吧～` }));
+    ctl.body.append(h('p', { class: 'form-intro', text: `Nothing booked yet. Tell ${PET_NAME} where you'd like to stay.` }));
   }
   for (const { order, stay, requests } of state.stays) {
     const list = (Array.isArray(requests) ? [...requests] : []).reverse().map((r) => cards.forRequest(r)).filter(Boolean);
@@ -1737,7 +1755,7 @@ function openPlans() {
 }
 
 // ---------------------------------------------------------------------------
-// The call: 打给小宿 starts it (a timer, the line above the call bar, the mic ready); the red button hangs up.
+// The call: "Call Nana" starts it (a timer, the line above the call bar, the mic ready); the red button hangs up.
 // Talking is simulated: the mic opens a panel of sentences to "say", typed out as if transcribed, then sent.
 // ---------------------------------------------------------------------------
 
@@ -1752,10 +1770,10 @@ function updateCallLine() {
   const talking = state.speaking || pet.mood === 'talking';
   let text = '';
   if (live) {
-    if (state.voiceOpen) text = '通话中';
-    else if (talking) text = `${state.appName}在说 · 可以直接插话`;
-    else if (state.busy) text = `${state.appName}在想…`;
-    else text = '通话中 · 点麦克风说话';
+    if (state.voiceOpen) text = 'On a call';
+    else if (talking) text = `${PET_NAME} is talking · just jump in`;
+    else if (state.busy) text = `${PET_NAME} is thinking…`;
+    else text = 'On a call · tap the mic to talk';
   }
   if (els.callText.textContent !== text) els.callText.textContent = text;
   els.callWave.classList.toggle('is-on', live && (talking || state.voiceOpen));
@@ -1766,11 +1784,11 @@ function startCall() {
   if (state.call.live) return;
   state.call = { live: true, startedAt: Date.now(), timer: setInterval(updateCallLine, 1000) };
   els.app.dataset.call = 'live';
-  els.callBtn.setAttribute('aria-label', '挂断');
+  els.callBtn.setAttribute('aria-label', 'Hang up');
   petWake();
-  petFlash('喂～我在听', 2400);
+  petFlash("Hi! I'm listening", 2400);
   // Spoken from the tap itself: iOS only lets a page talk after a tap.
-  speak(`喂，我是${state.appName}，想住哪儿呀？`);
+  speak(`Hi, it's ${PET_NAME}! Where would you like to stay?`);
   openVoice();
 }
 
@@ -1780,12 +1798,12 @@ function endCall() {
   clearInterval(state.call.timer);
   state.call = { live: false, startedAt: 0, timer: 0 };
   els.app.dataset.call = 'idle';
-  els.callBtn.setAttribute('aria-label', `打给${state.appName}`);
+  els.callBtn.setAttribute('aria-label', `Call ${PET_NAME}`);
   closeVoice();
   stopSpeaking();
   updateCallLine();
-  petFlash(`通话结束 ${length}`, 2400);
-  if (!document.getElementById('welcome')) append(h('div', { class: 'stamp', text: `通话结束 · ${length}` }));
+  petFlash(`Call ended ${length}`, 2400);
+  if (!document.getElementById('welcome')) append(h('div', { class: 'stamp', text: `Call ended · ${length}` }));
 }
 
 /** Where the current trip is: start (nothing booked) / booked / staying / left. */
@@ -1831,7 +1849,7 @@ function closeVoice() {
   updateCallLine();
 }
 
-/** A sentence "heard": typed out as if transcribed, then sent. Talking over a reply stops it (可以直接插话). */
+/** A sentence "heard": typed out as if transcribed, then sent. Talking over a reply stops it ("just jump in"). */
 function sayIt(text) {
   const token = ++voiceToken;
   for (const b of els.voiceSays.querySelectorAll('button')) b.disabled = true;
@@ -1866,30 +1884,38 @@ function turnSettled() {
   });
 }
 
-// In a call, replies are read aloud where the browser has a Mandarin voice (the Android app's WebView has none).
-function mandarinVoice() {
+// In a call, replies are read aloud with an American English voice where the browser has one (falling back to any
+// English voice); the Android app's WebView has none, so it stays quiet there.
+function englishVoice() {
   const synth = globalThis.speechSynthesis;
   if (!synth || typeof globalThis.SpeechSynthesisUtterance !== 'function') return null;
   const voices = synth.getVoices();
-  return voices.find((v) => /^zh[-_](CN|Hans)/i.test(v.lang)) || voices.find((v) => /^cmn/i.test(v.lang)) || null;
+  const us = voices.filter((v) => /^en[-_]US\b/i.test(v.lang));
+  return us.find((v) => v.localService) || us[0] || voices.find((v) => /^en\b/i.test(v.lang)) || null;
 }
 
-/** Plain words to say: no Markdown, links, emoji or kaomoji (｡•ᴗ•｡). */
+const MAX_SPOKEN_CHARS = 400;
+
+/** Plain words to say: no Markdown, links or emoji; "#2" is read as "number 2"; long replies end at a sentence. */
 export function speakable(text) {
-  return String(text ?? '')
+  const words = String(text ?? '')
     .replace(/https?:\/\/\S+/g, '')
-    .replace(/\p{Extended_Pictographic}/gu, '')
-    .replace(/[（(][^（）()\p{Script=Han}]{1,16}[）)]/gu, '')
-    .replace(/[*`#>|_]/g, '')
-    .replace(/[~～]+/g, '，')
+    .replace(/[\p{Extended_Pictographic}\u{FE0F}\u{200D}\u{20E3}]/gu, '')
+    .replace(/#(\d+)/g, 'number $1')
+    .replace(/[*`#>|_~]/g, '')
+    .replace(/\s+·\s+/g, ', ')
     .replace(/\s+/g, ' ')
-    .replace(/，(?=[，。！？]|$)/g, '')
-    .trim()
-    .slice(0, 240);
+    .replace(/\s+([,.!?;:])/g, '$1')
+    .replace(/,(?=[,.!?]|$)/g, '')
+    .trim();
+  if (words.length <= MAX_SPOKEN_CHARS) return words;
+  const cut = words.slice(0, MAX_SPOKEN_CHARS);
+  const end = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('! '), cut.lastIndexOf('? '));
+  return end > 80 ? cut.slice(0, end + 1) : cut.trim();
 }
 
 function speak(text) {
-  const voice = state.call.live ? mandarinVoice() : null;
+  const voice = state.call.live ? englishVoice() : null;
   const words = speakable(text);
   if (!voice || !words) return false;
   const synth = globalThis.speechSynthesis;
@@ -1897,8 +1923,8 @@ function speak(text) {
   const u = new globalThis.SpeechSynthesisUtterance(words);
   u.voice = voice;
   u.lang = voice.lang;
-  u.rate = 1.08;
-  u.pitch = 1.2;
+  u.rate = 1.02;
+  u.pitch = 1.1;
   u.onstart = () => {
     state.speaking = true;
     if (!state.busy && pet.mood !== 'listening') petMood('talking');
@@ -1938,7 +1964,7 @@ function bindCall() {
 async function ensureSession() {
   if (state.sessionId) return state.sessionId;
   const data = await api('POST', '/api/sessions', {});
-  if (!data.sessionId) throw new ApiError(0, 'bad_response', '创建对话失败，稍后再试。');
+  if (!data.sessionId) throw new ApiError(0, 'bad_response', "Couldn't start a chat. Try again soon.");
   setSession(String(data.sessionId));
   return state.sessionId;
 }
@@ -1964,7 +1990,7 @@ async function streamTurn(message, reply, retry, epoch) {
   if (!res.ok) throw toApiError(res.status, await readJson(res));
   if (!(res.headers.get('content-type') || '').includes('text/event-stream') || !res.body) {
     const data = await readJson(res);
-    throw data && data.error ? toApiError(res.status, data) : new ApiError(res.status, 'bad_stream', '服务返回了无法识别的内容，稍后再试。');
+    throw data && data.error ? toApiError(res.status, data) : new ApiError(res.status, 'bad_stream', 'The server sent something unexpected. Try again soon.');
   }
   let done = false;
   const parser = createSseParser((event, data) => {
@@ -1978,7 +2004,7 @@ async function streamTurn(message, reply, retry, epoch) {
       else if (event === 'session' && typeof data.sessionId === 'string' && data.sessionId) setSession(data.sessionId);
       else if (event === 'done') done = true;
     } catch (err) {
-      console.error('处理事件失败', event, err);
+      console.error('Could not handle a stream event', event, err);
     }
   });
   const reader = res.body.getReader();
@@ -2004,7 +2030,7 @@ async function streamTurn(message, reply, retry, epoch) {
 function settlePet(reply, stopped) {
   if (reply.errored) {
     petMood('oops');
-    petStatus('出了点小状况…');
+    petStatus('Ran into a little trouble…');
     return;
   }
   petMood('idle');
@@ -2015,7 +2041,7 @@ async function send(text, { userEl = null, voice = false } = {}) {
   const message = String(text ?? '').trim();
   if (!message || state.busy) return;
   if (message.length > MAX_MESSAGE_CHARS) {
-    toast(`消息太长了，请控制在 ${MAX_MESSAGE_CHARS} 字以内。`);
+    toast(`That message is too long. Keep it under ${MAX_MESSAGE_CHARS.toLocaleString('en-US')} characters.`);
     return;
   }
   removeWelcome();
@@ -2037,7 +2063,7 @@ async function send(text, { userEl = null, voice = false } = {}) {
   scrollToBottom();
   petWake();
   petMood('thinking');
-  petStatus('在想…');
+  petStatus('Thinking…');
   let stopped = false;
   const retry = () => {
     if (state.busy) return;
@@ -2075,7 +2101,11 @@ async function send(text, { userEl = null, voice = false } = {}) {
       settlePet(reply, stopped);
       // In a call the reply is said out loud; typing, the cursor goes back to the box.
       if (state.call.live) {
-        if (!reply.errored && !stopped) speak([...reply.el.querySelectorAll('.bubble-in')].map((b) => b.textContent).join('。'));
+        if (!reply.errored && !stopped) {
+          // Each bubble ends a sentence, so the voice pauses between them.
+          speak([...reply.el.querySelectorAll('.bubble-in')].map((b) => speakable(b.textContent))
+            .filter(Boolean).map((s) => (/[.!?:]$/.test(s) ? s : `${s}.`)).join(' '));
+        }
       } else if (window.matchMedia?.('(pointer: fine)').matches && !document.querySelector('dialog[open]')) {
         els.input.focus();
       }
@@ -2131,22 +2161,22 @@ function renderWelcome() {
   const big = petNode('body');
   big.setAttribute('data-live', '');
   big.dataset.mood = pet.mood;
-  const title = typedLine('h2', 'welcome-title', `${greeting()}，我是${state.appName}`);
+  const title = typedLine('h2', 'welcome-title', greeting());
   const phase = tripPhase();
   const current = state.stays[0];
-  const hotel = current?.order?.hotel?.name || '酒店';
+  const hotel = current?.order?.hotel?.name || 'your hotel';
   const subText = {
     start: WELCOME_SUB,
-    booked: `${formatDate(current?.order?.checkIn, false)}入住「${hotel}」，规划行程、叫车、提前入住都可以找我～`,
-    staying: `住在 ${current?.stay?.roomNumber || ''} 房，要毛巾、叫醒、早餐、续住，跟我说一声就好～`,
-    left: '欢迎下次再来～开发票、写点评、查积分都可以找我。',
+    booked: `You check in at ${hotel} on ${formatDate(current?.order?.checkIn)}. I can plan your day, get you a ride or ask about early check-in.`,
+    staying: `You're in room ${current?.stay?.roomNumber || ''}. Towels, a wake-up call, breakfast, another night: just ask.`,
+    left: 'Hope to see you again! I can email a receipt, write a review or check your points.',
   }[phase];
   const sub = typedLine('p', 'welcome-sub', subText);
-  const el = h('section', { class: 'welcome', id: 'welcome', 'aria-label': '开始' },
-    h('button', { type: 'button', class: 'welcome-pet', 'data-pet-poke': '', 'aria-label': `摸摸${state.appName}` },
+  const el = h('section', { class: 'welcome', id: 'welcome', 'aria-label': 'Start' },
+    h('button', { type: 'button', class: 'welcome-pet', 'data-pet-poke': '', 'aria-label': `Pat ${PET_NAME}` },
       big, h('span', { class: 'pet-pop', 'aria-hidden': 'true', hidden: true })),
     h('div', { class: 'welcome-say' }, title.el, sub.el),
-    h('button', { type: 'button', class: 'hero-call', 'data-action': 'start-call', onclick: startCall }, icon('phone'), `打给${state.appName}`),
+    h('button', { type: 'button', class: 'hero-call', 'data-action': 'start-call', onclick: startCall }, icon('phone'), `Call ${PET_NAME}`),
     h('div', { class: 'chips' }, (TRIP_SUGGESTIONS[phase] || SUGGESTIONS).map((s) => chatButton(
       [h('span', { class: 'chip-emoji', 'aria-hidden': 'true', text: s.emoji }), h('span', { text: s.text })],
       s.text, { action: 'suggestion' }))));
@@ -2160,21 +2190,20 @@ function renderWelcome() {
 /** The one line above the conversation: the AI-content label, plus demo mode or a missing-key warning. */
 function renderThreadNote() {
   const note = els.threadNote;
-  note.replaceChildren(h('span', { text: '内容由 AI 生成 · 酒店、价格与支付均为模拟' }));
-  if (globalThis.xiaosuApp?.mode === 'demo') {
-    note.append(h('span', { class: 'thread-note-line', 'data-mode': 'demo', text: '演示模式：回复是写好的脚本' }));
+  note.replaceChildren(h('span', { text: 'AI-generated · Hotels, prices and payments are simulated' }));
+  if (globalThis.nanahotelApp?.mode === 'demo') {
+    note.append(h('span', { class: 'thread-note-line', 'data-mode': 'demo', text: 'Demo mode: the replies are scripted' }));
   } else if (state.llmConfigured === false) {
-    note.append(h('span', { class: 'thread-note-line is-warn', text: '服务端还没有配置大模型 API Key，暂时不能对话（参考 .env.example）。' }));
+    note.append(h('span', { class: 'thread-note-line is-warn', text: "The server has no AI model API key yet, so chat isn't available (see .env.example)." }));
   }
 }
 
+/** The app's name (NanaHotel) titles the page; the header always shows the assistant, Nana. */
 function setAppName(name) {
   const clean = String(name || '').trim().slice(0, 20);
   if (!clean) return;
   state.appName = clean;
   document.title = clean;
-  els.appName.textContent = clean;
-  document.getElementById('pet-header').setAttribute('aria-label', `摸摸${clean}`);
 }
 
 async function loadHealth() {
@@ -2191,7 +2220,7 @@ async function loadHealth() {
 }
 
 async function loadHistory() {
-  // 新对话 during the GET bumps the epoch; the old transcript must not land in the new chat.
+  // "New chat" during the GET bumps the epoch; the old transcript must not land in the new chat.
   const epoch = state.epoch;
   try {
     const data = await api('GET', `/api/sessions/${enc(state.sessionId)}`);
@@ -2207,12 +2236,12 @@ async function loadHistory() {
     if (last?.classList.contains('turn-in') && !state.busy) petStatus(guideFor(last, offerQuickReplies(last)));
     state.stick = true;
     scrollToBottom();
-    // The cards replayed above show the request as it was then (a ride still 待确认…); bring them up to date.
+    // The cards replayed above show the request as it was then (a ride still to confirm…); bring them up to date.
     refreshPlans();
   } catch (err) {
     if (epoch !== state.epoch) return;
     if ([401, 403, 404].includes(err.status)) setSession(null);
-    else toast(`上次的对话没能加载出来：${err.message}`);
+    else toast(`Couldn't load your last chat: ${err.message}`);
     if (!els.messages.childElementCount) renderWelcome();
   }
 }
@@ -2251,7 +2280,7 @@ function bindComposer() {
     updateSendButton();
   });
   els.input.addEventListener('keydown', (e) => {
-    // Enter while picking a Chinese IME candidate must not send.
+    // Enter while an IME is composing (an accent, a candidate) must not send.
     if (e.key !== 'Enter' || e.shiftKey || e.isComposing || e.keyCode === 229) return;
     e.preventDefault();
     if (typeof els.composer.requestSubmit === 'function') els.composer.requestSubmit();
@@ -2301,15 +2330,13 @@ function boot() {
     composer: document.getElementById('composer'),
     input: document.getElementById('input'),
     send: document.getElementById('send'),
-    appName: document.getElementById('app-name'),
     petStatus: document.getElementById('pet-status'),
     toasts: document.getElementById('toasts'),
   };
   cards = createCards({
     h,
-    yuan: formatYuan,
-    date: (ymd, withWeekday = true) => formatDate(ymd, withWeekday),
-    stayPhrase,
+    roomsMessage,
+    bookMessage,
     send: (message) => send(message),
     api,
     pay: async (opts) => {
@@ -2343,7 +2370,7 @@ function boot() {
   loadPhotos();
   // The hotel's console is offered in the menu only when this server has it (docs/MERCHANT.md).
   api('GET', '/api/merchant/hotels').then(() => { state.merchant = true; }, () => {});
-  // The home screen speaks to where the trip is, so it waits (briefly) for my plans.
+  // The home screen speaks to where the trip is, so it waits (briefly) for My trips.
   const plans = refreshPlans();
   if (state.sessionId) loadHistory();
   else {

@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { buildPetRiv } from '../tools/build-pet-riv.mjs';
 
-const RIV = new URL('../public/art/xiaosu.riv', import.meta.url);
+const RIV = new URL('../public/art/nana.riv', import.meta.url);
 const text = (bytes) => new TextDecoder('latin1').decode(bytes);
 
-test('public/art/xiaosu.riv is what tools/build-pet-riv.mjs makes from the current drawing', async () => {
+test('public/art/nana.riv is what tools/build-pet-riv.mjs makes from the current drawing', async () => {
   const committed = new Uint8Array(await readFile(RIV));
   const built = buildPetRiv();
   assert.ok(Buffer.from(built).equals(Buffer.from(committed)), 'run: node tools/build-pet-riv.mjs');

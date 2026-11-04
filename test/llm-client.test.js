@@ -2,19 +2,24 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   createLlmClient, createSseParser, classifyProviderError, buildRequestBody, parseToolArguments, retryDelayMs, parseRetryAfter, LlmError,
+  LLM_ERROR_MESSAGES, REASON_MESSAGES,
 } from '../src/llm/client.js';
-import { PROVIDERS, resolveLlmConfig, inferProvider, normalizeProvider } from '../src/llm/providers.js';
+import { PROVIDERS, resolveLlmConfig, inferProvider, normalizeProvider, DEFAULT_PROVIDER } from '../src/llm/providers.js';
 import { createFakeFetch } from './fakes/fake-fetch.js';
+import { textAnswer, sseStep } from './fakes/anthropic-sse.js';
+
+// The engine (retries, timeouts, aborts, fallback) is shared by both providers; it is exercised here through the
+// OpenAI Chat Completions adapter. Anthropic specifics: test/live-anthropic.test.js.
 
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
 
 const enc = new TextEncoder();
-const CJK = /[一-鿿]/;
+const CJK = /[　-鿿＀-￯]/;
 
 function chunk(delta, finish = null, extra = {}) {
-  return { id: 'cmpl-1', object: 'chat.completion.chunk', choices: [{ index: 0, delta, finish_reason: finish }], ...extra };
+  return { id: 'chatcmpl-1', object: 'chat.completion.chunk', choices: [{ index: 0, delta, finish_reason: finish }], ...extra };
 }
 
 /** SSE text: objects become `data: {json}` events, strings are passed through verbatim. */
@@ -43,10 +48,10 @@ function makeClient(steps, opts = {}) {
   const sleeps = [];
   let ids = 0;
   const llm = createLlmClient({
-    baseUrl: 'https://api.deepseek.com',
-    apiKey: 'sk-test',
-    model: 'deepseek-v4-flash',
-    provider: 'deepseek',
+    baseUrl: 'https://api.openai.com/v1',
+    apiKey: 'sk-test-openai-key',
+    model: 'gpt-4.1-mini',
+    provider: 'openai',
     fetch,
     sleep: async (ms) => {
       sleeps.push(ms);
@@ -61,21 +66,21 @@ function makeClient(steps, opts = {}) {
 async function run(steps, opts = {}, chatArgs = {}) {
   const { llm, fetch, sleeps } = makeClient(steps, opts);
   const deltas = [];
-  const res = await llm.chat({ messages: [{ role: 'user', content: '你好' }], tools: TOOLS, onTextDelta: (t) => deltas.push(t), ...chatArgs });
+  const res = await llm.chat({ messages: [{ role: 'user', content: 'Hi' }], tools: TOOLS, onTextDelta: (t) => deltas.push(t), ...chatArgs });
   return { res, deltas, fetch, sleeps };
 }
 
 async function runError(steps, opts = {}, chatArgs = {}) {
   const { llm, fetch, sleeps } = makeClient(steps, opts);
   const deltas = [];
-  const err = await llm.chat({ messages: [{ role: 'user', content: '你好' }], tools: TOOLS, onTextDelta: (t) => deltas.push(t), ...chatArgs }).then(
+  const err = await llm.chat({ messages: [{ role: 'user', content: 'Hi' }], tools: TOOLS, onTextDelta: (t) => deltas.push(t), ...chatArgs }).then(
     () => assert.fail('expected chat() to reject'),
     (e) => e,
   );
   return { err, deltas, fetch, sleeps };
 }
 
-const TOOLS = [{ type: 'function', function: { name: 'search_hotels', description: '搜索酒店', parameters: { type: 'object', properties: { city: { type: 'string' } } } } }];
+const TOOLS = [{ type: 'function', function: { name: 'search_hotels', description: 'Search hotels', parameters: { type: 'object', properties: { city: { type: 'string' } } } } }];
 
 function calls(res) {
   return res.toolCalls.map((c) => ({ id: c.id, name: c.name, args: JSON.parse(c.arguments), ...(c.invalidArguments ? { invalid: true } : {}) }));
@@ -105,7 +110,7 @@ describe('createSseParser', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Stream quirks (RESEARCH-llm.md §3.3), table-driven
+// Stream quirks of OpenAI-compatible endpoints, table-driven
 // ---------------------------------------------------------------------------
 
 const QUIRKS = [
@@ -115,98 +120,98 @@ const QUIRKS = [
       chunk({ role: 'assistant', content: '' }),
       toolDelta([{ index: 0, id: 'call_abc', type: 'function', function: { name: 'search_hotels', arguments: '' } }]),
       toolDelta([{ index: 0, function: { arguments: '{"ci' } }]),
-      toolDelta([{ index: 0, function: { arguments: 'ty":"杭州"}' } }]),
+      toolDelta([{ index: 0, function: { arguments: 'ty":"New York"}' } }]),
       chunk({}, 'tool_calls'),
-      { id: 'cmpl-1', choices: [], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } },
+      { id: 'chatcmpl-1', choices: [], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } },
       'data: [DONE]\n\n',
     ),
-    calls: [{ id: 'call_abc', name: 'search_hotels', args: { city: '杭州' } }],
+    calls: [{ id: 'call_abc', name: 'search_hotels', args: { city: 'New York' } }],
     usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
   },
   {
-    name: 'Qwen: id (and name) repeated on every chunk are never concatenated',
+    name: 'id (and name) repeated on every chunk are never concatenated',
     body: sse(
       toolDelta([{ index: 0, id: 'call_q1', type: 'function', function: { name: 'search_hotels', arguments: '' } }]),
       toolDelta([{ index: 0, id: 'call_q1', type: 'function', function: { arguments: '{"city":' } }]),
-      toolDelta([{ index: 0, id: 'call_q1', type: 'function', function: { name: 'search_hotels', arguments: '"上海"}' } }]),
+      toolDelta([{ index: 0, id: 'call_q1', type: 'function', function: { name: 'search_hotels', arguments: '"Boston"}' } }]),
       chunk({}, 'tool_calls'),
       'data: [DONE]\n\n',
     ),
-    calls: [{ id: 'call_q1', name: 'search_hotels', args: { city: '上海' } }],
+    calls: [{ id: 'call_q1', name: 'search_hotels', args: { city: 'Boston' } }],
   },
   {
-    name: 'Moonshot: missing index, two sequential calls, choice-level usage',
+    name: 'missing index, two sequential calls, choice-level usage',
     body: sse(
-      toolDelta([{ id: 'functions.search_hotels:0', type: 'function', function: { name: 'search_hotels', arguments: '' } }]),
-      toolDelta([{ function: { arguments: '{"city":"上海"}' } }]),
-      toolDelta([{ id: 'functions.list_areas:1', type: 'function', function: { name: 'list_areas', arguments: '' } }]),
+      toolDelta([{ id: 'call_s1', type: 'function', function: { name: 'search_hotels', arguments: '' } }]),
+      toolDelta([{ function: { arguments: '{"city":"Chicago"}' } }]),
+      toolDelta([{ id: 'call_s2', type: 'function', function: { name: 'list_areas', arguments: '' } }]),
       toolDelta([{ function: { arguments: '{"city":' } }]),
-      toolDelta([{ function: { arguments: '"上海"}' } }]),
+      toolDelta([{ function: { arguments: '"Chicago"}' } }]),
       { id: 'c', choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls', usage: { total_tokens: 42 } }] },
       'data: [DONE]\n\n',
     ),
     calls: [
-      { id: 'functions.search_hotels:0', name: 'search_hotels', args: { city: '上海' } },
-      { id: 'functions.list_areas:1', name: 'list_areas', args: { city: '上海' } },
+      { id: 'call_s1', name: 'search_hotels', args: { city: 'Chicago' } },
+      { id: 'call_s2', name: 'list_areas', args: { city: 'Chicago' } },
     ],
     usage: { total_tokens: 42 },
   },
   {
-    name: 'GLM: index -1 with all arguments in a single chunk',
+    name: 'index -1 with all arguments in a single chunk',
     body: sse(
-      toolDelta([{ index: -1, id: 'call_g', type: 'function', function: { name: 'search_hotels', arguments: '{"city":"成都","near":"春熙路"}' } }]),
+      toolDelta([{ index: -1, id: 'call_g', type: 'function', function: { name: 'search_hotels', arguments: '{"city":"Denver","near":"LoDo"}' } }]),
       chunk({}, 'tool_calls'),
       'data: [DONE]\n\n',
     ),
-    calls: [{ id: 'call_g', name: 'search_hotels', args: { city: '成都', near: '春熙路' } }],
+    calls: [{ id: 'call_g', name: 'search_hotels', args: { city: 'Denver', near: 'LoDo' } }],
   },
   {
     name: 'placeholder chunks and empty tool_calls arrays are ignored',
     body: sse(
-      chunk({ reasoning_content: '想一想', tool_calls: [] }),
+      chunk({ reasoning_content: 'thinking it over', tool_calls: [] }),
       toolDelta([{ index: 0 }]),
       toolDelta([{ index: 0, id: 'call_p', function: { name: 'search_hotels', arguments: '' } }]),
       toolDelta([{ index: 0, function: {} }]),
       toolDelta([{ index: 0, id: '', type: 'function', function: { name: '', arguments: '' } }]),
-      toolDelta([{ index: 0, function: { arguments: '{"city":"西安"}' } }]),
+      toolDelta([{ index: 0, function: { arguments: '{"city":"Austin"}' } }]),
       chunk({}, 'tool_calls'),
       'data: [DONE]\n\n',
     ),
-    calls: [{ id: 'call_p', name: 'search_hotels', args: { city: '西安' } }],
-    reasoning: '想一想',
+    calls: [{ id: 'call_p', name: 'search_hotels', args: { city: 'Austin' } }],
+    reasoning: 'thinking it over',
   },
   {
     name: 'arguments arrive before the name (with index)',
     body: sse(
-      toolDelta([{ index: 0, function: { arguments: '{"city":"南京"}' } }]),
+      toolDelta([{ index: 0, function: { arguments: '{"city":"Seattle"}' } }]),
       toolDelta([{ index: 0, id: 'call_late', type: 'function', function: { name: 'search_hotels' } }]),
       chunk({}, 'tool_calls'),
       'data: [DONE]\n\n',
     ),
-    calls: [{ id: 'call_late', name: 'search_hotels', args: { city: '南京' } }],
+    calls: [{ id: 'call_late', name: 'search_hotels', args: { city: 'Seattle' } }],
   },
   {
     name: 'arguments arrive before the name (no index)',
     body: sse(
       toolDelta([{ function: { arguments: '{"city":' } }]),
-      toolDelta([{ function: { arguments: '"苏州"}' } }]),
+      toolDelta([{ function: { arguments: '"Miami"}' } }]),
       toolDelta([{ id: 'call_late2', function: { name: 'search_hotels' } }]),
       chunk({}, 'tool_calls'),
       'data: [DONE]\n\n',
     ),
-    calls: [{ id: 'call_late2', name: 'search_hotels', args: { city: '苏州' } }],
+    calls: [{ id: 'call_late2', name: 'search_hotels', args: { city: 'Miami' } }],
   },
   {
     name: 'reused index for a different id starts a new call',
     body: sse(
-      toolDelta([{ index: 0, id: 'call_a', function: { name: 'search_hotels', arguments: '{"city":"北京"}' } }]),
-      toolDelta([{ index: 0, id: 'call_b', function: { name: 'list_areas', arguments: '{"city":"北京"}' } }]),
+      toolDelta([{ index: 0, id: 'call_a', function: { name: 'search_hotels', arguments: '{"city":"Orlando"}' } }]),
+      toolDelta([{ index: 0, id: 'call_b', function: { name: 'list_areas', arguments: '{"city":"Orlando"}' } }]),
       chunk({}, 'tool_calls'),
       'data: [DONE]\n\n',
     ),
     calls: [
-      { id: 'call_a', name: 'search_hotels', args: { city: '北京' } },
-      { id: 'call_b', name: 'list_areas', args: { city: '北京' } },
+      { id: 'call_a', name: 'search_hotels', args: { city: 'Orlando' } },
+      { id: 'call_b', name: 'list_areas', args: { city: 'Orlando' } },
     ],
   },
   {
@@ -214,14 +219,14 @@ const QUIRKS = [
     body: sse(
       toolDelta([{ index: 1, id: 'call_2', function: { name: 'list_areas', arguments: '' } }]),
       toolDelta([{ index: 0, id: 'call_1', function: { name: 'search_hotels', arguments: '{"city":' } }]),
-      toolDelta([{ index: 1, function: { arguments: '{"city":"厦门"}' } }]),
-      toolDelta([{ index: 0, function: { arguments: '"厦门"}' } }]),
+      toolDelta([{ index: 1, function: { arguments: '{"city":"Nashville"}' } }]),
+      toolDelta([{ index: 0, function: { arguments: '"Nashville"}' } }]),
       chunk({}, 'tool_calls'),
       'data: [DONE]\n\n',
     ),
     calls: [
-      { id: 'call_1', name: 'search_hotels', args: { city: '厦门' } },
-      { id: 'call_2', name: 'list_areas', args: { city: '厦门' } },
+      { id: 'call_1', name: 'search_hotels', args: { city: 'Nashville' } },
+      { id: 'call_2', name: 'list_areas', args: { city: 'Nashville' } },
     ],
   },
   {
@@ -231,52 +236,52 @@ const QUIRKS = [
   },
   {
     name: 'tool calls with finish_reason "stop" are still a tool turn',
-    body: sse(toolDelta([{ index: 0, id: 'call_s', function: { name: 'search_hotels', arguments: '{"city":"三亚"}' } }]), chunk({}, 'stop'), 'data: [DONE]\n\n'),
-    calls: [{ id: 'call_s', name: 'search_hotels', args: { city: '三亚' } }],
+    body: sse(toolDelta([{ index: 0, id: 'call_s', function: { name: 'search_hotels', arguments: '{"city":"Honolulu"}' } }]), chunk({}, 'stop'), 'data: [DONE]\n\n'),
+    calls: [{ id: 'call_s', name: 'search_hotels', args: { city: 'Honolulu' } }],
   },
   {
     name: 'EOF without [DONE] after a finish_reason is a normal end',
-    body: sse(chunk({ content: '好的' }), chunk({ content: '，马上查。' }, 'stop')),
-    content: '好的，马上查。',
+    body: sse(chunk({ content: 'On it,' }), chunk({ content: ' checking now.' }, 'stop')),
+    content: 'On it, checking now.',
     finishReason: 'stop',
   },
   {
     name: 'keep-alive comments, data: without space, CRLF line endings',
     body: ': keep-alive\r\n\r\n: keep-alive\r\n\r\n'
-      + `data:${JSON.stringify(chunk({ content: '杭州' }))}\r\n\r\n: ping\r\n\r\n`
-      + `data:${JSON.stringify(chunk({ content: '西湖' }, 'stop'))}\r\n\r\ndata:[DONE]\r\n\r\n`,
-    content: '杭州西湖',
+      + `data:${JSON.stringify(chunk({ content: 'Times ' }))}\r\n\r\n: ping\r\n\r\n`
+      + `data:${JSON.stringify(chunk({ content: 'Square' }, 'stop'))}\r\n\r\ndata:[DONE]\r\n\r\n`,
+    content: 'Times Square',
     finishReason: 'stop',
   },
   {
     name: 'multibyte characters split across 1-byte network chunks',
-    body: sse(chunk({ content: '这周五去杭州西湖边住两晚' }), chunk({ content: '，预算¥600🙂' }, 'stop'), 'data: [DONE]\n\n'),
+    body: sse(chunk({ content: 'Two nights at the Café Rouge — ' }), chunk({ content: 'under $300 🙂' }, 'stop'), 'data: [DONE]\n\n'),
     size: 1,
-    content: '这周五去杭州西湖边住两晚，预算¥600🙂',
+    content: 'Two nights at the Café Rouge — under $300 🙂',
   },
   {
     name: 'content as an array of parts, text alongside tool calls, finish in the same chunk as the last delta',
     body: sse(
-      chunk({ content: [{ type: 'text', text: '我来' }, { type: 'text', text: '查一下' }] }),
-      chunk({ tool_calls: [{ index: 0, id: 'call_t', function: { name: 'search_hotels', arguments: '{"city":"青岛"}' } }] }, 'tool_calls'),
+      chunk({ content: [{ type: 'text', text: 'Let me ' }, { type: 'text', text: 'check' }] }),
+      chunk({ tool_calls: [{ index: 0, id: 'call_t', function: { name: 'search_hotels', arguments: '{"city":"San Diego"}' } }] }, 'tool_calls'),
       'data: [DONE]\n\n',
     ),
-    content: '我来查一下',
-    calls: [{ id: 'call_t', name: 'search_hotels', args: { city: '青岛' } }],
+    content: 'Let me check',
+    calls: [{ id: 'call_t', name: 'search_hotels', args: { city: 'San Diego' } }],
   },
   {
     name: 'fenced, double-encoded and duplicated arguments are repaired',
     body: sse(
-      toolDelta([{ index: 0, id: 'c1', function: { name: 'search_hotels', arguments: '```json\n{"city":"长沙"}\n```' } }]),
-      toolDelta([{ index: 1, id: 'c2', function: { name: 'list_areas', arguments: JSON.stringify(JSON.stringify({ city: '武汉' })) } }]),
-      toolDelta([{ index: 2, id: 'c3', function: { name: 'list_areas', arguments: '{"city":"丽江"}{"city":"丽江"}' } }]),
+      toolDelta([{ index: 0, id: 'c1', function: { name: 'search_hotels', arguments: '```json\n{"city":"Las Vegas"}\n```' } }]),
+      toolDelta([{ index: 1, id: 'c2', function: { name: 'list_areas', arguments: JSON.stringify(JSON.stringify({ city: 'Boston' })) } }]),
+      toolDelta([{ index: 2, id: 'c3', function: { name: 'list_areas', arguments: '{"city":"Austin"}{"city":"Austin"}' } }]),
       chunk({}, 'tool_calls'),
       'data: [DONE]\n\n',
     ),
     calls: [
-      { id: 'c1', name: 'search_hotels', args: { city: '长沙' } },
-      { id: 'c2', name: 'list_areas', args: { city: '武汉' } },
-      { id: 'c3', name: 'list_areas', args: { city: '丽江' } },
+      { id: 'c1', name: 'search_hotels', args: { city: 'Las Vegas' } },
+      { id: 'c2', name: 'list_areas', args: { city: 'Boston' } },
+      { id: 'c3', name: 'list_areas', args: { city: 'Austin' } },
     ],
   },
   {
@@ -286,8 +291,8 @@ const QUIRKS = [
   },
   {
     name: 'several JSON chunks inside one event (non-compliant proxy)',
-    body: `data: ${JSON.stringify(chunk({ content: '你' }))}\ndata: ${JSON.stringify(chunk({ content: '好' }, 'stop'))}\n\ndata: [DONE]\n\n`,
-    content: '你好',
+    body: `data: ${JSON.stringify(chunk({ content: 'He' }))}\ndata: ${JSON.stringify(chunk({ content: 'llo' }, 'stop'))}\n\ndata: [DONE]\n\n`,
+    content: 'Hello',
   },
 ];
 
@@ -306,101 +311,96 @@ describe('stream quirks', () => {
   }
 
   test('reasoning_content is collected separately and never streamed to the user', async () => {
-    const body = sse(chunk({ reasoning_content: '用户想去' }), chunk({ reasoning_content: '杭州' }), chunk({ content: '好的' }, 'stop'), 'data: [DONE]\n\n');
+    const body = sse(chunk({ reasoning_content: 'They want ' }), chunk({ reasoning_content: 'New York' }), chunk({ content: 'Sure' }, 'stop'), 'data: [DONE]\n\n');
     const { res, deltas } = await run([streamStep(body)]);
-    assert.equal(res.reasoningContent, '用户想去杭州');
-    assert.deepEqual(deltas, ['好的']);
-  });
-
-  test('Ark encrypted_content is returned for echoing', async () => {
-    const body = sse(chunk({ encrypted_content: 'enc-abc' }), chunk({ content: '好' }, 'stop'), 'data: [DONE]\n\n');
-    const { res } = await run([streamStep(body)]);
-    assert.equal(res.encryptedContent, 'enc-abc');
+    assert.equal(res.reasoningContent, 'They want New York');
+    assert.deepEqual(deltas, ['Sure']);
+    assert.equal(res.encryptedContent, undefined);
   });
 
   test('non-SSE JSON body for a streaming request is parsed as a complete response', async () => {
     const json = {
-      choices: [{ index: 0, finish_reason: 'tool_calls', message: { role: 'assistant', content: '我查一下', tool_calls: [{ id: 'call_j', type: 'function', function: { name: 'search_hotels', arguments: { city: '深圳' } } }] } }],
+      choices: [{ index: 0, finish_reason: 'tool_calls', message: { role: 'assistant', content: 'Checking', tool_calls: [{ id: 'call_j', type: 'function', function: { name: 'search_hotels', arguments: { city: 'Miami' } } }] } }],
       usage: { total_tokens: 9 },
     };
     const { res, deltas } = await run([{ status: 200, body: `\n\n${JSON.stringify(json)}`, headers: { 'content-type': 'application/json' } }]);
-    assert.deepEqual(calls(res), [{ id: 'call_j', name: 'search_hotels', args: { city: '深圳' } }]);
-    assert.deepEqual(deltas, ['我查一下']);
+    assert.deepEqual(calls(res), [{ id: 'call_j', name: 'search_hotels', args: { city: 'Miami' } }]);
+    assert.deepEqual(deltas, ['Checking']);
     assert.deepEqual(res.usage, { total_tokens: 9 });
   });
 
   test('a JSON error body labelled text/event-stream is still classified', async () => {
-    const { err, fetch } = await runError([streamStep(JSON.stringify({ error: { code: 'invalid_api_key', message: 'Incorrect API key' } }))]);
+    const { err, fetch } = await runError([streamStep(JSON.stringify({ error: { code: 'invalid_api_key', message: 'Incorrect API key provided' } }))]);
     assert.equal(err.code, 'auth');
     assert.equal(fetch.calls.length, 1);
   });
 
   test('a large JSON completion labelled text/event-stream and split into pieces is still parsed', async () => {
-    const json = { choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: '好'.repeat(3000) } }] };
+    const json = { choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: 'ok '.repeat(3000) } }] };
     const text = JSON.stringify(json);
     assert.ok(enc.encode(text).length > 8000);
     const { res, fetch } = await run([streamStep(text, 1024)]);
     assert.equal(fetch.calls.length, 1);
-    assert.equal(res.content, '好'.repeat(3000));
+    assert.equal(res.content, 'ok '.repeat(3000));
   });
 
   test('SSE body served with a wrong content-type is still parsed as SSE', async () => {
-    const body = sse(chunk({ content: '你好' }, 'stop'), 'data: [DONE]\n\n');
+    const body = sse(chunk({ content: 'Hello' }, 'stop'), 'data: [DONE]\n\n');
     const { res } = await run([{ status: 200, body, headers: { 'content-type': 'text/plain' } }]);
-    assert.equal(res.content, '你好');
+    assert.equal(res.content, 'Hello');
   });
 
   test('invalid JSON arguments trigger one non-streaming retry', async () => {
-    const broken = sse(toolDelta([{ index: 0, id: 'call_x', function: { name: 'search_hotels', arguments: '{"city":"杭' } }]), chunk({}, 'length'), 'data: [DONE]\n\n');
-    const fixed = { choices: [{ index: 0, finish_reason: 'tool_calls', message: { content: null, tool_calls: [{ id: 'call_y', type: 'function', function: { name: 'search_hotels', arguments: '{"city":"杭州"}' } }] } }] };
+    const broken = sse(toolDelta([{ index: 0, id: 'call_x', function: { name: 'search_hotels', arguments: '{"city":"New' } }]), chunk({}, 'length'), 'data: [DONE]\n\n');
+    const fixed = { choices: [{ index: 0, finish_reason: 'tool_calls', message: { content: null, tool_calls: [{ id: 'call_y', type: 'function', function: { name: 'search_hotels', arguments: '{"city":"New York"}' } }] } }] };
     const { res, fetch } = await run([streamStep(broken), { json: fixed }]);
     assert.equal(fetch.calls.length, 2);
     assert.equal(fetch.calls[1].json.stream, false);
     assert.equal(fetch.calls[1].json.stream_options, undefined);
     assert.equal(fetch.calls[1].headers.accept, 'application/json');
-    assert.deepEqual(calls(res), [{ id: 'call_y', name: 'search_hotels', args: { city: '杭州' } }]);
+    assert.deepEqual(calls(res), [{ id: 'call_y', name: 'search_hotels', args: { city: 'New York' } }]);
   });
 
   test('arguments still invalid after the fallback come back flagged with "{}"', async () => {
     const broken = sse(toolDelta([{ index: 0, id: 'call_x', function: { name: 'search_hotels', arguments: '{"city":' } }]), chunk({}, 'tool_calls'), 'data: [DONE]\n\n');
-    const stillBroken = { choices: [{ index: 0, finish_reason: 'tool_calls', message: { tool_calls: [{ id: 'call_z', type: 'function', function: { name: 'search_hotels', arguments: '{city: 杭州' } }] } }] };
+    const stillBroken = { choices: [{ index: 0, finish_reason: 'tool_calls', message: { tool_calls: [{ id: 'call_z', type: 'function', function: { name: 'search_hotels', arguments: '{city: Boston' } }] } }] };
     const { res, fetch } = await run([streamStep(broken), { json: stillBroken }]);
     assert.equal(fetch.calls.length, 2);
     assert.deepEqual(res.toolCalls, [{ id: 'call_z', name: 'search_hotels', arguments: '{}', invalidArguments: true }]);
   });
 
-  test('finish_reason tool_calls without any call (GLM bug) triggers the non-streaming retry', async () => {
+  test('finish_reason tool_calls without any call triggers the non-streaming retry', async () => {
     const empty = sse(chunk({}, 'tool_calls'), 'data: [DONE]\n\n');
-    const fixed = { choices: [{ index: 0, finish_reason: 'stop', message: { content: '请问去哪个城市？' } }] };
+    const fixed = { choices: [{ index: 0, finish_reason: 'stop', message: { content: 'Which city are you heading to?' } }] };
     const { res, deltas, fetch } = await run([streamStep(empty), { json: fixed }]);
     assert.equal(fetch.calls.length, 2);
-    assert.equal(res.content, '请问去哪个城市？');
-    assert.deepEqual(deltas, ['请问去哪个城市？']);
+    assert.equal(res.content, 'Which city are you heading to?');
+    assert.deepEqual(deltas, ['Which city are you heading to?']);
   });
 
   test('arguments cut off by finish_reason length get a fallback with a larger token limit', async () => {
-    const broken = sse(toolDelta([{ index: 0, id: 'call_x', function: { name: 'search_hotels', arguments: '{"city":"杭' } }]), chunk({}, 'length'), 'data: [DONE]\n\n');
-    const fixed = { choices: [{ index: 0, finish_reason: 'tool_calls', message: { tool_calls: [{ id: 'call_y', type: 'function', function: { name: 'search_hotels', arguments: '{"city":"杭州"}' } }] } }] };
-    const ds = await run([streamStep(broken), { json: fixed }]);
-    assert.equal(ds.fetch.calls[0].json.max_tokens, undefined);
-    assert.equal(ds.fetch.calls[1].json.max_tokens, 8192);
-    const kimi = await run([streamStep(broken), { json: fixed }], { provider: 'kimi', model: 'kimi-k2.6' });
-    assert.equal(kimi.fetch.calls[0].json.max_tokens, 8192);
-    assert.equal(kimi.fetch.calls[1].json.max_tokens, 16384);
+    const broken = sse(toolDelta([{ index: 0, id: 'call_x', function: { name: 'search_hotels', arguments: '{"city":"New' } }]), chunk({}, 'length'), 'data: [DONE]\n\n');
+    const fixed = { choices: [{ index: 0, finish_reason: 'tool_calls', message: { tool_calls: [{ id: 'call_y', type: 'function', function: { name: 'search_hotels', arguments: '{"city":"New York"}' } }] } }] };
+    const plain = await run([streamStep(broken), { json: fixed }]);
+    assert.equal(plain.fetch.calls[0].json.max_completion_tokens, undefined);
+    assert.equal(plain.fetch.calls[1].json.max_completion_tokens, 8192);
+    const capped = await run([streamStep(broken), { json: fixed }], { maxTokens: 6000 });
+    assert.equal(capped.fetch.calls[0].json.max_completion_tokens, 6000);
+    assert.equal(capped.fetch.calls[1].json.max_completion_tokens, 12000);
   });
 
   test('a failed fallback keeps the usable streamed calls (bad ones flagged)', async () => {
     const two = sse(
-      toolDelta([{ index: 0, id: 'call_a', function: { name: 'search_hotels', arguments: '{"city":"杭州"}' } }]),
-      toolDelta([{ index: 1, id: 'call_b', function: { name: 'search_hotels', arguments: '{"city":"上' } }]),
+      toolDelta([{ index: 0, id: 'call_a', function: { name: 'search_hotels', arguments: '{"city":"Boston"}' } }]),
+      toolDelta([{ index: 1, id: 'call_b', function: { name: 'search_hotels', arguments: '{"city":"Bo' } }]),
       chunk({}, 'tool_calls'),
       'data: [DONE]\n\n',
     );
-    const busy = { status: 429, json: { error: { message: 'Rate limit reached', type: 'rate_limit_reached_error' } } };
+    const busy = { status: 429, json: { error: { message: 'Rate limit reached for requests', type: 'requests', code: 'rate_limit_exceeded' } } };
     const { res, fetch } = await run([streamStep(two), busy, busy, busy]);
     assert.equal(fetch.calls.length, 4);
     assert.deepEqual(res.toolCalls, [
-      { id: 'call_a', name: 'search_hotels', arguments: '{"city":"杭州"}' },
+      { id: 'call_a', name: 'search_hotels', arguments: '{"city":"Boston"}' },
       { id: 'call_b', name: 'search_hotels', arguments: '{}', invalidArguments: true },
     ]);
     const nothingUsable = await runError([streamStep(sse(chunk({}, 'tool_calls'), 'data: [DONE]\n\n')), busy, busy, busy]);
@@ -408,18 +408,18 @@ describe('stream quirks', () => {
   });
 
   test('no fallback once text was shown: invalid arguments are flagged instead', async () => {
-    const body = sse(chunk({ content: '我来查' }), toolDelta([{ index: 0, id: 'call_x', function: { name: 'search_hotels', arguments: '{"ci' } }]), chunk({}, 'tool_calls'), 'data: [DONE]\n\n');
+    const body = sse(chunk({ content: 'Let me look' }), toolDelta([{ index: 0, id: 'call_x', function: { name: 'search_hotels', arguments: '{"ci' } }]), chunk({}, 'tool_calls'), 'data: [DONE]\n\n');
     const { res, fetch } = await run([streamStep(body)]);
     assert.equal(fetch.calls.length, 1);
-    assert.equal(res.content, '我来查');
+    assert.equal(res.content, 'Let me look');
     assert.deepEqual(res.toolCalls, [{ id: 'call_x', name: 'search_hotels', arguments: '{}', invalidArguments: true }]);
   });
 
   test('stream: false mode emits the whole text once', async () => {
-    const { res, deltas, fetch } = await run([{ json: { choices: [{ index: 0, finish_reason: 'stop', message: { content: '你好呀' } }] } }], { stream: false });
+    const { res, deltas, fetch } = await run([{ json: { choices: [{ index: 0, finish_reason: 'stop', message: { content: 'Hi there' } }] } }], { stream: false });
     assert.equal(fetch.calls[0].json.stream, false);
-    assert.equal(res.content, '你好呀');
-    assert.deepEqual(deltas, ['你好呀']);
+    assert.equal(res.content, 'Hi there');
+    assert.deepEqual(deltas, ['Hi there']);
   });
 });
 
@@ -429,86 +429,68 @@ describe('stream quirks', () => {
 
 describe('in-stream errors', () => {
   test('data: {"error":...} before any text is retried, after text it is not', async () => {
-    const errEvent = sse({ error: { message: 'Internal server error', type: 'server_error' } });
-    const before = await run([streamStep(errEvent), okText('好的')]);
+    const errEvent = sse({ error: { message: 'The server had an error while processing your request.', type: 'server_error' } });
+    const before = await run([streamStep(errEvent), okText('Sure')]);
     assert.equal(before.fetch.calls.length, 2);
-    assert.equal(before.res.content, '好的');
+    assert.equal(before.res.content, 'Sure');
 
-    const after = await runError([streamStep(sse(chunk({ content: '我来' })) + errEvent), okText('x')]);
+    const after = await runError([streamStep(sse(chunk({ content: 'I can' })) + errEvent), okText('x')]);
     assert.equal(after.fetch.calls.length, 1);
     assert.equal(after.err.code, 'unavailable');
-    assert.deepEqual(after.deltas, ['我来']);
+    assert.deepEqual(after.deltas, ['I can']);
   });
 
   test('event: error is classified like an error body', async () => {
-    const body = `event: error\ndata: ${JSON.stringify({ error: { code: 'data_inspection_failed', message: 'Output data may contain inappropriate content.' } })}\n\n`;
+    const body = `event: error\ndata: ${JSON.stringify({ error: { code: 'content_policy_violation', message: 'Your request was rejected as a result of our safety system.' } })}\n\n`;
     const { err, fetch } = await runError([streamStep(body)]);
     assert.equal(err.code, 'content_filter');
     assert.equal(fetch.calls.length, 1);
   });
 
-  for (const finish of ['content_filter', 'sensitive']) {
-    test(`finish_reason ${finish} → content_filter, not retried`, async () => {
-      const { err, fetch } = await runError([streamStep(sse(chunk({ content: '部分' }), chunk({}, finish), 'data: [DONE]\n\n'))]);
-      assert.ok(err instanceof LlmError);
-      assert.equal(err.code, 'content_filter');
-      assert.equal(fetch.calls.length, 1);
-    });
-  }
-
-  for (const finish of ['insufficient_system_resource', 'network_error']) {
-    test(`finish_reason ${finish} before text is retried`, async () => {
-      const { res, fetch, sleeps } = await run([streamStep(sse(chunk({}, finish), 'data: [DONE]\n\n')), okText('好')]);
-      assert.equal(fetch.calls.length, 2);
-      assert.deepEqual(sleeps, [500]);
-      assert.equal(res.content, '好');
-    });
-  }
+  test('finish_reason content_filter → content_filter, not retried', async () => {
+    const { err, fetch } = await runError([streamStep(sse(chunk({ content: 'Partial' }), chunk({}, 'content_filter'), 'data: [DONE]\n\n'))]);
+    assert.ok(err instanceof LlmError);
+    assert.equal(err.code, 'content_filter');
+    assert.equal(fetch.calls.length, 1);
+  });
 
   test('stream cut before finish_reason and before any output is retried', async () => {
-    const { res, fetch } = await run([streamStep(sse(toolDelta([{ index: 0, id: 'c', function: { name: 'search_hotels', arguments: '{"ci' } }]))), okText('好')]);
+    const { res, fetch } = await run([streamStep(sse(toolDelta([{ index: 0, id: 'c', function: { name: 'search_hotels', arguments: '{"ci' } }]))), okText('Sure')]);
     assert.equal(fetch.calls.length, 2);
-    assert.equal(res.content, '好');
+    assert.equal(res.content, 'Sure');
   });
 
   test('a stream that ends cleanly after text but without finish_reason is an interruption, not an answer', async () => {
-    const { err, deltas, fetch } = await runError([streamStep(sse(chunk({ content: '推荐你住湖滨' }))), okText('x')]);
+    const { err, deltas, fetch } = await runError([streamStep(sse(chunk({ content: 'I recommend the Loop' }))), okText('x')]);
     assert.ok(err instanceof LlmError);
     assert.equal(err.code, 'network');
     assert.equal(fetch.calls.length, 1, 'no retry once text was shown');
-    assert.equal(deltas.join(''), '推荐你住湖滨');
+    assert.equal(deltas.join(''), 'I recommend the Loop');
   });
 
   test('a clean end after one complete call of several is re-requested instead of running the call', async () => {
-    const cut = sse(toolDelta([{ index: 0, id: 'call_a', function: { name: 'search_hotels', arguments: '{"city":"杭州"}' } }]), toolDelta([{ index: 1, id: 'call_b', function: { name: 'search_hotels', arguments: '' } }]));
-    const { res, fetch } = await run([streamStep(cut), okText('好')]);
+    const cut = sse(toolDelta([{ index: 0, id: 'call_a', function: { name: 'search_hotels', arguments: '{"city":"Boston"}' } }]), toolDelta([{ index: 1, id: 'call_b', function: { name: 'search_hotels', arguments: '' } }]));
+    const { res, fetch } = await run([streamStep(cut), okText('Sure')]);
     assert.equal(fetch.calls.length, 2);
     assert.deepEqual(res.toolCalls, []);
-    assert.equal(res.content, '好');
-  });
-
-  test('finish_reason model_context_window_exceeded → bad_request with context_length reason', async () => {
-    const { err } = await runError([streamStep(sse(chunk({}, 'model_context_window_exceeded')))]);
-    assert.equal(err.code, 'bad_request');
-    assert.equal(err.reason, 'context_length');
-    assert.match(err.userMessage, /新对话/);
+    assert.equal(res.content, 'Sure');
   });
 });
 
 // ---------------------------------------------------------------------------
-// HTTP errors, retries, backoff
+// HTTP errors, retries, backoff, timeouts, aborts (engine behaviour)
 // ---------------------------------------------------------------------------
 
 describe('retries and backoff', () => {
   test('429 then success: retries with exponential backoff', async () => {
     const { res, fetch, sleeps } = await run([
-      { status: 429, json: { error: { message: 'Rate limit reached', type: 'rate_limit_reached_error' } } },
+      { status: 429, json: { error: { message: 'Rate limit reached', type: 'requests', code: 'rate_limit_exceeded' } } },
       { status: 503, json: { error: { message: 'busy' } } },
-      okText('好'),
+      okText('Sure'),
     ]);
     assert.equal(fetch.calls.length, 3);
     assert.deepEqual(sleeps, [500, 1000]);
-    assert.equal(res.content, '好');
+    assert.equal(res.content, 'Sure');
   });
 
   test('jitter reduces the delay by up to 25%', () => {
@@ -517,11 +499,11 @@ describe('retries and backoff', () => {
   });
 
   test('retry-after-ms / retry-after are honored and capped at 20 s', async () => {
-    const a = await run([{ status: 429, json: {}, headers: { 'retry-after-ms': '1500' } }, okText('好')]);
+    const a = await run([{ status: 429, json: {}, headers: { 'retry-after-ms': '1500' } }, okText('Sure')]);
     assert.deepEqual(a.sleeps, [1500]);
-    const b = await run([{ status: 429, json: {}, headers: { 'retry-after': '30' } }, okText('好')]);
+    const b = await run([{ status: 429, json: {}, headers: { 'retry-after': '30' } }, okText('Sure')]);
     assert.deepEqual(b.sleeps, [20000]);
-    const c = await run([{ status: 429, json: {}, headers: { 'retry-after': '90' } }, okText('好')]);
+    const c = await run([{ status: 429, json: {}, headers: { 'retry-after': '90' } }, okText('Sure')]);
     assert.deepEqual(c.sleeps, [500], 'more than 60 s falls back to backoff');
     assert.ok(Math.abs(parseRetryAfter({ 'retry-after': new Date(10000 + 5000).toUTCString() }, 10000) - 5000) < 1000);
   });
@@ -534,12 +516,13 @@ describe('retries and backoff', () => {
     assert.equal(err.status, 503);
   });
 
-  test('network errors are retried, then mapped to code network', async () => {
-    const ok = await run([{ error: new TypeError('fetch failed') }, okText('好')]);
-    assert.equal(ok.res.content, '好');
+  test('network errors are retried, then mapped to code network with an English message', async () => {
+    const ok = await run([{ error: new TypeError('fetch failed') }, okText('Sure')]);
+    assert.equal(ok.res.content, 'Sure');
     const { err } = await runError([{ error: new TypeError('fetch failed') }], { maxRetries: 0 });
     assert.equal(err.code, 'network');
-    assert.match(err.userMessage, CJK);
+    assert.equal(err.userMessage, LLM_ERROR_MESSAGES.network);
+    assert.doesNotMatch(err.userMessage, CJK);
   });
 
   test('x-should-retry: false disables the retry', async () => {
@@ -591,9 +574,9 @@ describe('retries and backoff', () => {
 
   test('an idle timeout is still retried while the deadline allows it', async () => {
     const stalled = () => new Response(new ReadableStream({ pull: () => new Promise(() => {}) }), { headers: { 'content-type': 'text/event-stream' } });
-    const { res, fetch } = await run([stalled, okText('好')], { timeoutMs: 50, totalTimeoutMs: 1000, maxRetries: 2 });
+    const { res, fetch } = await run([stalled, okText('Sure')], { timeoutMs: 50, totalTimeoutMs: 1000, maxRetries: 2 });
     assert.equal(fetch.calls.length, 2);
-    assert.equal(res.content, '好');
+    assert.equal(res.content, 'Sure');
   });
 
   test('no retry when the backoff would run past the deadline', async () => {
@@ -613,48 +596,45 @@ describe('retries and backoff', () => {
 
   test('caller abort rejects with the abort reason and is not retried', async () => {
     const ctrl = new AbortController();
-    const { llm, fetch } = makeClient([{ chunks: [enc.encode(sse(chunk({ content: '好' })))], chunkDelayMs: 200, headers: { 'content-type': 'text/event-stream' } }, okText('x')]);
+    const { llm, fetch } = makeClient([{ chunks: [enc.encode(sse(chunk({ content: 'Sure' })))], chunkDelayMs: 200, headers: { 'content-type': 'text/event-stream' } }, okText('x')]);
     setTimeout(() => ctrl.abort(), 20);
     const err = await llm.chat({ messages: [{ role: 'user', content: 'hi' }], signal: ctrl.signal }).catch((e) => e);
     assert.equal(err.name, 'AbortError');
     assert.ok(!(err instanceof LlmError));
     assert.equal(fetch.calls.length, 1);
   });
+
+  test('an already-aborted signal rejects before any request', async () => {
+    const ctrl = new AbortController();
+    ctrl.abort();
+    const { llm, fetch } = makeClient([okText('x')]);
+    const err = await llm.chat({ messages: [{ role: 'user', content: 'hi' }], signal: ctrl.signal }).catch((e) => e);
+    assert.equal(err.name, 'AbortError');
+    assert.equal(fetch.calls.length, 0);
+  });
 });
 
 // ---------------------------------------------------------------------------
-// Error classification
+// Error classification (OpenAI-style bodies)
 // ---------------------------------------------------------------------------
 
 const ERROR_CASES = [
-  ['DeepSeek 401', 401, { error: { message: 'Authentication Fails, Your api key is invalid', type: 'authentication_error' } }, 'auth'],
-  ['DashScope invalid key', 401, { error: { code: 'invalid_api_key', message: 'Incorrect API key provided.' } }, 'auth'],
-  ['GLM 1002 key', 401, { error: { code: '1002', message: 'Authorization Token非法' } }, 'auth'],
-  ['Ark AuthenticationError', 401, { error: { code: 'AuthenticationError', message: 'the API key is invalid' } }, 'auth'],
-  ['DeepSeek 402 balance', 402, { error: { message: 'Insufficient Balance', type: 'unknown_error' } }, 'billing'],
-  ['DashScope Arrearage', 400, { error: { code: 'Arrearage', message: 'Access denied, please make sure your account is in good standing.' } }, 'billing'],
-  ['Kimi quota', 429, { error: { type: 'exceeded_current_quota_error', message: 'Your account is suspended' } }, 'billing'],
-  ['GLM 1113 overdue', 429, { error: { code: '1113', message: '您的账户已欠费' } }, 'billing'],
-  ['Ark AccountOverdueError', 403, { error: { code: 'AccountOverdueError', message: 'overdue balance' } }, 'billing'],
-  ['DashScope content', 400, { error: { code: 'data_inspection_failed', message: 'Input data may contain inappropriate content.', type: 'data_inspection_failed' } }, 'content_filter'],
-  ['Moonshot content_filter', 400, { error: { type: 'content_filter', message: 'The request was rejected because it was considered high risk' } }, 'content_filter'],
-  ['GLM 1301', 400, { error: { code: '1301', message: '系统检测到输入或生成内容可能包含不安全或敏感内容' } }, 'content_filter'],
-  ['Ark sensitive', 400, { error: { code: 'OutputTextSensitiveContentDetected', message: 'The request failed' } }, 'content_filter'],
-  ['429 rate limit', 429, { error: { type: 'rate_limit_reached_error', message: 'Your account reached max request' } }, 'rate_limit'],
-  ['GLM 1302 concurrency (flat body)', 429, { code: '1302', message: '您当前使用该API的并发数过高' }, 'rate_limit'],
-  ['DashScope Throttling', 429, { error: { code: 'Throttling.RateQuota', message: 'Requests rate limit exceeded' } }, 'rate_limit'],
+  ['OpenAI 401 invalid key', 401, { error: { message: 'Incorrect API key provided: sk-abc***xyz.', type: 'invalid_request_error', code: 'invalid_api_key' } }, 'auth'],
+  ['403 unsupported region', 403, { error: { message: 'Country, region, or territory not supported', type: 'request_forbidden', code: 'unsupported_country_region_territory' } }, 'auth'],
+  ['429 insufficient_quota is billing', 429, { error: { message: 'You exceeded your current quota, please check your plan and billing details.', type: 'insufficient_quota', code: 'insufficient_quota' } }, 'billing'],
+  ['402 payment required', 402, { error: { message: 'Payment required' } }, 'billing'],
+  ['429 rate limit', 429, { error: { message: 'Rate limit reached for gpt-5-mini on tokens per min (TPM)', type: 'tokens', code: 'rate_limit_exceeded' } }, 'rate_limit'],
+  ['400 content policy', 400, { error: { message: 'Your request was rejected as a result of our safety system.', type: 'invalid_request_error', code: 'content_policy_violation' } }, 'content_filter'],
+  ['gateway content risk (detail body)', 400, { detail: 'Content Exists Risk' }, 'content_filter'],
   ['408', 408, { error: { message: 'Request Timeout' } }, 'timeout'],
   ['409', 409, { error: { message: 'conflict' } }, 'unavailable'],
-  ['500 InternalError', 500, { error: { code: 'InternalError', message: 'oops' } }, 'unavailable'],
+  ['500 server_error', 500, { error: { message: 'The server had an error while processing your request.', type: 'server_error' } }, 'unavailable'],
   ['503 overloaded', 503, 'Service Unavailable', 'unavailable'],
-  ['400 invalid param', 400, { error: { message: 'Invalid value for temperature', type: 'invalid_request_error' } }, 'bad_request'],
+  ['400 invalid param', 400, { error: { message: "Unsupported value: 'temperature' does not support 0.3 with this model.", type: 'invalid_request_error', param: 'temperature', code: 'unsupported_value' } }, 'bad_request'],
   ['422', 422, { error: { message: 'Invalid parameters' } }, 'bad_request'],
-  ['400 context', 400, { error: { message: 'This model\'s maximum context length is 131072 tokens' } }, 'bad_request', 'context_length'],
-  ['DeepSeek max_completion=0', 400, { error: { message: 'max_completion=0 because the input is too long' } }, 'bad_request', 'context_length'],
-  ['Ark 404 model', 404, { error: { code: 'InvalidEndpointOrModel.NotFound', message: 'The model or endpoint doubao-seed does not exist' } }, 'bad_request', 'model_not_found'],
-  ['403 model access', 403, { error: { code: 'Model.AccessDenied', message: 'Model access denied.' } }, 'auth'],
-  ['DeepSeek content risk', 400, { error: { message: 'Content Exists Risk', type: 'invalid_request_error', param: null, code: 'invalid_request_error' } }, 'content_filter'],
-  ['DeepSeek content risk (detail body)', 400, { detail: 'Content Exists Risk' }, 'content_filter'],
+  ['400 context length', 400, { error: { message: "This model's maximum context length is 128000 tokens.", type: 'invalid_request_error', code: 'context_length_exceeded' } }, 'bad_request', 'context_length'],
+  ['404 model', 404, { error: { message: 'The model `gpt-9` does not exist or you do not have access to it.', type: 'invalid_request_error', code: 'model_not_found' } }, 'bad_request', 'model_not_found'],
+  ['gateway 400 "Model Not Exist"', 400, { error: { message: 'Model Not Exist', type: 'invalid_request_error' } }, 'bad_request', 'model_not_found'],
 ];
 
 describe('classifyProviderError', () => {
@@ -665,12 +645,12 @@ describe('classifyProviderError', () => {
       assert.equal(err.code, code);
       if (reason) assert.equal(err.reason, reason);
       assert.equal(err.status, status);
-      assert.match(err.userMessage, CJK);
+      assert.doesNotMatch(err.userMessage, CJK);
       assert.equal(err.retryable, ['rate_limit', 'timeout', 'unavailable', 'network'].includes(code));
     });
   }
 
-  test('billing, auth and content errors are never retried end to end', async () => {
+  test('billing, auth, content and bad requests are never retried end to end', async () => {
     for (const [, status, body] of ERROR_CASES.filter(([, , , code]) => ['billing', 'auth', 'content_filter', 'bad_request'].includes(code))) {
       const { err, fetch } = await runError([{ status, json: typeof body === 'string' ? { message: body } : body }, okText('x')]);
       assert.equal(fetch.calls.length, 1, `${status} ${JSON.stringify(body)}`);
@@ -678,115 +658,81 @@ describe('classifyProviderError', () => {
     }
   });
 
-  test('every code has a Chinese user message', () => {
+  test('every code and reason has a short English user message (no CJK, no tildes, at most one emoji)', () => {
+    const emoji = /\p{Extended_Pictographic}/gu;
     for (const code of ['auth', 'billing', 'rate_limit', 'content_filter', 'bad_request', 'timeout', 'unavailable', 'network']) {
-      assert.match(new LlmError(code).userMessage, CJK, code);
+      const msg = new LlmError(code).userMessage;
+      assert.equal(msg, LLM_ERROR_MESSAGES[code]);
+      assert.doesNotMatch(msg, CJK, code);
+      assert.doesNotMatch(msg, /[~～]/, code);
+      assert.ok((msg.match(emoji) || []).length <= 1, code);
     }
+    assert.equal(new LlmError('bad_request', { reason: 'context_length' }).userMessage, REASON_MESSAGES.context_length);
+    assert.match(REASON_MESSAGES.context_length, /New chat/);
+    assert.match(REASON_MESSAGES.model_not_found, /ANTHROPIC_MODEL/);
   });
 
-  test('the API key never appears in error messages', async () => {
-    const { err } = await runError([{ status: 401, json: { error: { message: 'bad key' } } }], { apiKey: 'sk-secret-123' });
-    assert.ok(!err.message.includes('sk-secret-123'));
-    assert.ok(!err.userMessage.includes('sk-secret-123'));
+  test('the API key never appears in error messages, even when the provider echoes it', async () => {
+    const key = 'sk-secret-123456789';
+    const { err } = await runError([{ status: 401, json: { error: { message: `Incorrect API key provided: ${key}` } } }], { apiKey: key });
+    assert.ok(!err.message.includes(key));
+    assert.ok(!err.userMessage.includes(key));
+    assert.match(err.message, /\[redacted\]/);
   });
 });
 
 // ---------------------------------------------------------------------------
-// Request adaptation per provider
+// Request building (OpenAI)
 // ---------------------------------------------------------------------------
 
 const HISTORY = [
-  { role: 'system', content: '系统' },
-  { role: 'user', content: '去杭州' },
-  { role: 'assistant', content: '', tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'search_hotels', arguments: '{"city":"杭州"}' } }] },
+  { role: 'system', content: 'You are Nana.' },
+  { role: 'user', content: 'New York this Friday' },
+  { role: 'assistant', content: '', tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'search_hotels', arguments: '{"city":"New York"}' } }] },
   { role: 'tool', tool_call_id: 'call_1', content: { hotels: [] } },
-  { role: 'assistant', content: '没找到', reasoning_content: '思考过' },
-  { role: 'user', content: '再试试', at: '2026-10-25T00:00:00Z' },
+  { role: 'assistant', content: 'Nothing yet', reasoning_content: 'thought', encrypted_content: '{"v":1,"api":"anthropic"}' },
+  { role: 'user', content: 'Try again', at: '2026-11-04T00:00:00Z' },
 ];
 
-function body(provider, { model = PROVIDERS[provider]?.model || 'gpt-x', stream = true, thinking = false, tools = TOOLS, temperature = 0.3, messages = HISTORY } = {}) {
-  return buildRequestBody({ provider, model, messages, tools, temperature, thinking, stream });
-}
-
-describe('buildRequestBody', () => {
-  test('DeepSeek: thinking disabled, usage requested, no tool_choice/user fields, history sanitized', () => {
-    const b = body('deepseek');
-    assert.deepEqual(b.thinking, { type: 'disabled' });
-    assert.deepEqual(b.stream_options, { include_usage: true });
+describe('buildRequestBody (OpenAI)', () => {
+  test('non-reasoning model: temperature and usage, tools, history sanitized for the wire', () => {
+    const b = buildRequestBody({ model: 'gpt-4.1', messages: HISTORY, tools: TOOLS, temperature: 0.3, stream: true });
     assert.equal(b.temperature, 0.3);
-    assert.equal(b.tool_choice, undefined);
-    assert.equal(b.user, undefined);
-    assert.equal(b.user_id, undefined);
+    assert.deepEqual(b.stream_options, { include_usage: true });
     assert.equal(b.tools, TOOLS);
+    assert.equal(b.reasoning_effort, undefined);
+    assert.equal(b.max_completion_tokens, undefined);
     assert.deepEqual(b.messages[2], { role: 'assistant', content: null, tool_calls: HISTORY[2].tool_calls });
     assert.deepEqual(b.messages[3], { role: 'tool', tool_call_id: 'call_1', content: '{"hotels":[]}' });
-    assert.deepEqual(b.messages[4], { role: 'assistant', content: '没找到', reasoning_content: '思考过' });
-    assert.deepEqual(b.messages[5], { role: 'user', content: '再试试' });
+    assert.deepEqual(b.messages[4], { role: 'assistant', content: 'Nothing yet' }, 'no reasoning_content / encrypted_content echo');
+    assert.deepEqual(b.messages[5], { role: 'user', content: 'Try again' });
   });
 
-  test('DeepSeek thinking on: switch removed, every assistant message carries reasoning_content', () => {
-    const b = body('deepseek', { thinking: true });
-    assert.equal(b.thinking, undefined);
-    assert.equal(b.messages[2].reasoning_content, ' ');
-    assert.equal(b.messages[4].reasoning_content, '思考过');
-    const noTools = body('deepseek', { thinking: true, tools: [] });
-    assert.equal(noTools.tools, undefined);
-    assert.equal(noTools.messages[2].reasoning_content, undefined, 'only required when tools are sent');
-  });
-
-  test('Qwen: enable_thinking false + parallel_tool_calls; non-streaming always disables thinking', () => {
-    const b = body('qwen');
-    assert.equal(b.enable_thinking, false);
-    assert.equal(b.parallel_tool_calls, true);
-    assert.equal(body('qwen', { tools: [] }).parallel_tool_calls, undefined);
-    assert.equal(body('qwen', { thinking: true }).enable_thinking, true);
-    assert.equal(body('qwen', { thinking: true, stream: false }).enable_thinking, false);
-    assert.equal(b.messages[2].reasoning_content, undefined);
-  });
-
-  test('Kimi: no temperature, max_tokens 8192 (16000 with thinking); thinking on echoes reasoning on tool-call messages', () => {
-    const b = body('kimi');
+  test('reasoning models (gpt-5*, o-series): no temperature, reasoning_effort when an effort is set', () => {
+    const b = buildRequestBody({ model: 'gpt-5-mini', messages: HISTORY, tools: TOOLS, temperature: 0.3, stream: true, effort: 'low' });
     assert.equal(b.temperature, undefined);
-    assert.equal(b.max_tokens, 8192);
-    assert.deepEqual(b.thinking, { type: 'disabled' });
-    const t = body('kimi', { thinking: true });
-    assert.equal(t.max_tokens, 16000);
-    assert.equal(t.thinking, undefined);
-    assert.equal(t.messages[2].reasoning_content, ' ');
-    assert.equal(t.messages[4].reasoning_content, '思考过');
+    assert.equal(b.reasoning_effort, 'low');
+    assert.equal(buildRequestBody({ model: 'o4-mini', messages: [], stream: false, thinking: true }).reasoning_effort, 'high');
+    assert.equal(buildRequestBody({ model: 'gpt-5', messages: [], stream: false, effort: 'max' }).reasoning_effort, 'high');
+    assert.equal(buildRequestBody({ model: 'gpt-5', messages: [], stream: false }).reasoning_effort, undefined);
+    assert.equal(buildRequestBody({ model: 'gpt-4.1', messages: [], stream: false, effort: 'low' }).reasoning_effort, undefined);
+    assert.equal(buildRequestBody({ model: 'gpt-5', messages: [], stream: false, maxTokens: 4000 }).max_completion_tokens, 4000);
+    assert.equal(buildRequestBody({ model: 'gpt-5', messages: [], stream: false, tools: [] }).tools, undefined);
   });
 
-  test('GLM: never tool_choice/parallel_tool_calls, tool_stream only when streaming, temperature clamped', () => {
-    const b = buildRequestBody({ provider: 'glm', model: 'glm-4.7-flash', messages: HISTORY, tools: TOOLS, temperature: 0, stream: true, extraBody: { tool_choice: 'auto', parallel_tool_calls: true } });
-    assert.equal(b.tool_choice, undefined);
-    assert.equal(b.parallel_tool_calls, undefined);
-    assert.equal(b.tool_stream, true);
-    assert.equal(b.temperature, 0.01);
-    assert.equal(b.stream_options, undefined);
-    assert.equal(body('glm', { stream: false }).tool_stream, undefined);
-    assert.equal(body('glm', { tools: [] }).tool_stream, undefined);
-    assert.equal(body('glm', { model: 'glm-4.5' }).tool_stream, undefined);
-    assert.equal(body('glm', { model: 'glm-5.3-flash' }).thinking, undefined, 'GLM-5.3+ cannot disable thinking');
-    assert.deepEqual(body('glm').thinking, { type: 'disabled' });
-  });
-
-  test('Doubao: thinking disabled and encrypted_content echoed', () => {
-    const msgs = [{ role: 'user', content: 'x' }, { role: 'assistant', content: '好', encrypted_content: 'enc' }];
-    const b = body('doubao', { messages: msgs });
-    assert.deepEqual(b.thinking, { type: 'disabled' });
-    assert.equal(b.messages[1].encrypted_content, 'enc');
-    assert.equal(body('deepseek', { messages: msgs }).messages[1].encrypted_content, undefined);
-  });
-
-  test('client sends POST {baseUrl}/chat/completions with bearer auth', async () => {
-    const { fetch } = await run([okText('好')], { baseUrl: 'https://open.bigmodel.cn/api/paas/v4/', provider: undefined, model: 'glm-4.7-flash' });
+  test('client sends POST {baseUrl}/chat/completions with bearer auth; gateways get max_tokens', async () => {
+    const { fetch } = await run([okText('Sure')], { baseUrl: 'https://api.openai.com/v1/' });
     const req = fetch.calls[0];
-    assert.equal(req.url, 'https://open.bigmodel.cn/api/paas/v4/chat/completions');
+    assert.equal(req.url, 'https://api.openai.com/v1/chat/completions');
     assert.equal(req.method, 'POST');
-    assert.equal(req.headers.authorization, 'Bearer sk-test');
+    assert.equal(req.headers.authorization, 'Bearer sk-test-openai-key');
     assert.equal(req.headers.accept, 'text/event-stream');
-    assert.equal(req.json.tool_stream, true, 'provider inferred from the base URL');
-    assert.equal(req.json.model, 'glm-4.7-flash');
+    assert.equal(req.json.model, 'gpt-4.1-mini');
+    assert.equal(req.json.stream, true);
+    const gw = await run([okText('Sure')], { baseUrl: 'https://llm-gateway.example.com/v1', maxTokens: 2000 });
+    assert.equal(gw.fetch.calls[0].url, 'https://llm-gateway.example.com/v1/chat/completions');
+    assert.equal(gw.fetch.calls[0].json.max_tokens, 2000);
+    assert.equal(gw.fetch.calls[0].json.max_completion_tokens, undefined);
   });
 });
 
@@ -805,71 +751,113 @@ describe('parseToolArguments', () => {
 // ---------------------------------------------------------------------------
 
 describe('providers', () => {
-  test('defaults to DeepSeek with the addendum values', () => {
-    const c = resolveLlmConfig({ DEEPSEEK_API_KEY: 'sk-1' });
-    assert.equal(c.provider, 'deepseek');
-    assert.equal(c.baseUrl, 'https://api.deepseek.com');
-    assert.equal(c.model, 'deepseek-v4-flash');
-    assert.equal(c.apiKey, 'sk-1');
+  test('two US providers; Anthropic Claude Opus 5.5 is the default', () => {
+    assert.deepEqual(Object.keys(PROVIDERS).sort(), ['anthropic', 'openai']);
+    assert.equal(DEFAULT_PROVIDER, 'anthropic');
+    const c = resolveLlmConfig({ ANTHROPIC_API_KEY: 'sk-ant-test' });
+    assert.equal(c.provider, 'anthropic');
+    assert.equal(c.label, 'Anthropic Claude');
+    assert.equal(c.baseUrl, 'https://api.anthropic.com');
+    assert.equal(c.model, 'claude-opus-5-5');
+    assert.equal(c.apiKey, 'sk-ant-test');
+    assert.equal(c.keyEnv, 'ANTHROPIC_API_KEY');
     assert.equal(c.configured, true);
-    assert.equal(c.temperature, 0.3);
+    assert.equal(c.effort, 'medium');
+    assert.equal(c.fallbacks, 'default');
     assert.equal(c.thinking, false);
-    assert.equal(resolveLlmConfig({}).configured, false);
+    assert.deepEqual(c.warnings, []);
+    const none = resolveLlmConfig({});
+    assert.equal(none.provider, 'anthropic');
+    assert.equal(none.configured, false);
+    for (const p of Object.values(PROVIDERS)) assert.ok(p.label && p.keyEnv && p.baseUrl && p.model && p.modelEnv);
   });
 
-  test('preset values per provider', () => {
-    assert.equal(PROVIDERS.qwen.baseUrl, 'https://dashscope.aliyuncs.com/compatible-mode/v1');
-    assert.equal(PROVIDERS.qwen.model, 'qwen-flash');
-    assert.equal(PROVIDERS.kimi.baseUrl, 'https://api.moonshot.cn/v1');
-    assert.equal(PROVIDERS.kimi.model, 'kimi-k2.6');
-    assert.equal(PROVIDERS.glm.baseUrl, 'https://open.bigmodel.cn/api/paas/v4');
-    assert.equal(PROVIDERS.glm.model, 'glm-4.7-flash');
-    assert.equal(PROVIDERS.doubao.baseUrl, 'https://ark.cn-beijing.volces.com/api/v3');
-    assert.match(PROVIDERS.doubao.model, /^doubao-seed-2-1-lite-\d{6}$/);
-    for (const p of Object.values(PROVIDERS)) assert.ok(p.label && p.keyEnv);
+  test('the return shape is unchanged (plus effort and fallbacks)', () => {
+    assert.deepEqual(Object.keys(resolveLlmConfig({})).sort(), [
+      'apiKey', 'baseUrl', 'configured', 'effort', 'fallbacks', 'keyEnv', 'label', 'model', 'provider', 'temperature', 'thinking', 'warnings',
+    ]);
   });
 
-  test('generic overrides, aliases, alt key env and thinking switch', () => {
-    const c = resolveLlmConfig({ LLM_PROVIDER: 'Moonshot', MOONSHOT_API_KEY: 'k', LLM_MODEL: 'kimi-k3', LLM_BASE_URL: 'https://proxy.example.com/v1/', LLM_TEMPERATURE: '0.6', LLM_THINKING: 'on' });
-    assert.equal(c.provider, 'kimi');
-    assert.equal(c.model, 'kimi-k3');
-    assert.equal(c.baseUrl, 'https://proxy.example.com/v1');
-    assert.equal(c.temperature, 0.6);
-    assert.equal(c.thinking, true);
-    assert.equal(resolveLlmConfig({ LLM_PROVIDER: 'glm', ZAI_API_KEY: 'z' }).apiKey, 'z');
-    assert.equal(resolveLlmConfig({ LLM_PROVIDER: 'glm', ZHIPUAI_API_KEY: 'a', ZAI_API_KEY: 'z' }).apiKey, 'a');
-    assert.equal(resolveLlmConfig({ LLM_API_KEY: 'g', DEEPSEEK_API_KEY: 'd' }).apiKey, 'g');
+  test('OpenAI preset, and the provider whose key is set is chosen when LLM_PROVIDER is empty', () => {
+    const o = resolveLlmConfig({ OPENAI_API_KEY: 'sk-proj-abc' });
+    assert.equal(o.provider, 'openai');
+    assert.equal(o.baseUrl, 'https://api.openai.com/v1');
+    assert.equal(o.model, PROVIDERS.openai.model);
+    assert.equal(o.keyEnv, 'OPENAI_API_KEY');
+    assert.equal(o.effort, null);
+    assert.equal(resolveLlmConfig({ OPENAI_API_KEY: 'sk-1', ANTHROPIC_API_KEY: 'sk-ant-1' }).provider, 'anthropic');
+    assert.equal(resolveLlmConfig({ LLM_PROVIDER: 'openai', OPENAI_API_KEY: 'sk-1', ANTHROPIC_API_KEY: 'sk-ant-1' }).apiKey, 'sk-1');
+  });
+
+  test('model env vars, generic overrides, aliases and effort', () => {
+    assert.equal(resolveLlmConfig({ ANTHROPIC_MODEL: 'claude-sonnet-5-5' }).model, 'claude-sonnet-5-5');
+    assert.equal(resolveLlmConfig({ LLM_PROVIDER: 'ChatGPT', OPENAI_MODEL: 'gpt-5' }).model, 'gpt-5');
+    assert.equal(resolveLlmConfig({ LLM_MODEL: 'claude-haiku-5-5' }).model, 'claude-haiku-5-5');
+    assert.equal(resolveLlmConfig({ LLM_MODEL: 'x', ANTHROPIC_MODEL: 'y' }).model, 'y', 'the provider-specific name wins');
+    assert.equal(resolveLlmConfig({ LLM_API_KEY: 'g', ANTHROPIC_API_KEY: 'sk-ant-d' }).apiKey, 'g');
     assert.equal(resolveLlmConfig({ LLM_TEMPERATURE: 'hot' }).temperature, 0.3);
-    const bad = resolveLlmConfig({ LLM_PROVIDER: 'openai' });
-    assert.equal(bad.provider, 'deepseek');
+    assert.equal(resolveLlmConfig({ LLM_TEMPERATURE: '0.6' }).temperature, 0.6);
+    assert.equal(normalizeProvider('Claude'), 'anthropic');
+    assert.equal(normalizeProvider('GPT'), 'openai');
+    assert.equal(normalizeProvider('deepseek'), null);
+    assert.equal(resolveLlmConfig({ LLM_EFFORT: 'LOW' }).effort, 'low');
+    assert.equal(resolveLlmConfig({ LLM_EFFORT: 'xhigh' }).effort, 'xhigh');
+    assert.equal(resolveLlmConfig({ LLM_THINKING: 'on' }).effort, 'high');
+    assert.equal(resolveLlmConfig({ LLM_PROVIDER: 'openai', LLM_EFFORT: 'minimal' }).effort, 'minimal');
+    const bad = resolveLlmConfig({ LLM_EFFORT: 'turbo' });
+    assert.equal(bad.effort, 'medium');
     assert.equal(bad.warnings.length, 1);
-    assert.equal(normalizeProvider('ARK'), 'doubao');
-    assert.equal(inferProvider('https://dashscope.aliyuncs.com/compatible-mode/v1'), 'qwen');
-    assert.equal(inferProvider('not a url'), null);
+    assert.equal(resolveLlmConfig({ ANTHROPIC_FALLBACKS: 'off' }).fallbacks, null);
+  });
+
+  test('unknown providers (e.g. the old Chinese ones) fall back with an English warning that never shows the key', () => {
+    const c = resolveLlmConfig({ LLM_PROVIDER: 'deepseek', ANTHROPIC_API_KEY: 'sk-ant-secret-key-1' });
+    assert.equal(c.provider, 'anthropic');
+    assert.equal(c.warnings.length, 1);
+    assert.match(c.warnings[0], /Unknown LLM_PROVIDER "deepseek"/);
+    const wrong = resolveLlmConfig({ ANTHROPIC_API_KEY: 'sk-proj-not-anthropic' });
+    assert.equal(wrong.warnings.length, 1);
+    assert.match(wrong.warnings[0], /doesn't look like/);
+    for (const w of [...c.warnings, ...wrong.warnings]) {
+      assert.doesNotMatch(w, CJK);
+      assert.ok(!w.includes('secret'), w);
+      assert.ok(!w.includes('not-anthropic'), w);
+    }
   });
 
   test('LLM_BASE_URL decides the provider when LLM_PROVIDER is empty, and a mismatch is warned about', () => {
-    const c = resolveLlmConfig({ LLM_BASE_URL: 'https://api.moonshot.cn/v1', MOONSHOT_API_KEY: 'k' });
-    assert.equal(c.provider, 'kimi');
-    assert.equal(c.model, 'kimi-k2.6');
-    assert.equal(c.apiKey, 'k');
+    assert.equal(inferProvider('https://api.anthropic.com'), 'anthropic');
+    assert.equal(inferProvider('https://api.openai.com/v1'), 'openai');
+    assert.equal(inferProvider('https://my-resource.openai.azure.com/openai'), 'openai');
+    assert.equal(inferProvider('not a url'), null);
+    const c = resolveLlmConfig({ LLM_BASE_URL: 'https://api.openai.com/v1/', OPENAI_API_KEY: 'sk-k' });
+    assert.equal(c.provider, 'openai');
+    assert.equal(c.baseUrl, 'https://api.openai.com/v1');
     assert.deepEqual(c.warnings, []);
     const gateway = resolveLlmConfig({ LLM_BASE_URL: 'https://gw.example.com/v1' });
-    assert.equal(gateway.provider, 'deepseek');
-    assert.deepEqual(gateway.warnings, []);
-    const mismatch = resolveLlmConfig({ LLM_PROVIDER: 'deepseek', LLM_BASE_URL: 'https://api.moonshot.cn/v1' });
-    assert.equal(mismatch.provider, 'deepseek');
+    assert.equal(gateway.provider, 'anthropic');
+    assert.equal(gateway.baseUrl, 'https://gw.example.com/v1');
+    const mismatch = resolveLlmConfig({ LLM_PROVIDER: 'anthropic', LLM_BASE_URL: 'https://api.openai.com/v1' });
+    assert.equal(mismatch.provider, 'anthropic');
     assert.equal(mismatch.warnings.length, 1);
-    assert.match(mismatch.warnings[0], /Kimi/);
+    assert.match(mismatch.warnings[0], /OpenAI/);
   });
 
-  test('resolveLlmConfig output can be spread into createLlmClient', async () => {
-    const fetch = createFakeFetch([okText('好')]);
-    const llm = createLlmClient({ ...resolveLlmConfig({ LLM_PROVIDER: 'qwen', DASHSCOPE_API_KEY: 'k' }), fetch });
-    assert.equal(llm.provider, 'qwen');
-    const res = await llm.chat({ messages: [{ role: 'user', content: 'hi' }], tools: TOOLS });
-    assert.equal(res.content, '好');
-    assert.equal(fetch.calls[0].json.enable_thinking, false);
-    assert.equal(fetch.calls[0].json.parallel_tool_calls, true);
+  test('resolveLlmConfig output can be spread into createLlmClient (both providers)', async () => {
+    const openaiFetch = createFakeFetch([okText('Sure')]);
+    const o = createLlmClient({ ...resolveLlmConfig({ OPENAI_API_KEY: 'sk-test-openai' }), fetch: openaiFetch });
+    assert.equal(o.provider, 'openai');
+    assert.equal((await o.chat({ messages: [{ role: 'user', content: 'hi' }], tools: TOOLS })).content, 'Sure');
+    assert.equal(openaiFetch.calls[0].url, 'https://api.openai.com/v1/chat/completions');
+    assert.equal(openaiFetch.calls[0].json.temperature, undefined, 'gpt-5 family: no temperature');
+
+    const anthropicFetch = createFakeFetch([sseStep(textAnswer('Hello!'))]);
+    const a = createLlmClient({ ...resolveLlmConfig({ ANTHROPIC_API_KEY: 'sk-ant-test-key' }), fetch: anthropicFetch });
+    assert.equal(a.provider, 'anthropic');
+    assert.equal(a.model, 'claude-opus-5-5');
+    assert.equal((await a.chat({ messages: [{ role: 'user', content: 'hi' }], tools: TOOLS })).content, 'Hello!');
+    assert.equal(anthropicFetch.calls[0].url, 'https://api.anthropic.com/v1/messages');
+    assert.equal(anthropicFetch.calls[0].headers['x-api-key'], 'sk-ant-test-key');
+    assert.deepEqual(anthropicFetch.calls[0].json.output_config, { effort: 'medium' });
   });
 });

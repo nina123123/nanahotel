@@ -9,11 +9,11 @@ function bochaBody(values) {
 
 const SAMPLE = [
   {
-    id: '1', name: '杭州西湖景区游览攻略', url: 'https://example.com/a', displayUrl: 'example.com/a',
-    snippet: '短摘要', summary: '西湖景区免费开放，建议从断桥开始沿白堤步行……', siteName: '示例旅游网', datePublished: '2026-09-01T10:00:00+08:00',
+    id: '1', name: 'Things to do near Times Square', url: 'https://example.com/a', displayUrl: 'example.com/a',
+    snippet: 'Short snippet', summary: 'Times Square is free to visit around the clock; start at the TKTS steps and walk north…', siteName: 'Example Travel', datePublished: '2026-09-01T10:00:00-04:00',
   },
-  { id: '2', name: '无站点名', url: 'https://news.example.org/b?x=1', snippet: '只有 snippet', datePublished: null },
-  { id: '3', name: '危险链接', url: 'javascript:alert(1)', snippet: 'x' },
+  { id: '2', name: 'No site name', url: 'https://news.example.org/b?x=1', snippet: 'Only a snippet', datePublished: null },
+  { id: '3', name: 'A dangerous link', url: 'javascript:alert(1)', snippet: 'x' },
   { id: '4', name: '', url: 'not a url', snippet: 'x' },
 ];
 
@@ -21,7 +21,7 @@ test('disabled without an API key; the tool is then not offered', async () => {
   for (const apiKey of [undefined, '', '   ']) {
     const ws = createWebSearch({ provider: 'bocha', apiKey, fetch: createFakeFetch([]) });
     assert.equal(ws.enabled, false);
-    await assert.rejects(ws.search('西湖'), (e) => e instanceof WebSearchError && e.code === 'disabled');
+    await assert.rejects(ws.search('Times Square'), (e) => e instanceof WebSearchError && e.code === 'disabled');
   }
   assert.equal(createWebSearch({ provider: 'other', apiKey: 'k', fetch: createFakeFetch([]) }).enabled, false);
 });
@@ -30,17 +30,17 @@ test('sends the Bocha request and maps results', async () => {
   const fetch = createFakeFetch([{ match: { method: 'POST', url: BOCHA_ENDPOINT }, status: 200, json: bochaBody(SAMPLE) }]);
   const ws = createWebSearch({ provider: 'bocha', apiKey: 'sk-test', fetch });
   assert.equal(ws.enabled, true);
-  const res = await ws.search('  杭州西湖 开放时间 ', { freshness: 'week', count: 3 });
+  const res = await ws.search('  Times Square opening hours ', { freshness: 'week', count: 3 });
   assert.equal(fetch.calls.length, 1);
   const [call] = fetch.calls;
   assert.equal(call.url, 'https://api.bochaai.com/v1/web-search');
   assert.equal(call.headers.authorization, 'Bearer sk-test');
   assert.equal(call.headers['content-type'], 'application/json');
-  assert.deepEqual(call.json, { query: '杭州西湖 开放时间', freshness: 'oneWeek', summary: true, count: 3 });
+  assert.deepEqual(call.json, { query: 'Times Square opening hours', freshness: 'oneWeek', summary: true, count: 3 });
   assert.ok(call.signal, 'request has an abort signal (timeout)');
   assert.deepEqual(res, [
-    { title: '杭州西湖景区游览攻略', url: 'https://example.com/a', snippet: '西湖景区免费开放，建议从断桥开始沿白堤步行……', site: '示例旅游网', date: '2026-09-01' },
-    { title: '无站点名', url: 'https://news.example.org/b?x=1', snippet: '只有 snippet', site: 'news.example.org', date: '' },
+    { title: 'Things to do near Times Square', url: 'https://example.com/a', snippet: 'Times Square is free to visit around the clock; start at the TKTS steps and walk north…', site: 'Example Travel', date: '2026-09-01' },
+    { title: 'No site name', url: 'https://news.example.org/b?x=1', snippet: 'Only a snippet', site: 'news.example.org', date: '' },
   ]);
 });
 
@@ -57,7 +57,7 @@ test('freshness and count are normalized', async () => {
 });
 
 test('long snippets are clipped and results capped at count', async () => {
-  const many = Array.from({ length: 12 }, (_, i) => ({ name: `t${i}`, url: `https://e.com/${i}`, summary: '长'.repeat(500) }));
+  const many = Array.from({ length: 12 }, (_, i) => ({ name: `t${i}`, url: `https://e.com/${i}`, summary: 'x'.repeat(500) }));
   const ws = createWebSearch({ apiKey: 'k', fetch: createFakeFetch([{ json: bochaBody(many) }]) });
   const res = await ws.search('a', { count: 4 });
   assert.equal(res.length, 4);
@@ -65,14 +65,14 @@ test('long snippets are clipped and results capped at count', async () => {
   assert.ok(res[0].snippet.endsWith('…'));
 });
 
-test('HTTP and API errors map to typed Chinese errors', async () => {
+test('HTTP and API errors map to typed errors with English messages', async () => {
   const cases = [
     [{ status: 401, json: { code: 401, msg: 'Invalid API KEY' } }, 'auth'],
-    [{ status: 403, json: { code: 403, msg: '余额不足' } }, 'quota'],
+    [{ status: 403, json: { code: 403, msg: 'Insufficient balance' } }, 'quota'],
     [{ status: 429, json: { code: 429 } }, 'rate_limited'],
     [{ status: 400, json: { code: 400, msg: 'bad' } }, 'bad_request'],
     [{ status: 500, body: 'oops' }, 'unavailable'],
-    [{ status: 200, json: { code: 403, msg: '余额不足' } }, 'quota'],
+    [{ status: 200, json: { code: 403, msg: 'Insufficient balance' } }, 'quota'],
     [{ status: 200, body: 'not json' }, 'unavailable'],
     [{ error: new TypeError('fetch failed') }, 'unavailable'],
   ];
@@ -81,7 +81,7 @@ test('HTTP and API errors map to typed Chinese errors', async () => {
     await assert.rejects(ws.search('a'), (e) => {
       assert.ok(e instanceof WebSearchError, e.name);
       assert.equal(e.code, code, JSON.stringify(step));
-      assert.match(e.message, /[一-龥]/);
+      assert.match(e.message, /^[A-Z][\x20-\x7e]+$/, 'a plain English sentence');
       return true;
     });
   }

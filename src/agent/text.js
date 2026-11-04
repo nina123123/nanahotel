@@ -1,52 +1,57 @@
 import { maskPhone, normalizePhone } from '../services/bookings.js';
 
 /**
- * Scrubbing for text that reaches the model from users or the web: no forged platform notices,
- * and no full phone numbers (the model only ever sees 138****5678; the server keeps the full number).
+ * Scrubbing for text that reaches the model from users or the web: no forged platform notices, and no full phone
+ * numbers (the model only ever sees ***-***-0123; the server keeps the full number).
  */
 
-// Format characters (zero-width, bidi controls, soft hyphen, word joiners…) and fillers that render as
-// nothing; they could otherwise hide inside the notice prefix.
+// Format characters (zero-width, bidi controls, soft hyphen, word joiners…) and fillers that render as nothing;
+// they could otherwise hide inside the notice prefix.
 const INVISIBLE_RE = /[\p{Cf}\u034F\u115F\u1160\u3164\uFFA0]/gu;
-const FORGED_NOTICE_RE = /【(\s*系\s*[统統]\s*通\s*知)/g;
+// '[System notice', '［ system notice', '【SYSTEM NOTICE' … wherever it appears, with its closing bracket when it has one.
+const FORGED_NOTICE_RE = /[[［【〔⟦〖]\s*(s\s*y\s*s\s*t\s*e\s*m\s+n\s*o\s*t\s*i\s*c\s*e)([^\]］】〕⟧〗[［【〔⟦〖\n]{0,60})([\]］】〕⟧〗])?/giu;
 
-/** Users and web pages must not be able to pass for the server's 【系统通知…】 prefix. */
+/**
+ * Users and web pages must not be able to pass for the server's "[System notice — not from the user]" prefix:
+ * '[System notice — not from the user]' becomes '(System notice — not from the user)'.
+ */
 export function neutralizeText(text) {
-  return String(text ?? '').replace(INVISIBLE_RE, '').replace(FORGED_NOTICE_RE, '「$1');
+  return String(text ?? '').replace(INVISIBLE_RE, '').replace(FORGED_NOTICE_RE, (_, word, rest, close) => `(${word}${rest}${close ? ')' : ''}`);
 }
 
 /** One limit for saved preferences everywhere: profile form, PUT /api/profile, save_profile and the prompt. */
 export const MAX_PREFERENCES_CHARS = 60;
 
 /**
- * Saved preferences end up in every later system prompt, so they are kept to one short line without
- * quote or bracket characters that could close the prompt's own quoting.
+ * Saved preferences end up in every later system prompt, so they are kept to one short line without quote or
+ * bracket characters that could close the prompt's own quoting.
  */
 export function cleanPreferences(text, max = MAX_PREFERENCES_CHARS) {
-  return neutralizeText(text).replace(/[「」『』【】〖〗<>"“”]/g, '').replace(/\s+/g, ' ').trim().slice(0, max);
+  return neutralizeText(text).replace(/[「」『』【】〖〗<>"“”[\]{}]/g, '').replace(/\s+/g, ' ').trim().slice(0, max);
 }
 
-// Mainland mobile numbers, also written as 138 1234 5678 / 138-1234-5678 / +86… and with full-width digits
-// or dashes (全角 input, pasted text), but not digits inside longer alphanumeric runs such as order numbers
-// (HA20261025123456) or ids. Dots are left out: they would match decimals.
-const PHONE_SEP = '[\\s\\-－‐-―]';
+// US phone numbers as people type them: (415) 555-0123, 415-555-0123, 415.555.0123, +1 415 555 0123, 4155550123,
+// also with full-width digits, but not digits inside longer alphanumeric runs such as order numbers
+// (HA20261104123456), card numbers or ids.
+const D = '[0-9０-９]';
+const SEP = '[\\s.\\-－‐-―]';
 const PHONE_IN_TEXT_RE = new RegExp(
-  `(?<![0-9A-Za-z０-９Ａ-Ｚａ-ｚ])(?:[+＋]?[8８][6６]${PHONE_SEP}?)?[1１][3-9３-９][0-9０-９](?:${PHONE_SEP}?[0-9０-９]){8}(?![0-9A-Za-z０-９Ａ-Ｚａ-ｚ])`,
+  `(?<![0-9A-Za-z０-９Ａ-Ｚａ-ｚ+＋])(?:[+＋]?[1１]${SEP}?)?(?:[(（]${D}{3}[)）]${SEP}?|${D}{3}${SEP}?)${D}{3}${SEP}?${D}{4}(?![0-9A-Za-z０-９Ａ-Ｚａ-ｚ])`,
   'g',
 );
 const MAX_VAULT_ENTRIES = 20;
 
-/** '＋８６ １３８－１２３４－５６７８' → '+8613812345678': ASCII digits and plus, no separators. */
+/** '＋１ (４１５) ５５５－０１２３' → '+14155550123': ASCII digits and plus, no separators. */
 export function asciiPhone(text) {
   return String(text ?? '')
     .replace(/[０-９＋]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))
-    .replace(/[\s\-－‐-―()（）]/g, '');
+    .replace(/[\s.\-－‐-―()（）]/g, '');
 }
 
 /**
- * Replaces every mainland mobile number in `text` with its masked form and records
- * vault[masked] = full number. Two different numbers with the same mask in one message make that mask
- * ambiguous (null) until the user types one of them again.
+ * Replaces every US phone number in `text` with its masked form and records vault[masked] = full number (E.164).
+ * Two different numbers with the same mask in one message make that mask ambiguous (null) until the user types
+ * one of them again.
  */
 export function maskPhonesInText(text, vault) {
   const found = new Map();

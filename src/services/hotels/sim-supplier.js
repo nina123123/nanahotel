@@ -1,46 +1,60 @@
-import { CITIES, findCity } from './sim-cities.js';
+import { CITIES, findCity, normCityText } from './sim-cities.js';
 import { generateHotels } from './sim-hotels.js';
 import { hotelMatchesKeyword, parseKeyword } from './supplier.js';
 import { distanceM } from '../../util/geo.js';
 
 /**
- * Simulated hotel supplier: real cities/areas/landmarks (sim-cities.js) + generated fictional hotels.
+ * Simulated hotel supplier: real cities, neighborhoods and landmarks (sim-cities.js) + generated fictional hotels.
  * Implements the HotelSupplier interface documented in supplier.js.
  */
 
-const PREFIXES = ['靠近', '离', '近', '在', '去', '到', '住'];
-// A city name followed by one of these is a street ('广州北京路', '上海南京东路', '长安街'), not that city.
-const STREET_AFTER = /^[东西南北中]?(?:路|街|大街|大道|巷)/;
-const SUFFIXES = ['的酒店', '酒店', '的', '附近', '旁边', '周边', '周围', '一带', '那边', '这边', '边上', '对面', '近一点', '近点', '步行可达', '风景区', '景区', '里面', '旁', '边', '里', '内'];
+// Words around a place name that are not part of it: 'near the Strip', 'Times Square area', 'close to JFK'.
+const LEAD_WORDS = ['walking distance to', 'walking distance from', 'within walking distance of', 'close to', 'next to', 'right by',
+  'near', 'nearby', 'around', 'by', 'in', 'at', 'on', 'to', 'the', 'a', 'an'];
+const TRAIL_WORDS = ['area', 'district', 'neighborhood', 'neighbourhood', 'hotel', 'hotels', 'nearby', 'vicinity', 'region', 'please'];
 
-function norm(text) {
-  return String(text || '').trim().toLowerCase().replace(/[\s"'“”‘’。，,!！?？]+/g, '');
+/** Lower case, curly quotes straightened, punctuation to spaces (keeps & ' . - inside names). */
+function words(text) {
+  return normCityText(text).replace(/[^a-z0-9&'.\- ]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-function stripAffixes(q) {
-  let s = q;
+/** The comparable form of a name: 'Fisherman’s Wharf' → 'fishermanswharf'. */
+function compact(text) {
+  return normCityText(text).replace(/[^a-z0-9&]+/g, '');
+}
+
+function stripAffixes(text) {
+  let s = ` ${words(text)} `;
   for (let changed = true; changed;) {
     changed = false;
-    for (const p of PREFIXES) {
-      if (s.length > p.length + 1 && s.startsWith(p)) { s = s.slice(p.length); changed = true; }
+    for (const w of LEAD_WORDS) {
+      if (s.startsWith(` ${w} `) && s.trim().length > w.length + 2) { s = s.slice(w.length + 1); changed = true; }
     }
-    for (const x of SUFFIXES) {
-      if (s.length > x.length + 1 && s.endsWith(x)) { s = s.slice(0, -x.length); changed = true; }
+    for (const w of TRAIL_WORDS) {
+      if (s.endsWith(` ${w} `) && s.trim().length > w.length + 2) { s = s.slice(0, -(w.length + 1)); changed = true; }
     }
   }
-  return s;
+  return s.trim();
+}
+
+/** True when `phrase` (words) appears in `text` (words) on word boundaries. */
+function hasPhrase(text, phrase) {
+  return Boolean(phrase) && ` ${text} `.includes(` ${phrase} `);
 }
 
 function cityInfo(c) {
-  return { code: c.code, name: c.name, fullName: c.fullName, tier: c.tier, center: { ...c.center }, season: c.season ? [...c.season] : null };
+  return {
+    code: c.code, name: c.name, state: c.state, fullName: c.fullName, zone: c.zone, market: c.market, areaCode: c.areaCode,
+    priceLevel: c.priceLevel, tax: { ...c.tax }, weekdays: [...c.weekdays], center: { ...c.center }, season: c.season ? [...c.season] : null,
+  };
 }
 
 function areaKeys(area) {
-  return [area.name, ...area.name.split(/[/·]/), area.short, ...area.aliases].map(norm).filter(Boolean);
+  return [area.name, ...area.name.split(' / '), area.short, ...area.aliases];
 }
 
 function landmarkKeys(lm) {
-  return [lm.name, ...lm.aliases].map(norm).filter(Boolean);
+  return [lm.name, ...lm.aliases];
 }
 
 function placeFromLandmark(lm, area, matched) {
@@ -48,24 +62,31 @@ function placeFromLandmark(lm, area, matched) {
 }
 
 function placeFromArea(area, matched) {
-  return { name: area.name, location: { ...area.center }, area: area.name, type: '商圈', extentM: 0, matched };
+  return { name: area.name, location: { ...area.center }, area: area.name, type: 'Neighborhood', extentM: 0, matched };
 }
 
-/** Exact, then containment matching of `variants` against one city's landmarks and areas. */
+/**
+ * Exact, then containment matching of the query against one city's landmarks and areas. `variants` are spaced
+ * word strings: an exact hit compares compact forms ('fishermans wharf' = "Fisherman's Wharf"); containment needs
+ * a whole-word phrase ('the times square subway station' contains 'times square'), longest first.
+ */
 function matchPlace(city, variants) {
-  for (const v of variants) {
+  const compacts = variants.map(compact).filter(Boolean);
+  for (const v of compacts) {
     for (const area of city.areas) {
-      for (const lm of area.landmarks) if (landmarkKeys(lm).includes(v)) return placeFromLandmark(lm, area, 'exact');
+      for (const lm of area.landmarks) if (landmarkKeys(lm).some((k) => compact(k) === v)) return placeFromLandmark(lm, area, 'exact');
     }
-    for (const area of city.areas) if (areaKeys(area).includes(v)) return placeFromArea(area, 'exact');
+    for (const area of city.areas) if (areaKeys(area).some((k) => compact(k) === v)) return placeFromArea(area, 'exact');
   }
-  // Containment: '西湖断桥那边的' contains '断桥'; prefer the longest key so '杭州东站' beats '东站'.
   let best = null;
   const consider = (key, make) => {
-    if (key.length < 2) return;
+    const k = words(key);
+    if (compact(k).length < 3) return;
     for (const v of variants) {
-      if (v.length < 2) continue;
-      const score = v.includes(key) ? key.length * 2 : key.includes(v) ? v.length : 0;
+      const cv = compact(v);
+      if (cv.length < 3) continue;
+      // The key inside the query scores by its length; the query inside a long key (a fragment) a little less.
+      const score = hasPhrase(v, k) ? compact(k).length * 2 : cv.length >= 4 && hasPhrase(k, v) ? cv.length : 0;
       if (score && (!best || score > best.score)) best = { score, make };
     }
   };
@@ -76,8 +97,29 @@ function matchPlace(city, variants) {
   return best ? best.make() : null;
 }
 
+/**
+ * Multi-word place names of every city with the cities that have them, longest first (for telling 'Washington
+ * Square Park' from Washington DC). A name several cities share ('Union Station') lists all of them.
+ */
+function placePhrases(cities) {
+  const byPhrase = new Map();
+  for (const c of cities) {
+    for (const area of c.areas) {
+      for (const k of [...areaKeys(area), ...area.landmarks.flatMap(landmarkKeys)]) {
+        const w = words(k);
+        if (!w.includes(' ')) continue;
+        const list = byPhrase.get(w) || [];
+        if (!list.includes(c)) list.push(c);
+        byPhrase.set(w, list);
+      }
+    }
+  }
+  return [...byPhrase].map(([phrase, list]) => ({ phrase, cities: list })).sort((a, b) => b.phrase.length - a.phrase.length);
+}
+
 export function createSimSupplier({ cities = CITIES } = {}) {
   const hotelCache = new Map();
+  const phrases = placePhrases(cities);
 
   function hotelsOf(city) {
     let list = hotelCache.get(city.code);
@@ -88,32 +130,42 @@ export function createSimSupplier({ cities = CITIES } = {}) {
     return list;
   }
 
+  /** The cities whose landmark or area `text` names exactly (compact forms). */
+  function exactPlaceCities(text) {
+    const variants = [...new Set([words(text), stripAffixes(text)])];
+    return cities.filter((c) => matchPlace(c, variants)?.matched === 'exact');
+  }
+
   function cityRecord(text) {
     const exact = findCity(text, cities);
     if (exact) return exact;
-    const q = norm(text);
+    const q = words(text);
     if (!q) return null;
-    // '去杭州玩' / '杭州西湖' → the city whose name or alias appears earliest in the text (longest on a tie),
-    // skipping street names so '广州北京路' is 广州.
+    // A bare landmark or neighborhood ('La Jolla', 'Miami Beach', 'the Strip') identifies its city when only one has it.
+    const named = exactPlaceCities(text);
+    if (named.length === 1) return named[0];
+    // Place names that contain a city word are taken out first, so 'Washington Square Park in New York' is New York.
+    let rest = ` ${q} `;
+    const placeCities = [];
+    for (const { phrase, cities: owners } of phrases) {
+      if (rest.includes(` ${phrase} `)) {
+        rest = rest.split(` ${phrase} `).join(' , ');
+        for (const city of owners) if (!placeCities.includes(city)) placeCities.push(city);
+      }
+    }
+    // 'going to vegas next week' → the city whose name or alias appears earliest (the longest on a tie).
     let best = null;
     for (const c of cities) {
-      for (const key of [c.name, ...c.aliases.filter((a) => /[一-龥]{2,}/.test(a))]) {
-        const k = key.toLowerCase();
-        for (let at = q.indexOf(k); at !== -1; at = q.indexOf(k, at + 1)) {
-          if (STREET_AFTER.test(q.slice(at + k.length))) continue;
-          if (!best || at < best.at || (at === best.at && k.length > best.len)) best = { city: c, at, len: k.length };
-          break;
-        }
+      for (const key of [c.name.toLowerCase(), ...c.aliases]) {
+        const k = words(key);
+        if (!k) continue;
+        const at = rest.indexOf(` ${k} `);
+        if (at === -1) continue;
+        if (!best || at < best.at || (at === best.at && k.length > best.len)) best = { city: c, at, len: k.length };
       }
     }
     if (best) return best.city;
-    // A bare landmark ('鼓浪屿', '外滩') identifies its city when only one city has it.
-    const variants = [...new Set([q, stripAffixes(q)])];
-    const hits = cities.filter((c) => {
-      const p = matchPlace(c, variants);
-      return p && p.matched === 'exact';
-    });
-    return hits.length === 1 ? hits[0] : null;
+    return placeCities.length === 1 ? placeCities[0] : null;
   }
 
   function resolveCity(text) {
@@ -123,18 +175,20 @@ export function createSimSupplier({ cities = CITIES } = {}) {
 
   function resolveLandmark(cityText, text) {
     const city = cityRecord(cityText);
-    const q = norm(text);
+    const q = words(text);
     if (!city || !q) return null;
-    // '杭州' / '杭州市区' as a place means "anywhere in the city", not the first landmark containing it.
-    const cityNames = [city.name, city.fullName, ...city.aliases].map(norm);
-    if (cityNames.includes(q) || cityNames.includes(stripAffixes(q)) || cityNames.some((n) => q === `${n}市区`)) return null;
-    const variants = [q, stripAffixes(q)];
-    for (const name of [city.name, ...city.aliases.map(norm)]) {
-      for (const v of [q, stripAffixes(q)]) {
-        if (name.length >= 2 && v.startsWith(name) && v.length > name.length + 1) variants.push(stripAffixes(v.slice(name.length)));
+    // 'New York' / 'Downtown New York' as a place means "anywhere in the city", not the first landmark containing it.
+    const cityNames = [city.name.toLowerCase(), city.fullName.toLowerCase(), ...city.aliases].map(words);
+    const stripped = stripAffixes(q);
+    if (cityNames.includes(q) || cityNames.includes(stripped)) return null;
+    const variants = [q, stripped];
+    for (const name of cityNames) {
+      for (const v of [q, stripped]) {
+        if (name.length >= 2 && v.startsWith(`${name} `) && v.length > name.length + 2) variants.push(stripAffixes(v.slice(name.length + 1)));
+        if (name.length >= 2 && v.endsWith(` ${name}`) && v.length > name.length + 2) variants.push(stripAffixes(v.slice(0, -(name.length + 1))));
       }
     }
-    return matchPlace(city, [...new Set(variants)]);
+    return matchPlace(city, [...new Set(variants)].filter(Boolean));
   }
 
   function listAreas(cityText) {
@@ -162,7 +216,7 @@ export function createSimSupplier({ cities = CITIES } = {}) {
     if (location && Number.isFinite(radiusM)) list = list.filter((h) => (distanceM(h.location, location) ?? Infinity) <= radiusM);
     if (Array.isArray(categories) && categories.length) list = list.filter((h) => categories.includes(h.category));
     if (keyword) {
-      const { tokens, categories: kwCats } = parseKeyword(keyword, { ignore: [c.name, c.fullName] });
+      const { tokens, categories: kwCats } = parseKeyword(keyword, { ignore: [c.name.toLowerCase(), ...c.aliases] });
       if (kwCats.length) list = list.filter((h) => kwCats.includes(h.category));
       list = list.filter((h) => hotelMatchesKeyword(h, tokens));
     }
@@ -179,7 +233,7 @@ export function createSimSupplier({ cities = CITIES } = {}) {
 
   return {
     source: 'sim',
-    listCities: () => cities.map((c) => ({ name: c.name, tier: c.tier })),
+    listCities: () => cities.map((c) => ({ name: c.name, state: c.state, zone: c.zone, market: c.market })),
     resolveCity,
     resolveLandmark,
     listAreas,

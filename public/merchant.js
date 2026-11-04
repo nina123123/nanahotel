@@ -1,24 +1,30 @@
-// 小宿商家版 — the hotel's console (docs/MERCHANT.md): 经营概览, 房态与入住, 住客服务工单, 点评与营销.
-// Same server and data as the traveler side, so what a guest does in 小宿 shows up here and what the hotel does
-// here reaches the guest. Guests appear masked (李*). Server data reaches the DOM only through textContent.
+// NanaHotel for Hotels — the hotel's console (docs/MERCHANT.md): overview, rooms and check-in, guest requests,
+// reviews and promotions. Same server and data as the guest side, so what a guest does in NanaHotel shows up here
+// and what the hotel does here reaches the guest. Guests appear masked ("Sarah M."). Server data reaches the DOM
+// only through textContent.
 import { icon } from './icons.js';
+import { clockTime, formatDate, formatMoney, formatRange, localYmd, percentOff, plural, userTimeZone, wallTime } from './format.js';
 
-const KEY_HOTEL = 'xiaosu.merchant.hotelId';
+const KEY_HOTEL = 'nanahotel.merchant.hotelId';
 const POLL_MS = 15000;
+const BRAND = 'NanaHotel';
+const CONSOLE_NAME = 'NanaHotel for Hotels';
 const TABS = [
-  { key: 'overview', label: '概览', icon: 'chart' },
-  { key: 'rooms', label: '房态', icon: 'bed' },
-  { key: 'tickets', label: '工单', icon: 'box' },
-  { key: 'reviews', label: '点评营销', icon: 'star' },
+  { key: 'overview', label: 'Overview', icon: 'chart' },
+  { key: 'rooms', label: 'Rooms', icon: 'bed' },
+  { key: 'tickets', label: 'Requests', icon: 'box' },
+  { key: 'reviews', label: 'Reviews', icon: 'star' },
 ];
 const ROOM_STATES = {
-  vacant: '空净', dirty: '空脏', occupied: '在住', arriving: '预抵', departing: '预离', ooo: '维修',
+  vacant: 'Clean', dirty: 'Dirty', occupied: 'Occupied', arriving: 'Arriving', departing: 'Departing', ooo: 'Out of order',
 };
 const ROOM_ORDER = ['vacant', 'dirty', 'occupied', 'arriving', 'departing', 'ooo'];
-const TICKET_STATES = { new: '待处理', doing: '处理中', done: '已完成', declined: '已婉拒' };
-const TICKET_KINDS = { service: '送物', early_checkin: '提前入住', wakeup: '叫醒', dining: '订餐' };
-const ACTION_LABELS = { accept: '接单', deliver: '送达', done: '完成', approve: '同意', decline: '婉拒' };
-const CHANNEL_ORDER = ['xiaosu', 'ctrip', 'meituan', 'fliggy', 'direct'];
+const TICKET_STATES = { new: 'New', doing: 'In progress', done: 'Done', declined: 'Declined' };
+const TICKET_KINDS = { service: 'Delivery', early_checkin: 'Early check-in', wakeup: 'Wake-up call', dining: 'Dining' };
+const ACTION_LABELS = { accept: 'Accept', deliver: 'Mark delivered', done: 'Mark done', approve: 'Approve', decline: 'Decline' };
+const ACTION_DONE = { accept: 'accepted', deliver: 'delivered', done: 'done', approve: 'approved', decline: 'declined' };
+// docs/US-CONTRACT.md §10: the channels' keys, in their slot order (NanaHotel takes the gold slot).
+const CHANNEL_ORDER = ['nanahotel', 'expedia', 'booking', 'google', 'direct'];
 const DISCOUNTS = [0.9, 0.85, 0.8, 0.7];
 
 // ---------------------------------------------------------------------------
@@ -49,27 +55,23 @@ function s(tag, attrs = {}, ...children) {
   return el;
 }
 
-export const yuan = (n) => (Number.isFinite(n) ? `¥${Math.round(n).toLocaleString('zh-CN')}` : '—');
+export const money = formatMoney;
 export const pct = (x, digits = 0) => (Number.isFinite(x) ? `${(x * 100).toFixed(digits)}%` : '—');
-const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 
-/** 'YYYY-MM-DD' → '11月6日' (with the weekday when asked). */
+/** 'YYYY-MM-DD' → 'Nov 6' (or 'Fri, Nov 6' with the weekday). */
 export function dayLabel(ymd, withWeekday = false) {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(ymd || ''));
-  if (!m) return String(ymd || '');
-  const wd = WEEKDAYS[new Date(Date.UTC(+m[1], +m[2] - 1, +m[3])).getUTCDay()];
-  return `${+m[2]}月${+m[3]}日${withWeekday ? ` ${wd}` : ''}`;
+  return formatDate(ymd, withWeekday);
 }
 
-/** '3分钟前', '2小时前', '11月1日'. */
+/** '3 min ago', '2 hr ago', 'Nov 1'. */
 export function ago(iso, now = Date.now()) {
   const t = Date.parse(iso);
   if (Number.isNaN(t)) return '';
   const min = Math.max(0, Math.round((now - t) / 60000));
-  if (min < 1) return '刚刚';
-  if (min < 60) return `${min}分钟前`;
-  if (min < 24 * 60) return `${Math.floor(min / 60)}小时前`;
-  return dayLabel(new Date(t + 8 * 3600000).toISOString().slice(0, 10));
+  if (min < 1) return 'just now';
+  if (min < 60) return `${min} min ago`;
+  if (min < 24 * 60) return `${Math.floor(min / 60)} hr ago`;
+  return dayLabel(localYmd(t));
 }
 
 /** Add days to 'YYYY-MM-DD'. */
@@ -78,23 +80,15 @@ export function addDays(ymd, n) {
   return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
 }
 
-/** Today in China time, 'YYYY-MM-DD'. */
-export function todayCN(now = Date.now()) {
-  return new Date(now + 8 * 3600000).toISOString().slice(0, 10);
-}
-
-/** The hotel's business day: before 06:00 it is still last night (as for bookings made after midnight). */
+/** The hotel's business day on this device's clock: before 6:00 AM it is still last night. */
 export function businessDay(now = Date.now()) {
-  const t = new Date(now + 8 * 3600000);
-  if (t.getUTCHours() < 6) t.setUTCDate(t.getUTCDate() - 1);
-  return t.toISOString().slice(0, 10);
+  const t = new Date(now);
+  if (t.getHours() < 6) t.setDate(t.getDate() - 1);
+  return localYmd(t.getTime());
 }
 
-/** 0.85 → '85折'; 0.9 → '9折'. */
-export function zhe(discount) {
-  const n = Math.round(discount * 100);
-  return `${n % 10 ? n : n / 10}折`;
-}
+/** '11/6' for a chart axis. */
+const axisDate = (ymd) => `${Number(ymd.slice(5, 7))}/${Number(ymd.slice(8, 10))}`;
 
 const storage = {
   get(key) { try { return localStorage.getItem(key); } catch { return null; } },
@@ -111,21 +105,26 @@ class ApiError extends Error {
 
 async function api(method, path, body) {
   let res;
+  const zone = userTimeZone();
   try {
     res = await fetch(path, {
       method,
-      headers: { Accept: 'application/json', ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}) },
+      headers: {
+        Accept: 'application/json',
+        ...(zone ? { 'X-Time-Zone': zone } : {}),
+        ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+      },
       body: body !== undefined ? JSON.stringify(body) : undefined,
       cache: 'no-store',
     });
   } catch {
-    throw new ApiError(0, 'network', '网络好像断了，稍后再试。');
+    throw new ApiError(0, 'network', "Looks like you're offline. Try again soon.");
   }
   let data = null;
   try { data = await res.json(); } catch { data = null; }
   if (!res.ok) {
     const err = data?.error || {};
-    throw new ApiError(res.status, err.code || `http_${res.status}`, err.message || `请求失败（${res.status}）`);
+    throw new ApiError(res.status, err.code || `http_${res.status}`, err.message || `Request failed (${res.status})`);
   }
   return data || {};
 }
@@ -149,7 +148,7 @@ function actionButton(label, cls, run, attrs = {}) {
     try {
       await run();
     } catch (err) {
-      if (err.code !== 'empty') toast(err.message || '没办成，稍后再试。');
+      if (err.code !== 'empty') toast(err.message || "Couldn't do that. Try again soon.");
     } finally {
       // Still on screen (a draft filled in, a failure): ready for the next tap.
       if (btn.isConnected) {
@@ -162,9 +161,11 @@ function actionButton(label, cls, run, attrs = {}) {
 }
 
 function stars(rating, size = '') {
-  return h('span', { class: `stars ${size}`, role: 'img', 'aria-label': `${rating} 星` },
+  return h('span', { class: `stars ${size}`, role: 'img', 'aria-label': `${rating} out of 5 stars` },
     [1, 2, 3, 4, 5].map((n) => icon('star', `icon ${n <= Math.round(rating) ? 'is-on' : 'is-off'}`)));
 }
+
+const ourChip = () => h('span', { class: 'chip chip-nanahotel', text: BRAND });
 
 // ---------------------------------------------------------------------------
 // Sheets
@@ -173,7 +174,7 @@ function stars(rating, size = '') {
 function openSheet(title) {
   const previous = document.activeElement;
   const body = h('div', { class: 'sheet-body' });
-  const close = h('button', { type: 'button', class: 'sheet-close', 'aria-label': '关闭' }, icon('close'));
+  const close = h('button', { type: 'button', class: 'sheet-close', 'aria-label': 'Close' }, icon('close'));
   const titleId = `sheet-${Math.random().toString(36).slice(2, 8)}`;
   const dialog = h('dialog', { class: 'modal', 'aria-labelledby': titleId },
     h('div', { class: 'sheet' },
@@ -236,7 +237,14 @@ function niceMax(v) {
   return [1, 2, 2.5, 5, 10].map((k) => k * p).find((m) => m >= v);
 }
 
-const shortMoney = (v) => (v >= 10000 ? `${(v / 10000).toFixed(v >= 100000 ? 0 : 1)}万` : `${Math.round(v)}`);
+/** Every `every`-th day gets a date on the axis, and the last one; a regular one too close to the last is skipped. */
+const axisLabelled = (n, every) => (i) => i === n - 1 || (i % every === 0 && n - 1 - i >= every / 2);
+
+/** Axis money: '$950', '$2.5k', '$12k'. */
+const shortMoney = (v) => (v >= 1000 ? `$${(v / 1000).toFixed(v >= 10000 ? 0 : 1).replace(/\.0$/, '')}k` : `$${Math.round(v)}`);
+
+// The bookings that came through NanaHotel that night (older servers call the field `xiaosu`).
+const ourNights = (p) => Number(p.nanahotel ?? p.xiaosu) || 0;
 
 /** Bars over time; `future` bars are drawn quietly. Every bar is a hit target with a tooltip. */
 function barChart(container, points, { value, label, describe, highlight }) {
@@ -258,6 +266,7 @@ function barChart(container, points, { value, label, describe, highlight }) {
       return text;
     })));
   const every = Math.ceil(points.length / 6);
+  const labelled = axisLabelled(points.length, every);
   points.forEach((p, i) => {
     const v = value(p);
     const x = pad.l + i * step + (step - bw) / 2;
@@ -265,10 +274,10 @@ function barChart(container, points, { value, label, describe, highlight }) {
     // 4px rounded top, square at the baseline.
     const r = Math.min(4, bw / 2, (pad.t + ih - top) / 2);
     const d = `M${x},${pad.t + ih}V${top + r}Q${x},${top} ${x + r},${top}H${x + bw - r}Q${x + bw},${top} ${x + bw},${top + r}V${pad.t + ih}Z`;
-    svg.append(s('path', { class: `bar${highlight?.(p) ? ' is-xiaosu' : ''}`, d: v > 0 ? d : '' }));
-    if (i % every === 0 || i === points.length - 1) {
+    svg.append(s('path', { class: `bar${highlight?.(p) ? ' is-nanahotel' : ''}`, d: v > 0 ? d : '' }));
+    if (labelled(i)) {
       const t = s('text', { x: x + bw / 2, y: H - 6, 'text-anchor': 'middle', class: 'axis-label' });
-      t.textContent = p.date.slice(5).replace('-', '/');
+      t.textContent = axisDate(p.date);
       svg.append(s('g', { class: 'axis' }, t));
     }
     const hit = s('rect', { class: 'hit', x: pad.l + i * step, y: pad.t, width: step, height: ih, tabindex: 0, 'aria-label': describe(p).flat(2).join(' ') });
@@ -314,11 +323,11 @@ function lineChart(container, past, future, { value, threshold, label, describe 
     t.textContent = threshold.label;
     svg.append(t);
   }
-  const every = Math.ceil(all.length / 6);
+  const labelled = axisLabelled(all.length, Math.ceil(all.length / 6));
   all.forEach((p, i) => {
-    if (i % every && i !== all.length - 1) return;
+    if (!labelled(i)) return;
     const t = s('text', { x: x(i), y: H - 6, 'text-anchor': 'middle' });
-    t.textContent = p.date.slice(5).replace('-', '/');
+    t.textContent = axisDate(p.date);
     svg.append(s('g', { class: 'axis' }, t));
   });
   const cross = s('line', { class: 'cross', y1: pad.t, y2: pad.t + ih, visibility: 'hidden' });
@@ -337,7 +346,7 @@ function lineChart(container, past, future, { value, threshold, label, describe 
     cross.setAttribute('visibility', 'visible');
     dot.setAttribute('visibility', 'visible');
   };
-  const hit = s('rect', { class: 'hit', x: pad.l - 8, y: pad.t, width: iw + 16, height: ih, tabindex: 0, 'aria-label': `${label}，用左右方向键查看每一天` });
+  const hit = s('rect', { class: 'hit', x: pad.l - 8, y: pad.t, width: iw + 16, height: ih, tabindex: 0, 'aria-label': `${label}. Use the left and right arrow keys to read each day.` });
   let focusIndex = past.length ? past.length - 1 : 0;
   const show = (i, cx, cy) => {
     point(i);
@@ -365,7 +374,7 @@ function lineChart(container, past, future, { value, threshold, label, describe 
 /** The data behind a chart as a table, folded away (tooltips enhance, they never gate). */
 function dataTable(caption, head, rows) {
   return h('details', { class: 'chart-table' },
-    h('summary', { class: 'panel-note', text: '查看数据' }),
+    h('summary', { class: 'panel-note', text: 'Show data' }),
     h('table', { class: 'm-table' },
       h('caption', { class: 'sr-only', text: caption }),
       h('thead', {}, h('tr', {}, head.map((t) => h('th', { scope: 'col', text: t })))),
@@ -397,6 +406,8 @@ const state = {
   hotelId: null,
   tab: 'overview',
   days: 30,
+  // The hotel's own "today", as its server reports it (its zone and its 6 AM rule); the device's until then.
+  today: null,
   roomDate: null,
   roomFilter: null,
   ticketFilter: null,
@@ -407,6 +418,8 @@ const state = {
 };
 
 let els = {};
+
+const hotelToday = () => state.today || businessDay();
 
 // ---------------------------------------------------------------------------
 // Overview
@@ -422,36 +435,36 @@ function deltaChip(change) {
 function renderOverview(d) {
   const k = d.kpis || {};
   const series = (d.series || []).slice(-state.days);
-  const range = h('div', { class: 'chart-toggle', role: 'group', 'aria-label': '时间范围' },
-    [7, 30].map((n) => h('button', { type: 'button', 'aria-pressed': String(state.days === n), onclick: () => { state.days = n; render(); } }, `近${n}天`)));
+  const range = h('div', { class: 'chart-toggle', role: 'group', 'aria-label': 'Date range' },
+    [7, 30].map((n) => h('button', { type: 'button', 'aria-pressed': String(state.days === n), onclick: () => { state.days = n; render(); } }, `${n} days`)));
 
   const kpis = h('div', { class: 'kpis' },
     h('div', { class: 'panel kpi kpi-hero' },
-      h('span', { class: 'kpi-label', text: '今晚入住率' }),
+      h('span', { class: 'kpi-label', text: 'Occupancy tonight' }),
       h('span', { class: 'kpi-value', text: pct(k.occupancy) }),
-      h('span', { class: 'kpi-foot' }, deltaChip(k.vsLastWeek?.occupancy), '比上周同日'),
+      h('span', { class: 'kpi-foot' }, deltaChip(k.vsLastWeek?.occupancy), 'vs. last week'),
       h('div', { class: 'stat-row' },
-        [['预抵', k.arrivals], ['预离', k.departures], ['在住', k.inHouse]].map(([label, n]) => h('div', { class: 'stat' },
+        [['Arrivals', k.arrivals], ['Departures', k.departures], ['In house', k.inHouse]].map(([label, n]) => h('div', { class: 'stat' },
           h('span', { class: 'stat-k', text: label }), h('span', { class: 'stat-v', text: n ?? '—' }))))),
     h('div', { class: 'panel kpi' },
-      h('span', { class: 'kpi-label', text: '今日营收' }),
-      h('span', { class: 'kpi-value', text: yuan(k.revenue) }),
-      h('span', { class: 'kpi-foot' }, deltaChip(k.vsLastWeek?.revenue), '比上周同日')),
+      h('span', { class: 'kpi-label', text: 'Revenue today' }),
+      h('span', { class: 'kpi-value', text: money(k.revenue) }),
+      h('span', { class: 'kpi-foot' }, deltaChip(k.vsLastWeek?.revenue), 'vs. last week')),
     h('div', { class: 'panel kpi' },
-      h('span', { class: 'kpi-label', text: '平均房价 ADR' }),
-      h('span', { class: 'kpi-value', text: yuan(k.adr) }),
-      h('span', { class: 'kpi-foot', text: `RevPAR ${yuan(k.revpar)}` })),
+      h('span', { class: 'kpi-label', text: 'Average rate (ADR)' }),
+      h('span', { class: 'kpi-value', text: money(k.adr) }),
+      h('span', { class: 'kpi-foot', text: `RevPAR ${money(k.revpar)}` })),
     h('div', { class: 'panel kpi' },
-      h('span', { class: 'kpi-label', text: '评分' }),
+      h('span', { class: 'kpi-label', text: 'Rating' }),
       h('span', { class: 'kpi-value', text: Number.isFinite(k.rating) ? k.rating.toFixed(1) : '—' }),
-      h('span', { class: 'kpi-foot', text: `${k.reviewCount ?? 0} 条点评` })),
+      h('span', { class: 'kpi-foot', text: plural(k.reviewCount ?? 0, 'review') })),
     h('button', { type: 'button', class: 'panel kpi kpi-link', onclick: () => go('tickets') },
-      h('span', { class: 'kpi-label', text: '工单进行中' }),
+      h('span', { class: 'kpi-label', text: 'Open requests' }),
       h('span', { class: 'kpi-value', text: String(k.openTickets ?? 0) }),
-      h('span', { class: 'kpi-foot' }, '去处理', icon('chevron', 'icon icon-xs'))));
+      h('span', { class: 'kpi-foot' }, 'View requests', icon('chevron', 'icon icon-xs'))));
 
   const insights = (d.insights || []).length ? h('section', { class: 'panel' },
-    h('p', { class: 'panel-title', text: '小宿经营建议' }),
+    h('p', { class: 'panel-title', text: 'Tips from Nana' }),
     h('div', { class: 'insights' }, d.insights.map((it) => h('div', { class: `insight insight-${it.level || 'tip'}` },
       h('span', { class: 'insight-mark', 'aria-hidden': 'true' }, icon(it.level === 'warn' ? 'alert' : it.level === 'good' ? 'check' : 'sparkle', 'icon icon-xs')),
       h('div', {},
@@ -460,54 +473,54 @@ function renderOverview(d) {
         it.action ? h('button', { type: 'button', class: 'm-btn m-btn-quiet insight-act', onclick: () => go(it.action.tab) }, it.action.label, icon('chevron', 'icon icon-xs')) : null))))) : null;
 
   const revenue = h('section', { class: 'panel' },
-    h('p', { class: 'panel-title', text: '每日营收' }),
-    h('p', { class: 'panel-note', text: '亮色柱是有小宿订单的日子' }),
+    h('p', { class: 'panel-title', text: 'Daily revenue' }),
+    h('p', { class: 'panel-note', text: `Brighter bars are nights with ${BRAND} bookings` }),
     chartSlot((el) => barChart(el, series, {
       value: (p) => p.revenue,
-      label: `近${state.days}天每日营收`,
-      highlight: (p) => p.xiaosu > 0,
-      describe: (p) => [dayLabel(p.date, true), [['营收', yuan(p.revenue)], ['入住率', pct(p.occupancy)], ['平均房价', yuan(p.adr)], ['小宿间夜', String(p.xiaosu || 0)]]],
+      label: `Daily revenue, last ${state.days} days`,
+      highlight: (p) => ourNights(p) > 0,
+      describe: (p) => [dayLabel(p.date, true), [['Revenue', money(p.revenue)], ['Occupancy', pct(p.occupancy)], ['Average rate', money(p.adr)], [`${BRAND} room nights`, String(ourNights(p))]]],
     })),
-    dataTable('每日营收', ['日期', '营收', '入住率', '小宿间夜'], series.map((p) => [dayLabel(p.date), yuan(p.revenue), pct(p.occupancy), String(p.xiaosu || 0)])));
+    dataTable('Daily revenue', ['Date', 'Revenue', 'Occupancy', `${BRAND} nights`], series.map((p) => [dayLabel(p.date), money(p.revenue), pct(p.occupancy), String(ourNights(p))])));
 
   const forecast = d.forecast || [];
   const occupancy = h('section', { class: 'panel' },
-    h('p', { class: 'panel-title', text: '入住率' }),
-    h('p', { class: 'panel-note', text: `实线是近${state.days}天，虚线是未来 14 天预测（已订 + 预计）` }),
+    h('p', { class: 'panel-title', text: 'Occupancy' }),
+    h('p', { class: 'panel-note', text: `Solid: last ${state.days} days. Dashed: the next 14 nights (booked + expected).` }),
     chartSlot((el) => lineChart(el, series, forecast, {
       value: (p) => p.occupancy,
-      threshold: { value: 0.9, label: '满房预警 90%' },
-      label: '入住率走势和预测',
-      describe: (p, isForecast) => [dayLabel(p.date, true), [[isForecast ? '预测入住率' : '入住率', pct(p.occupancy)]]],
+      threshold: { value: 0.9, label: 'Sell-out alert 90%' },
+      label: 'Occupancy trend and forecast',
+      describe: (p, isForecast) => [dayLabel(p.date, true), [[isForecast ? 'Forecast' : 'Occupancy', pct(p.occupancy)]]],
     })),
-    dataTable('未来 14 天预测入住率', ['日期', '预测入住率'], forecast.map((p) => [dayLabel(p.date, true), pct(p.occupancy)])));
+    dataTable('Forecast occupancy, next 14 nights', ['Date', 'Forecast'], forecast.map((p) => [dayLabel(p.date, true), pct(p.occupancy)])));
 
   const channels = [...(d.channels || [])].sort((a, b) => CHANNEL_ORDER.indexOf(a.key) - CHANNEL_ORDER.indexOf(b.key));
-  const stack = h('div', { class: 'stack', role: 'img', 'aria-label': channels.map((c) => `${c.label} ${pct(c.share)}`).join('，') },
+  const stack = h('div', { class: 'stack', role: 'img', 'aria-label': channels.map((c) => `${c.label} ${pct(c.share)}`).join(', ') },
     channels.map((c) => {
       const seg = h('span', { class: `ch-${c.key}`, style: `flex:${Math.max(c.share, 0.01)}`, tabindex: 0, 'aria-label': `${c.label} ${pct(c.share)}` });
-      bindTip(seg, () => [c.label, [['占比', pct(c.share)], ['间夜', String(c.nights ?? '—')]]]);
+      bindTip(seg, () => [c.label, [['Share', pct(c.share)], ['Room nights', String(c.nights ?? '—')]]]);
       return seg;
     }));
   const channelPanel = h('section', { class: 'panel' },
-    h('p', { class: 'panel-title', text: '订单来源' }),
-    h('p', { class: 'panel-note', text: `近${state.days}天间夜占比` }),
+    h('p', { class: 'panel-title', text: 'Booking channels' }),
+    h('p', { class: 'panel-note', text: `Share of room nights, last ${state.days} days` }),
     stack,
     h('div', { class: 'legend' }, channels.map((c) => h('span', { class: 'legend-item' },
       h('span', { class: `swatch ch-${c.key}`, 'aria-hidden': 'true' }), h('span', { text: `${c.label} ${pct(c.share)}` })))));
 
   const arrivals = h('section', { class: 'panel' },
-    h('p', { class: 'panel-title', text: '今日预抵' }),
+    h('p', { class: 'panel-title', text: "Today's arrivals" }),
     (d.arrivals || []).length ? h('ul', { class: 'rows' }, d.arrivals.slice(0, 8).map((a) => h('li', {},
       h('span', { class: 'row-main' },
-        h('span', { class: 'row-title', text: `${a.guest} · ${a.roomType || ''}` }),
-        h('span', { class: 'row-sub', text: [`${a.nights || 1}晚`, a.eta ? `预计 ${a.eta} 到` : ''].filter(Boolean).join(' · ') })),
-      a.source === 'xiaosu' ? h('span', { class: 'chip chip-xiaosu', text: '小宿' }) : null,
-      h('span', { class: `chip ${a.status === 'checked_in' ? 'chip-ok' : 'chip-info'}`, text: a.status === 'checked_in' ? '已入住' : '待入住' }))))
-      : h('p', { class: 'empty', text: '今天没有预抵' }));
+        h('span', { class: 'row-title', text: [a.guest, a.roomType].filter(Boolean).join(' · ') }),
+        h('span', { class: 'row-sub', text: [plural(a.nights || 1, 'night'), a.eta ? `ETA ${wallTime(a.eta)}` : ''].filter(Boolean).join(' · ') })),
+      a.source === 'nanahotel' ? ourChip() : null,
+      h('span', { class: `chip ${a.status === 'checked_in' ? 'chip-ok' : 'chip-info'}`, text: a.status === 'checked_in' ? 'Checked in' : 'Expected' }))))
+      : h('p', { class: 'empty', text: 'No arrivals today' }));
 
   return [
-    h('div', { class: 'm-section-head' }, h('div', {}, h('h2', { class: 'm-h2', text: '经营概览' }), h('p', { class: 'm-sub', text: dayLabel(d.date, true) })), range),
+    h('div', { class: 'm-section-head' }, h('div', {}, h('h2', { class: 'm-h2', text: 'Overview' }), h('p', { class: 'm-sub', text: dayLabel(d.date, true) })), range),
     kpis,
     insights ? h('div', { style: 'height:12px' }) : null,
     insights,
@@ -520,27 +533,28 @@ function renderOverview(d) {
 // ---------------------------------------------------------------------------
 
 function renderRooms(d) {
-  const today = state.roomDate || d.date;
-  const dates = [0, 1, 2].map((n) => addDays(businessDay(), n));
-  const dateSeg = h('div', { class: 'seg', role: 'group', 'aria-label': '日期' }, dates.map((date, i) => h('button', {
-    type: 'button', 'aria-pressed': String(date === today), onclick: () => { state.roomDate = date; load(); },
-  }, ['今天', '明天', '后天'][i], h('span', { class: 'count', text: dayLabel(date) }))));
+  const shown = state.roomDate || d.date;
+  const today = hotelToday();
+  const dates = [0, 1, 2].map((n) => addDays(today, n));
+  const dateSeg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Date' }, dates.map((date, i) => h('button', {
+    type: 'button', 'aria-pressed': String(date === shown), onclick: () => { state.roomDate = date; load(); },
+  }, ['Today', 'Tomorrow', formatDate(date).split(',')[0]][i], h('span', { class: 'count', text: dayLabel(date) }))));
   const counts = d.counts || {};
-  const legend = h('div', { class: 'room-legend', role: 'group', 'aria-label': '按状态筛选' }, ROOM_ORDER.map((st) => h('button', {
+  const legend = h('div', { class: 'room-legend', role: 'group', 'aria-label': 'Filter by status' }, ROOM_ORDER.map((st) => h('button', {
     type: 'button', class: `st-${st}`, 'aria-pressed': String(state.roomFilter === st),
     onclick: () => { state.roomFilter = state.roomFilter === st ? null : st; render(); },
   }, h('span', { class: 'st-dot', 'aria-hidden': 'true' }), ROOM_STATES[st], h('span', { class: 'count', text: counts[st] ?? 0 }))));
   const floors = (d.floors || []).map((f) => {
     const occupied = f.rooms.filter((r) => ['occupied', 'departing'].includes(r.status)).length;
     return h('section', { class: 'floor' },
-      h('div', { class: 'floor-head' }, h('span', { class: 'floor-name', text: `${f.floor} 层` }), h('span', { class: 'floor-meta', text: `${occupied}/${f.rooms.length} 在住` })),
+      h('div', { class: 'floor-head' }, h('span', { class: 'floor-name', text: `Floor ${f.floor}` }), h('span', { class: 'floor-meta', text: `${occupied}/${f.rooms.length} occupied` })),
       h('div', { class: 'room-grid' }, f.rooms.map((r) => {
         const dim = state.roomFilter && r.status !== state.roomFilter;
         return h('button', {
           type: 'button',
-          class: `room st-${r.status}${r.guest?.source === 'xiaosu' ? ' is-xiaosu' : ''}${dim ? ' is-dim' : ''}`,
-          'aria-label': `${r.number} 房，${ROOM_STATES[r.status] || r.status}${r.guest ? `，${r.guest.name}` : ''}${r.tickets ? `，${r.tickets} 张工单` : ''}`,
-          onclick: () => openRoom(r, today),
+          class: `room st-${r.status}${r.guest?.source === 'nanahotel' ? ' is-nanahotel' : ''}${dim ? ' is-dim' : ''}`,
+          'aria-label': `Room ${r.number}, ${ROOM_STATES[r.status] || r.status}${r.guest ? `, ${r.guest.name}` : ''}${r.guest?.source === 'nanahotel' ? `, ${BRAND} guest` : ''}${r.tickets ? `, ${plural(r.tickets, 'open request')}` : ''}`,
+          onclick: () => openRoom(r, shown),
         },
         r.tickets ? h('span', { class: 'room-dot', 'aria-hidden': 'true' }) : null,
         h('span', { class: 'room-no', text: r.number }),
@@ -549,22 +563,25 @@ function renderRooms(d) {
       })));
   });
   return [
-    h('div', { class: 'm-section-head' }, h('div', {}, h('h2', { class: 'm-h2', text: '房态与入住' }), h('p', { class: 'm-sub', text: `${dayLabel(today, true)} · 金色边框是小宿的客人` }))),
+    h('div', { class: 'm-section-head' }, h('div', {}, h('h2', { class: 'm-h2', text: 'Rooms & check-in' }), h('p', { class: 'm-sub', text: `${dayLabel(shown, true)} · Gold outline: a ${BRAND} guest` }))),
     h('div', { class: 'panel' }, dateSeg, h('div', { style: 'height:10px' }), legend),
-    floors.length ? floors : h('p', { class: 'empty', text: '没有房间数据' }),
+    floors.length ? floors : h('p', { class: 'empty', text: 'No room data' }),
   ];
 }
 
 function openRoom(room, date) {
-  const ctl = openSheet(`${room.number} 房`);
+  const ctl = openSheet(`Room ${room.number}`);
   const g = room.guest;
   const st = room.status;
-  ctl.body.append(
-    h('div', { class: 'kv' }, h('span', { class: 'kv-k', text: '房型' }), h('span', { text: room.roomType || '—' })),
-    h('div', { class: 'kv' }, h('span', { class: 'kv-k', text: '状态' }), h('span', {}, h('span', { class: `chip st-${st}` }, h('span', { class: 'st-dot', 'aria-hidden': 'true' }), ROOM_STATES[st] || st))),
-    g ? h('div', { class: 'kv' }, h('span', { class: 'kv-k', text: '客人' }), h('span', {}, g.name, ' ', g.source === 'xiaosu' ? h('span', { class: 'chip chip-xiaosu', text: '小宿' }) : null)) : null,
-    g ? h('div', { class: 'kv' }, h('span', { class: 'kv-k', text: '日期' }), h('span', { text: `${dayLabel(g.checkIn)} – ${dayLabel(g.checkOut)}` })) : null,
-    room.tickets ? h('div', { class: 'kv' }, h('span', { class: 'kv-k', text: '工单' }), h('span', { text: `${room.tickets} 张进行中` })) : null);
+  const kv = (label, ...value) => h('div', { class: 'kv' }, h('span', { class: 'kv-k', text: label }), h('span', {}, ...value));
+  // append() would print a null as the text "null".
+  ctl.body.append(...[
+    kv('Room type', room.roomType || '—'),
+    kv('Status', h('span', { class: `chip st-${st}` }, h('span', { class: 'st-dot', 'aria-hidden': 'true' }), ROOM_STATES[st] || st)),
+    g ? kv('Guest', g.name, ' ', g.source === 'nanahotel' ? ourChip() : null) : null,
+    g ? kv('Dates', formatRange(g.checkIn, g.checkOut, { weekday: false })) : null,
+    room.tickets ? kv('Requests', `${room.tickets} open`) : null,
+  ].filter(Boolean));
   const acts = h('div', { class: 'sheet-acts' });
   const act = (label, cls, body, done) => acts.append(actionButton(label, `${cls} m-btn-block`, async () => {
     await api('POST', hotelPath(`/rooms/${encodeURIComponent(room.number)}`), body);
@@ -572,10 +589,12 @@ function openRoom(room, date) {
     toast(done);
     load();
   }, { 'data-action': `room-${body.action}` }));
-  if (st === 'arriving' && g?.source === 'xiaosu' && g.orderId && date === businessDay()) act('办理入住', 'm-btn-gold', { action: 'check_in', orderId: g.orderId }, `${room.number} 房已入住，客人那边也收到了`);
-  if (st === 'dirty') act('标记已打扫', 'm-btn-gold', { action: 'clean' }, `${room.number} 房已打扫`);
-  if (st === 'vacant') act('设为维修', 'm-btn-ghost', { action: 'ooo' }, `${room.number} 房设为维修`);
-  if (st === 'ooo') act('恢复可售', 'm-btn-gold', { action: 'release' }, `${room.number} 房恢复可售`);
+  if (st === 'arriving' && g?.source === 'nanahotel' && g.orderId && date === hotelToday()) {
+    act('Check in', 'm-btn-gold', { action: 'check_in', orderId: g.orderId }, `Room ${room.number} checked in. The guest has been told.`);
+  }
+  if (st === 'dirty') act('Mark clean', 'm-btn-gold', { action: 'clean' }, `Room ${room.number} marked clean`);
+  if (st === 'vacant') act('Set out of order', 'm-btn-ghost', { action: 'ooo' }, `Room ${room.number} set out of order`);
+  if (st === 'ooo') act('Back in service', 'm-btn-gold', { action: 'release' }, `Room ${room.number} is back in service`);
   if (acts.childElementCount) ctl.body.append(acts);
 }
 
@@ -588,36 +607,37 @@ function renderTickets(d) {
   const counts = { new: 0, doing: 0, done: 0 };
   for (const t of tickets) if (t.status in counts) counts[t.status] += 1;
   const filter = state.ticketFilter || (counts.new ? 'new' : counts.doing ? 'doing' : 'new');
-  const seg = h('div', { class: 'seg', role: 'group', 'aria-label': '工单状态' }, ['new', 'doing', 'done'].map((st) => h('button', {
+  const seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Request status' }, ['new', 'doing', 'done'].map((st) => h('button', {
     type: 'button', 'aria-pressed': String(filter === st), onclick: () => { state.ticketFilter = st; render(); },
   }, TICKET_STATES[st], h('span', { class: 'count', text: counts[st] }))));
   const shown = tickets.filter((t) => (filter === 'done' ? ['done', 'declined'].includes(t.status) : t.status === filter));
   const now = Date.now();
   const list = shown.map((t) => {
     const waited = Math.round((now - Date.parse(t.createdAt)) / 60000);
+    const ours = t.source === 'nanahotel';
     return h('article', { class: `panel ticket${t.status === 'new' ? ' is-new' : ''}`, 'data-ticket': t.id, 'data-status': t.status },
-      h('div', { class: 'ticket-room' }, h('b', { text: t.roomNumber || '—' }), h('small', { text: '房' })),
+      h('div', { class: 'ticket-room' }, h('small', { text: 'Room' }), h('b', { text: t.roomNumber || '—' })),
       h('div', {},
         h('div', { class: 'ticket-top' },
           h('span', { class: 'ticket-title', text: t.title }),
           h('span', { class: 'chip', text: TICKET_KINDS[t.kind] || t.kind }),
-          t.source === 'xiaosu' ? h('span', { class: 'chip chip-xiaosu', text: '小宿' }) : h('span', { class: 'chip', text: '前台电话' })),
+          ours ? ourChip() : h('span', { class: 'chip', text: 'By phone' })),
         h('p', { class: 'ticket-meta' },
-          `${t.guest || ''} · ${ago(t.createdAt)}`,
-          t.status === 'new' && waited >= 10 ? h('span', { class: 'wait-long', text: ` · 已等 ${waited} 分钟` }) : null,
-          t.dueAt ? ` · ${new Date(t.dueAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Shanghai' })}` : ''),
+          [t.guest, ago(t.createdAt)].filter(Boolean).join(' · '),
+          t.status === 'new' && waited >= 10 ? h('span', { class: 'wait-long', text: ` · waiting ${waited} min` }) : null,
+          t.dueAt ? ` · due ${clockTime(t.dueAt, t.timeZone)}` : ''),
         t.note ? h('p', { class: 'ticket-note', text: t.note }) : null,
         (t.actions || []).length ? h('div', { class: 'ticket-acts' }, t.actions.map((a, i) => actionButton(ACTION_LABELS[a] || a, i === 0 ? 'm-btn-gold' : 'm-btn-ghost', async () => {
           const res = await api('POST', hotelPath(`/tickets/${encodeURIComponent(t.id)}`), { action: a });
-          toast(`${t.roomNumber || ''} ${ACTION_LABELS[a] || ''}${t.source === 'xiaosu' ? '，客人那边已更新' : ''}`);
+          toast(`${t.roomNumber ? `Room ${t.roomNumber}: ` : ''}${ACTION_DONE[a] || a}${ours ? '. The guest sees it too.' : ''}`);
           if (res.ticket) state.ticketFilter = res.ticket.status === 'done' || res.ticket.status === 'declined' ? filter : res.ticket.status;
           load();
         }, { 'data-action': `ticket-${a}` }))) : null));
   });
   return [
-    h('div', { class: 'm-section-head' }, h('div', {}, h('h2', { class: 'm-h2', text: '住客服务工单' }), h('p', { class: 'm-sub', text: '小宿客人的请求会实时出现在这里' }))),
+    h('div', { class: 'm-section-head' }, h('div', {}, h('h2', { class: 'm-h2', text: 'Guest requests' }), h('p', { class: 'm-sub', text: `Requests from ${BRAND} guests show up here right away` }))),
     seg,
-    h('div', { class: 'tickets', style: 'margin-top:12px' }, list.length ? list : h('p', { class: 'empty', text: filter === 'new' ? '没有待处理的工单，喝口茶吧' : '这里是空的' })),
+    h('div', { class: 'tickets', style: 'margin-top:12px' }, list.length ? list : h('p', { class: 'empty', text: filter === 'new' ? 'No new requests. Time for a coffee.' : 'Nothing here' })),
   ];
 }
 
@@ -629,42 +649,43 @@ function renderReviews({ reviews: r, promotions: p }) {
   const sum = r.summary || {};
   const total = sum.count || 0;
   const summary = h('section', { class: 'panel' },
-    h('div', { class: 'rating-big' }, h('span', { class: 'rating-num', text: Number.isFinite(sum.rating) ? sum.rating.toFixed(1) : '—' }), stars(sum.rating || 0), h('span', { class: 'panel-note', text: `${total} 条点评` })),
+    h('div', { class: 'rating-big' }, h('span', { class: 'rating-num', text: Number.isFinite(sum.rating) ? sum.rating.toFixed(1) : '—' }), stars(sum.rating || 0), h('span', { class: 'panel-note', text: plural(total, 'review') })),
     h('div', { class: 'dist' }, [5, 4, 3, 2, 1].map((n) => {
       const c = sum.distribution?.[n] || 0;
-      return h('div', { class: 'dist-row' }, h('span', { text: `${n} 星` }),
+      return h('div', { class: 'dist-row' }, h('span', { text: `${n} ★`, 'aria-label': plural(n, 'star') }),
         h('span', { class: 'dist-track' }, h('span', { class: 'dist-fill', style: `width:${total ? (c / total) * 100 : 0}%` })),
-        h('span', { class: 'num', text: String(c) }));
+        h('span', { class: 'num', text: c.toLocaleString('en-US') }));
     })),
     (sum.tags || []).length ? h('div', { class: 'tags' }, sum.tags.slice(0, 8).map((t) => h('span', { class: 'chip', text: `${t.tag} ${t.count}` }))) : null);
 
   const list = (r.reviews || []).map((rv) => {
     const box = h('div', { class: 'review-slot' });
+    const ours = rv.source === 'nanahotel';
     const drawReply = () => {
       if (rv.reply) {
-        box.replaceChildren(h('div', { class: 'review-reply' }, h('b', { text: '酒店回复：' }), rv.reply.text));
+        box.replaceChildren(h('div', { class: 'review-reply' }, h('b', { text: 'Hotel reply: ' }), rv.reply.text));
         return;
       }
-      const open = h('button', { type: 'button', class: 'm-btn m-btn-quiet', 'data-action': 'open-reply' }, '回复');
+      const open = h('button', { type: 'button', class: 'm-btn m-btn-quiet', 'data-action': 'open-reply' }, 'Reply');
       open.addEventListener('click', () => {
-        const input = h('textarea', { maxlength: 300, 'aria-label': '回复内容', placeholder: '写点什么，客人会看到' });
+        const input = h('textarea', { maxlength: 300, 'aria-label': 'Your reply', placeholder: 'Write a reply. The guest will see it.' });
         const err = h('p', { class: 'form-error', role: 'alert', hidden: true });
         box.replaceChildren(h('div', { class: 'reply-box' }, input, err, h('div', { class: 'reply-acts' },
-          actionButton('小宿帮我写', 'm-btn-ghost', async () => {
+          actionButton('Draft with Nana', 'm-btn-ghost', async () => {
             const data = await api('POST', hotelPath(`/reviews/${encodeURIComponent(rv.id)}/draft-reply`), {});
             input.value = data.text || '';
             input.focus();
           }, { 'data-action': 'draft-reply' }),
-          actionButton('发布回复', 'm-btn-gold', async () => {
+          actionButton('Post reply', 'm-btn-gold', async () => {
             const text = input.value.trim();
             if (!text) {
-              err.textContent = '先写点内容';
+              err.textContent = 'Write something first';
               err.hidden = false;
-              throw new ApiError(0, 'empty', '先写点内容');
+              throw new ApiError(0, 'empty', 'Write something first');
             }
             const data = await api('POST', hotelPath(`/reviews/${encodeURIComponent(rv.id)}/reply`), { text });
             rv.reply = data.review?.reply || { text };
-            toast(rv.source === 'xiaosu' ? '已回复，客人在小宿里能看到' : '已回复');
+            toast(ours ? `Replied. The guest sees it in ${BRAND}.` : 'Replied');
             drawReply();
           }, { 'data-action': 'send-reply' }))));
         input.focus();
@@ -674,8 +695,8 @@ function renderReviews({ reviews: r, promotions: p }) {
     drawReply();
     return h('article', { class: 'panel review', 'data-review': rv.id },
       h('div', { class: 'review-top' },
-        h('span', { class: 'review-who', text: rv.guest || '客人' }), stars(rv.rating),
-        rv.source === 'xiaosu' ? h('span', { class: 'chip chip-xiaosu', text: '小宿' }) : null,
+        h('span', { class: 'review-who', text: rv.guest || 'Guest' }), stars(rv.rating),
+        ours ? ourChip() : null,
         h('span', { class: 'review-when', text: [rv.roomType, ago(rv.at)].filter(Boolean).join(' · ') })),
       h('p', { class: 'review-text', text: rv.text }),
       (rv.tags || []).length ? h('div', { class: 'tags' }, rv.tags.map((t) => h('span', { class: 'chip', text: t }))) : null,
@@ -683,80 +704,81 @@ function renderReviews({ reviews: r, promotions: p }) {
   });
 
   const promos = (p.promotions || []).map((pr) => {
-    const sw = h('button', { type: 'button', class: 'switch', role: 'switch', 'aria-checked': String(Boolean(pr.active)), 'aria-label': `${pr.title} ${pr.active ? '已开启' : '已关闭'}`, 'data-action': 'toggle-promo' });
+    const sw = h('button', { type: 'button', class: 'switch', role: 'switch', 'aria-checked': String(Boolean(pr.active)), 'aria-label': `${pr.title}: ${pr.active ? 'on' : 'off'}`, 'data-action': 'toggle-promo' });
     sw.addEventListener('click', async () => {
       sw.disabled = true;
       try {
         await api('POST', hotelPath(`/promotions/${encodeURIComponent(pr.id)}`), { active: !pr.active });
-        toast(!pr.active ? '特惠已开启，旅客搜索时就能看到' : '特惠已关闭');
+        toast(!pr.active ? 'Deal is on. Guests see it when they search.' : 'Deal is off');
         load();
       } catch (err) {
         toast(err.message);
         sw.disabled = false;
       }
     });
+    const views = pr.stats?.views ?? 0;
     return h('div', { class: 'panel promo', 'data-promo': pr.id },
       h('div', {},
-        h('span', { class: 'promo-off', text: zhe(pr.discount) }), ' ',
+        h('span', { class: 'promo-off', text: percentOff(pr.discount) }), ' ',
         h('span', { class: 'promo-title', text: pr.title }),
-        h('p', { class: 'promo-meta', text: `${dayLabel(pr.from)} – ${dayLabel(pr.to)} · 浏览 ${pr.stats?.views ?? 0} · 成交 ${pr.stats?.orders ?? 0} 单` })),
+        h('p', { class: 'promo-meta', text: `${formatRange(pr.from, pr.to, { weekday: false })} · ${plural(views, 'view')} · ${plural(pr.stats?.orders ?? 0, 'booking')}` })),
       sw);
   });
 
   return [
-    h('div', { class: 'm-section-head' }, h('div', {}, h('h2', { class: 'm-h2', text: '点评' }), h('p', { class: 'm-sub', text: '小宿客人的点评会带「小宿」标记，回复他们能看到' }))),
-    h('div', { class: 'm-grid' }, summary, list.length ? list : h('p', { class: 'empty', text: '还没有点评' })),
+    h('div', { class: 'm-section-head' }, h('div', {}, h('h2', { class: 'm-h2', text: 'Reviews' }), h('p', { class: 'm-sub', text: `Reviews from ${BRAND} guests carry the ${BRAND} tag, and they see your replies` }))),
+    h('div', { class: 'm-grid' }, summary, list.length ? list : h('p', { class: 'empty', text: 'No reviews yet' })),
     h('div', { class: 'm-section-head' },
-      h('div', {}, h('h2', { class: 'm-h2', text: '营销 · 特惠' }), h('p', { class: 'm-sub', text: '开启后，小宿里搜到这家酒店会显示特惠价' })),
-      h('button', { type: 'button', class: 'm-btn m-btn-gold', 'data-action': 'new-promo', onclick: openPromoForm }, icon('tag', 'icon icon-xs'), '新建特惠')),
-    h('div', { class: 'm-grid' }, promos.length ? promos : h('p', { class: 'empty', text: '还没有特惠活动' })),
+      h('div', {}, h('h2', { class: 'm-h2', text: 'Promotions' }), h('p', { class: 'm-sub', text: `While a deal is on, ${BRAND} search shows the deal price` })),
+      h('button', { type: 'button', class: 'm-btn m-btn-gold', 'data-action': 'new-promo', onclick: openPromoForm }, icon('tag', 'icon icon-xs'), 'New deal')),
+    h('div', { class: 'm-grid' }, promos.length ? promos : h('p', { class: 'empty', text: 'No deals yet' })),
   ];
 }
 
 function openPromoForm() {
-  const ctl = openSheet('新建特惠');
-  const today = businessDay();
+  const ctl = openSheet('New deal');
+  const today = hotelToday();
   const presets = [
-    ['今晚', today, today],
-    ['本周末', ...weekend(today)],
-    ['未来 7 天', today, addDays(today, 6)],
-    ['未来 30 天', today, addDays(today, 29)],
+    ['Tonight', today, today],
+    ['This weekend', ...weekend(today)],
+    ['Next 7 days', today, addDays(today, 6)],
+    ['Next 30 days', today, addDays(today, 29)],
   ];
   let discount = 0.85;
   let [, from, to] = presets[2];
-  const title = h('input', { class: 'm-input', id: 'promo-title', maxlength: 12, value: '限时特惠' });
-  const discSeg = h('div', { class: 'seg', role: 'group', 'aria-label': '折扣' });
+  const title = h('input', { class: 'm-input', id: 'promo-title', maxlength: 20, value: 'Limited-time deal' });
+  const discSeg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Discount' });
   const drawDisc = () => discSeg.replaceChildren(...DISCOUNTS.map((dv) => h('button', {
     type: 'button', 'aria-pressed': String(dv === discount), onclick: () => { discount = dv; drawDisc(); },
-  }, zhe(dv))));
+  }, percentOff(dv))));
   drawDisc();
-  const dateSeg = h('div', { class: 'seg', role: 'group', 'aria-label': '日期' });
+  const dateSeg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Stay dates' });
   const drawDates = () => dateSeg.replaceChildren(...presets.map(([label, f, t]) => h('button', {
     type: 'button', 'aria-pressed': String(f === from && t === to), onclick: () => { from = f; to = t; drawDates(); },
-  }, label, h('span', { class: 'count', text: f === t ? dayLabel(f) : `${dayLabel(f)}–${dayLabel(t)}` }))));
+  }, label, h('span', { class: 'count', text: f === t ? dayLabel(f) : formatRange(f, t, { weekday: false, sep: '–' }) }))));
   drawDates();
   const err = h('p', { class: 'form-error', role: 'alert', hidden: true });
   ctl.body.append(h('div', { class: 'form-grid' },
-    h('div', {}, h('label', { class: 'field-label', for: 'promo-title', text: '活动名称' }), title),
-    h('div', {}, h('span', { class: 'field-label', text: '折扣' }), discSeg),
-    h('div', {}, h('span', { class: 'field-label', text: '入住日期' }), dateSeg),
-    h('p', { class: 'panel-note', text: '按每晚房价打折，搜索结果、房型价格和新订单都用特惠价；已经下的订单不变。' }),
+    h('div', {}, h('label', { class: 'field-label', for: 'promo-title', text: 'Deal name' }), title),
+    h('div', {}, h('span', { class: 'field-label', text: 'Discount' }), discSeg),
+    h('div', {}, h('span', { class: 'field-label', text: 'Stay dates' }), dateSeg),
+    h('p', { class: 'panel-note', text: "Takes the discount off each night's rate. Search results, room prices and new bookings use the deal price; bookings already made don't change." }),
     err,
-    actionButton('开启特惠', 'm-btn-gold m-btn-block', async () => {
+    actionButton('Start deal', 'm-btn-gold m-btn-block', async () => {
       try {
-        await api('POST', hotelPath('/promotions'), { title: title.value.trim() || '限时特惠', discount, from, to });
+        await api('POST', hotelPath('/promotions'), { title: title.value.trim() || 'Limited-time deal', discount, from, to });
       } catch (e) {
         err.textContent = e.message;
         err.hidden = false;
         throw e;
       }
       ctl.close();
-      toast('特惠已开启，旅客搜索时就能看到');
+      toast('Deal is on. Guests see it when they search.');
       load();
     }, { 'data-action': 'create-promo' })));
 }
 
-/** This weekend's Friday and Sunday nights (or the rest of it, if it has started). */
+/** This weekend's Friday and Saturday nights (or the rest of it, if it has started). */
 function weekend(today) {
   const [y, m, d] = today.split('-').map(Number);
   const wd = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
@@ -770,15 +792,15 @@ function weekend(today) {
 // ---------------------------------------------------------------------------
 
 function openHotels() {
-  const ctl = openSheet('切换酒店');
+  const ctl = openSheet('Switch hotel');
   ctl.body.append(h('ul', { class: 'rows' }, state.hotels.map((ht) => h('li', {},
     h('button', {
       type: 'button', class: 'row-main', style: 'text-align:left', 'data-hotel': ht.id,
       onclick: () => { ctl.close(); selectHotel(ht.id); },
     },
     h('span', { class: 'row-title', text: ht.name }),
-    h('span', { class: 'row-sub', text: [ht.city, `${ht.rooms} 间房`].filter(Boolean).join(' · ') })),
-    ht.hasGuests ? h('span', { class: 'chip chip-xiaosu', text: '有小宿客人' }) : null,
+    h('span', { class: 'row-sub', text: [ht.city, Number.isFinite(ht.rooms) ? plural(ht.rooms, 'room') : ''].filter(Boolean).join(' · ') })),
+    ht.hasGuests ? h('span', { class: 'chip chip-nanahotel', text: `${BRAND} guests` }) : null,
     ht.id === state.hotelId ? icon('check', 'icon') : null))));
 }
 
@@ -786,12 +808,13 @@ function selectHotel(id) {
   state.hotelId = id;
   storage.set(KEY_HOTEL, id);
   state.data = {};
+  state.today = null;
   state.roomDate = null;
   state.roomFilter = null;
   state.ticketFilter = null;
   const hotel = state.hotels.find((x) => x.id === id);
   els.hotelName.textContent = hotel?.name || id;
-  document.title = `${hotel?.name || '小宿商家版'} · 小宿商家版`;
+  document.title = hotel?.name ? `${hotel.name} · ${CONSOLE_NAME}` : CONSOLE_NAME;
   load();
 }
 
@@ -801,7 +824,8 @@ function selectHotel(id) {
 
 async function fetchTab(tab) {
   if (tab === 'overview') return api('GET', hotelPath('/overview?days=30'));
-  if (tab === 'rooms') return api('GET', hotelPath(`/rooms?date=${state.roomDate || businessDay()}`));
+  // Without a date the server shows the hotel's own today; the date buttons count on from there.
+  if (tab === 'rooms') return api('GET', hotelPath(state.roomDate ? `/rooms?date=${state.roomDate}` : '/rooms'));
   if (tab === 'tickets') return api('GET', hotelPath('/tickets'));
   const [reviews, promotions] = await Promise.all([api('GET', hotelPath('/reviews')), api('GET', hotelPath('/promotions'))]);
   return { reviews, promotions };
@@ -819,6 +843,7 @@ async function load({ quiet = false } = {}) {
     const [data, tickets] = await Promise.all([fetchTab(tab), tab === 'tickets' ? null : api('GET', hotelPath('/tickets')).catch(() => null)]);
     if (seq !== state.seq) return;
     state.data[tab] = data;
+    if ((tab === 'overview' || (tab === 'rooms' && !state.roomDate)) && /^\d{4}-\d{2}-\d{2}$/.test(String(data?.date || ''))) state.today = data.date;
     state.tickets = tab === 'tickets' ? data : tickets || state.tickets;
     render();
   } catch (err) {
@@ -856,7 +881,7 @@ function renderTabs() {
   const pending = (state.tickets?.tickets || []).filter((t) => t.status === 'new').length;
   els.tabs.replaceChildren(...TABS.map((t) => h('button', {
     type: 'button', class: 'm-tab', 'data-tab': t.key, 'aria-current': t.key === state.tab ? 'page' : null, onclick: () => go(t.key),
-  }, icon(t.icon), h('span', { text: t.label }), t.key === 'tickets' && pending ? h('span', { class: 'm-tab-badge', text: pending, 'aria-label': `${pending} 张待处理` }) : null)));
+  }, icon(t.icon), h('span', { text: t.label }), t.key === 'tickets' && pending ? h('span', { class: 'm-tab-badge', text: pending, 'aria-label': `${pending} new` }) : null)));
 }
 
 function go(tab) {
@@ -880,7 +905,7 @@ async function boot() {
   if (TABS.some((t) => t.key === hash)) state.tab = hash;
   renderTabs();
   document.getElementById('m-hotel').addEventListener('click', openHotels);
-  // Back to the traveler side: the same app page without ?view=merchant in the phone apps, the site root on a server.
+  // Back to the guest side: the same app page without ?view=merchant in the phone apps, the site root on a server.
   if (new URLSearchParams(location.search).get('view') === 'merchant') document.getElementById('m-to-guest').href = location.pathname;
   document.addEventListener('visibilitychange', () => { if (!document.hidden) load({ quiet: true }); });
   if (typeof ResizeObserver === 'function') {
@@ -896,7 +921,7 @@ async function boot() {
     const saved = storage.get(KEY_HOTEL);
     selectHotel(state.hotels.some((x) => x.id === saved) ? saved : data.current || state.hotels[0]?.id);
   } catch (err) {
-    els.hotelName.textContent = '小宿商家版';
+    els.hotelName.textContent = CONSOLE_NAME;
     els.main.replaceChildren(h('div', { class: 'error-panel', role: 'alert', text: err.message }));
   }
 }

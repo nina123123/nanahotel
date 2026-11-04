@@ -1,138 +1,198 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildRoomOffer, lowestNightly, dayFactor, findRate, PRICE_DISCLAIMER } from '../src/services/hotels/pricing.js';
-import { HOLIDAYS, holidayOn, isHolidayEve, isMakeupWorkday, upcomingHolidays, findHoliday, describeHoliday, describeUpcomingHolidays, holidayStartingOn } from '../src/services/hotels/holidays.js';
+import { buildRoomOffer, lowestNightly, dayFactor, findRate, cancelPolicy, parseFloors, PRICE_DISCLAIMER, CURRENCY } from '../src/services/hotels/pricing.js';
+import { HOLIDAYS, holidayOn, holidayMultiplier, upcomingHolidays, findHoliday, describeHoliday, describeUpcomingHolidays } from '../src/services/hotels/holidays.js';
 import { CITIES, findCity } from '../src/services/hotels/sim-cities.js';
-import { generateHotels } from '../src/services/hotels/sim-hotels.js';
-import { addDays, dayOfWeek, todayCN } from '../src/util/dates.js';
+import { generateHotels, PRICE_RANGES } from '../src/services/hotels/sim-hotels.js';
+import { addDays, dayOfWeek, todayIn } from '../src/util/dates.js';
 
-const hz = findCity('杭州');
-const sy = findCity('三亚');
-const bj = findCity('北京');
-const hzHotels = generateHotels(hz);
+const ny = findCity('New York');
+const la = findCity('Los Angeles');
+const lv = findCity('Las Vegas');
+const mia = findCity('Miami');
+const nola = findCity('New Orleans');
+const nyHotels = generateHotels(ny);
 const allHotels = CITIES.flatMap((c) => generateHotels(c).map((h) => ({ h, c })));
-const byCat = (cat) => hzHotels.find((h) => h.category === cat);
+const byCat = (cat, list = nyHotels) => list.find((h) => h.category === cat && !h.amenities.includes('Free breakfast'));
+const STAY = { checkIn: '2026-11-10', checkOut: '2026-11-11' };
 
-function r1Nr(hotel, date, city) {
-  const offer = buildRoomOffer(hotel, { checkIn: date, checkOut: addDays(date, 1), city });
-  return offer.roomTypes[0].rates.find((r) => r.rateId === 'R1-BF0-NR').nightly[0].price;
+/** The first room type's cheapest (first) rate for one night. */
+function firstRate(hotel, date, city) {
+  return buildRoomOffer(hotel, { checkIn: date, checkOut: addDays(date, 1), city }).roomTypes[0].rates[0];
+}
+/** Its room rate before taxes and fees (taxesAndFees includes any resort fee). */
+function roomRate(hotel, date, city) {
+  const r = firstRate(hotel, date, city);
+  return r.totalPrice - r.taxesAndFees;
 }
 
 function mean(xs) {
   return xs.reduce((a, b) => a + b, 0) / xs.length;
 }
 
-test('offer shape matches the RoomOffer contract', () => {
-  const hotel = byCat('premium');
-  const offer = buildRoomOffer(hotel, { checkIn: '2026-11-10', checkOut: '2026-11-12', adults: 2, rooms: 1, city: hz });
+test('offer shape matches the RoomOffer contract (USD, all-in nightly prices)', () => {
+  const hotel = byCat('upscale');
+  const offer = buildRoomOffer(hotel, { checkIn: '2026-11-10', checkOut: '2026-11-12', adults: 2, rooms: 1, city: ny });
   assert.equal(offer.hotelId, hotel.id);
   assert.equal(offer.nights, 2);
   assert.equal(offer.demo, true);
+  assert.equal(offer.currency, 'USD');
+  assert.equal(CURRENCY, 'USD');
   assert.equal(offer.priceDisclaimer, PRICE_DISCLAIMER);
-  assert.equal(offer.priceDisclaimer, '价格为模拟数据，仅供演示');
+  assert.equal(PRICE_DISCLAIMER, 'Simulated prices for the demo; totals include taxes and fees');
   for (const rt of offer.roomTypes) {
     assert.match(rt.roomId, /^R\d$/);
     for (const k of ['name', 'bed', 'floor']) assert.equal(typeof rt[k], 'string');
-    assert.ok(['有窗', '无窗', '落地窗'].includes(rt.window));
-    assert.ok(Number.isInteger(rt.areaSqm) && rt.areaSqm >= 14);
+    assert.match(rt.bed, /^\d (?:King|Queen|Double|Twin)/);
+    assert.ok(['Window', 'Interior (no window)', 'Floor-to-ceiling windows'].includes(rt.window), rt.window);
+    assert.ok(Number.isInteger(rt.areaSqft) && rt.areaSqft >= 150, String(rt.areaSqft));
+    assert.equal(rt.areaSqm, Math.round(rt.areaSqft / 10.7639));
+    assert.match(rt.floor, /^Floors \d+–\d+$/);
     assert.ok(rt.maxOccupancy >= 2);
     assert.ok(rt.rates.length >= 2 && rt.rates.length <= 3);
     for (const r of rt.rates) {
       assert.ok(r.rateId.startsWith(`${rt.roomId}-`));
-      assert.ok([0, 1, 2].includes(r.breakfast));
+      assert.ok([0, 2].includes(r.breakfast));
       assert.equal(r.payment, 'prepay');
       assert.equal(r.nightly.length, 2);
       assert.deepEqual(r.nightly.map((n) => n.date), ['2026-11-10', '2026-11-11']);
       assert.ok(r.nightly.every((n) => Number.isInteger(n.price) && n.price > 0));
       assert.equal(r.totalPrice, r.nightly.reduce((s, n) => s + n.price, 0));
+      assert.ok(Number.isInteger(r.taxesAndFees) && r.taxesAndFees > 0 && r.taxesAndFees < r.totalPrice * 0.3, `${r.rateId} taxes ${r.taxesAndFees}`);
       assert.equal(typeof r.available, 'boolean');
       assert.ok(['free', 'limited', 'none'].includes(r.cancelPolicy.type));
+      assert.doesNotMatch(`${r.name} ${r.cancelPolicy.text}`, /[㐀-鿿]/);
     }
+  }
+});
+
+test('every nightly price is all-in: (room rate + resort fee) × (1 + tax) + flat fees', () => {
+  for (const { h, c } of allHotels.filter((_, i) => i % 5 === 0)) {
+    const r = firstRate(h, '2026-11-10', c);
+    const rate = roomRate(h, '2026-11-10', c);
+    assert.match(String(rate), /9$/, `${h.id}: room rates end in 9 (${rate})`);
+    const expected = Math.round((rate + (r.resortFee || 0)) * (1 + c.tax.rate) + c.tax.perNight);
+    assert.ok(Math.abs(r.nightly[0].price - expected) <= 1, `${h.id} ${r.nightly[0].price} vs ${expected}`);
+  }
+  // New York: 14.75% plus $3.50 a night; New Orleans adds $3; Honolulu is the highest rate.
+  assert.deepEqual(ny.tax, { rate: 0.1475, perNight: 3.5 });
+  assert.equal(nola.tax.perNight, 3);
+  assert.ok(CITIES.every((c) => c.tax.rate > 0.1 && c.tax.rate < 0.2), 'US hotel taxes are 10–20%');
+});
+
+test('resort fees only where the area charges them (the Strip, Waikiki, South Beach …)', () => {
+  const strip = allHotels.filter(({ h, c }) => c.code === 'lv' && h.businessArea === 'The Strip');
+  assert.ok(strip.length > 0);
+  for (const { h, c } of strip) {
+    const r = firstRate(h, '2026-11-10', c);
+    assert.ok(r.resortFee >= 30 && r.resortFee <= 49, `${h.id} resort fee ${r.resortFee}`);
+    assert.ok(r.taxesAndFees >= r.resortFee, 'the resort fee is part of taxes and fees');
+  }
+  for (const { h, c } of allHotels.filter(({ c }) => c.code === 'nyc' || c.code === 'chi')) {
+    assert.equal(firstRate(h, '2026-11-10', c).resortFee, undefined, h.id);
   }
 });
 
 test('same inputs give identical offers (deterministic)', () => {
   const hotel = byCat('luxury');
-  const opts = { checkIn: '2026-12-24', checkOut: '2026-12-27', adults: 2, rooms: 2, city: hz };
+  const opts = { checkIn: '2026-12-24', checkOut: '2026-12-27', adults: 2, rooms: 2, city: ny };
   assert.deepEqual(buildRoomOffer(hotel, opts), buildRoomOffer(hotel, opts));
-  assert.deepEqual(generateHotels(hz), hzHotels);
+  assert.deepEqual(generateHotels(ny), nyHotels);
   assert.equal(lowestNightly(hotel, opts), lowestNightly(hotel, opts));
 });
 
-test('room types per category: economy 2, comfort 3, premium 4, luxury 4 with a suite', () => {
-  const counts = { economy: 2, comfort: 3, premium: 4, luxury: 4 };
+test('room types per category: budget 2, midscale 3, upscale 4, luxury 4 with a suite', () => {
+  const counts = { budget: 2, midscale: 3, upscale: 4, luxury: 4 };
   for (const { h, c } of allHotels) {
-    const offer = buildRoomOffer(h, { checkIn: '2026-11-10', checkOut: '2026-11-11', city: c });
+    const offer = buildRoomOffer(h, { ...STAY, city: c });
     assert.equal(offer.roomTypes.length, counts[h.category], `${h.id} ${h.category}`);
-    const ids = offer.roomTypes.flatMap((rt) => rt.rates.map((r) => r.rateId));
-    assert.ok(ids.includes('R1-BF0-NR') && ids.includes('R1-BF2-FC'), `${h.id} has the two universal rate ids`);
+    const ids = offer.roomTypes[0].rates.map((r) => r.rateId);
+    const freeBreakfast = h.amenities.includes('Free breakfast');
+    assert.equal(ids[0], freeBreakfast ? 'R1-BB-NR' : 'R1-RO-NR', `${h.id}: the cheapest plan is non-refundable`);
+    assert.ok(offer.roomTypes[0].rates.some((r) => r.cancelPolicy.type === 'free'), `${h.id} has a free-cancellation rate`);
     if (h.category === 'luxury') {
-      assert.ok(offer.roomTypes.some((rt) => rt.name.includes('套房')), `${h.id} has a 套房`);
-      assert.ok(ids.includes('R1-BF2-LC'), `${h.id} has 含双早·限时取消`);
+      assert.ok(offer.roomTypes.some((rt) => /Suite/.test(rt.name)), `${h.id} has a suite`);
+      assert.ok(ids.includes('R1-BB-LC'), `${h.id} has Breakfast included · Cancel by 3 days before`);
     }
   }
 });
 
-test('rate ladder: 不可取消 is cheapest; 含早·免费取消 costs +12–25%', () => {
-  for (const { h, c } of allHotels.slice(0, 120)) {
-    const offer = buildRoomOffer(h, { checkIn: '2026-11-10', checkOut: '2026-11-11', city: c });
+test('rate ladder: non-refundable is cheapest; free cancellation costs $10+ a night more, breakfast more still', () => {
+  for (const { h, c } of allHotels) {
+    const offer = buildRoomOffer(h, { ...STAY, city: c });
     for (const rt of offer.roomTypes) {
-      const nr = rt.rates.find((r) => r.rateId.endsWith('BF0-NR'));
-      const fc = rt.rates.find((r) => r.rateId.endsWith('BF2-FC'));
-      assert.equal(nr.name, '不含早 · 不可取消');
-      assert.equal(fc.name, '含双早 · 免费取消');
-      for (const r of rt.rates) assert.ok(r.totalPrice >= nr.totalPrice, `${h.id} ${r.rateId}`);
-      const uplift = fc.totalPrice / nr.totalPrice;
-      assert.ok(uplift >= 1.09 && uplift <= 1.28, `${h.id} ${rt.roomId} uplift ${uplift}`);
+      const [nr, ...others] = rt.rates;
+      assert.equal(nr.cancelPolicy.type, 'none');
+      assert.match(nr.name, / · Non-refundable$/);
+      for (const r of others) {
+        assert.ok(r.totalPrice > nr.totalPrice, `${h.id} ${r.rateId} ${r.totalPrice} vs ${nr.totalPrice}`);
+        const uplift = r.totalPrice / nr.totalPrice;
+        assert.ok(uplift >= 1.03 && uplift <= 1.3, `${h.id} ${rt.roomId} ${r.rateId} uplift ${uplift}`);
+      }
+      const fc = rt.rates.find((r) => r.rateId.endsWith('BB-FC'));
+      if (fc) assert.equal(fc.name, 'Breakfast included · Free cancellation');
+      const ro = rt.rates.find((r) => r.rateId.endsWith('RO-FC'));
+      if (ro) assert.equal(ro.name, 'Room only · Free cancellation');
     }
   }
 });
 
-test('cancel policies: free = day before check-in 18:00 +08:00, limited = 3 days before, none = null', () => {
+test('cancellation terms: free until 3 PM hotel time the day before, limited 3 days before, none = null', () => {
   const lux = byCat('luxury');
-  const offer = buildRoomOffer(lux, { checkIn: '2026-11-10', checkOut: '2026-11-11', city: hz });
-  const rates = offer.roomTypes[0].rates;
+  const rates = buildRoomOffer(lux, { ...STAY, city: ny }).roomTypes[0].rates;
   const free = rates.find((r) => r.cancelPolicy.type === 'free');
   const limited = rates.find((r) => r.cancelPolicy.type === 'limited');
   const none = rates.find((r) => r.cancelPolicy.type === 'none');
-  assert.equal(free.cancelPolicy.freeUntil, '2026-11-09T18:00:00+08:00');
-  assert.match(free.cancelPolicy.text, /11月9日 18:00前可免费取消/);
-  assert.equal(limited.cancelPolicy.freeUntil, '2026-11-07T18:00:00+08:00');
-  assert.match(limited.cancelPolicy.text, /^限时取消/);
-  assert.equal(limited.name, '含双早 · 限时取消');
+  assert.equal(free.cancelPolicy.freeUntil, '2026-11-09T15:00:00-05:00');
+  assert.equal(free.cancelPolicy.text, 'Free cancellation until 3:00 PM EST on Mon, Nov 9 (hotel time); after that the first night is charged.');
+  assert.equal(limited.cancelPolicy.freeUntil, '2026-11-07T15:00:00-05:00');
+  assert.match(limited.cancelPolicy.text, /^Limited cancellation: free cancellation until 3:00 PM EST on Sat, Nov 7/);
+  assert.equal(limited.name, 'Breakfast included · Cancel by 3 days before');
   assert.equal(none.cancelPolicy.freeUntil, null);
-  assert.match(none.cancelPolicy.text, /不可取消/);
+  assert.match(none.cancelPolicy.text, /^Non-refundable/);
+  // The deadline is the hotel's own 3 PM: Pacific time in Los Angeles, daylight time in summer.
+  const laHotel = byCat('luxury', generateHotels(la));
+  const laFree = buildRoomOffer(laHotel, { ...STAY, city: la }).roomTypes[0].rates.find((r) => r.cancelPolicy.type === 'free');
+  assert.equal(laFree.cancelPolicy.freeUntil, '2026-11-09T15:00:00-08:00');
+  assert.match(laFree.cancelPolicy.text, /3:00 PM PST on Mon, Nov 9/);
+  assert.equal(cancelPolicy('free', '2027-07-02', null, 'America/New_York').freeUntil, '2027-07-01T15:00:00-04:00');
+  assert.match(cancelPolicy('free', '2027-07-02', null, 'America/New_York').text, /3:00 PM EDT on Thu, Jul 1/);
 });
 
 test('once the free-cancel deadline has passed the wording says so (prices unchanged)', () => {
-  const hotel = byCat('comfort');
-  const opts = { checkIn: '2026-10-25', checkOut: '2026-10-26', city: hz };
+  const hotel = byCat('midscale');
+  const opts = { checkIn: '2026-11-10', checkOut: '2026-11-11', city: ny };
   const before = buildRoomOffer(hotel, opts);
-  const after = buildRoomOffer(hotel, { ...opts, now: new Date('2026-10-25T10:00:00+08:00') });
-  const fcBefore = findRate(before, 'R1-BF2-FC').rate;
-  const fcAfter = findRate(after, 'R1-BF2-FC').rate;
-  assert.equal(fcBefore.name, '含双早 · 免费取消');
-  assert.equal(fcAfter.name, '含双早 · 取消收首晚');
-  assert.match(fcAfter.cancelPolicy.text, /已过/);
+  const after = buildRoomOffer(hotel, { ...opts, now: new Date('2026-11-09T20:00:00Z') }); // 3:00 PM EST
+  const fcBefore = before.roomTypes[0].rates.find((r) => r.cancelPolicy.type === 'free');
+  const fcAfter = findRate(after, fcBefore.rateId).rate;
+  assert.match(fcBefore.name, /· Free cancellation$/);
+  assert.match(fcAfter.name, /· Cancellation fee applies$/);
+  assert.match(fcAfter.cancelPolicy.text, /deadline \(3:00 PM EST on Mon, Nov 9\) has passed; cancelling now costs the first night/);
   assert.equal(fcAfter.totalPrice, fcBefore.totalPrice);
+  const justBefore = buildRoomOffer(hotel, { ...opts, now: new Date('2026-11-09T19:59:00Z') });
+  assert.match(findRate(justBefore, fcBefore.rateId).rate.name, /Free cancellation$/);
 });
 
-test('weekend nights: Friday +15%, Saturday +25% over weekday nights', () => {
-  assert.equal(dayFactor('2026-11-13', 'tier1'), 1.15); // Fri
-  assert.equal(dayFactor('2026-11-14', 'tier1'), 1.25); // Sat
-  assert.equal(dayFactor('2026-11-15', 'tier1'), 1); // Sun
-  assert.equal(dayFactor('2026-11-11', 'tier1'), 1); // Wed
-  const ratios = allHotels.filter(({ c }) => !c.season).map(({ h, c }) => r1Nr(h, '2026-11-13', c) / r1Nr(h, '2026-11-11', c));
-  const avg = mean(ratios);
-  assert.ok(avg > 1.1 && avg < 1.2, `avg Friday ratio ${avg}`);
+test('nights of the week follow the city\'s market: leisure peaks Fri/Sat, business midweek', () => {
+  assert.equal(dayFactor('2026-11-14', 'leisure', lv), 1.7); // Sat on the Strip
+  assert.equal(dayFactor('2026-11-11', 'leisure', lv), 0.95); // Wed
+  assert.equal(dayFactor('2026-11-10', 'leisure', lv), 0.92); // Tue
+  assert.equal(dayFactor('2026-11-11'), 1, 'a mixed market without a city: Wednesday is the base');
+  assert.equal(dayFactor('2026-11-14', 'leisure'), 1.35);
+  const ratio = (city, a, b) => mean(generateHotels(city).map((h) => firstRate(h, a, city).nightly[0].price / firstRate(h, b, city).nightly[0].price));
+  const vegas = ratio(lv, '2026-11-14', '2026-11-11');
+  assert.ok(vegas > 1.5 && vegas < 1.9, `Las Vegas Sat/Wed ${vegas}`);
+  const sf = ratio(findCity('San Francisco'), '2026-11-14', '2026-11-11');
+  assert.ok(sf > 0.85 && sf < 0.98, `San Francisco Sat/Wed ${sf} (business travelers go home)`);
 });
 
-test('a Saturday is never cheaper than the Friday before it (jitter is per week, not per night)', () => {
+test('in leisure cities a Saturday is never cheaper than the Friday before it (jitter is per week)', () => {
   let pairs = 0;
-  for (const { h, c } of allHotels) {
+  for (const { h, c } of allHotels.filter(({ c }) => c.market === 'leisure')) {
     for (let w = 0; w < 12; w++) {
       const fri = addDays('2026-11-06', w * 7);
-      if (dayFactor(fri, c.tier) !== 1.15 || dayFactor(addDays(fri, 1), c.tier) !== 1.25) continue; // holidays / 调休
+      if (holidayOn(fri, c.code) || holidayOn(addDays(fri, 1), c.code)) continue;
       for (const rt of buildRoomOffer(h, { checkIn: fri, checkOut: addDays(fri, 2), city: c }).roomTypes) {
         const [f, sat] = rt.rates[0].nightly.map((n) => n.price);
         assert.ok(sat >= f, `${h.id} ${rt.roomId} ${fri}: Fri ${f} > Sat ${sat}`);
@@ -140,121 +200,124 @@ test('a Saturday is never cheaper than the Friday before it (jitter is per week,
       }
     }
   }
-  assert.ok(pairs > 3000, String(pairs));
+  assert.ok(pairs > 2000, String(pairs));
 });
 
-test('holiday nights cost ×1.3–1.8; the eve is a peak night, the last night is ordinary; 调休 eves have no weekend premium', () => {
-  assert.equal(dayFactor('2027-10-02', 'new_tier1'), 1.6); // 国庆
-  assert.equal(dayFactor('2027-10-02', 'tourist'), 1.8);
-  assert.equal(dayFactor('2027-02-07', 'tier1'), 1.3); // 春节
-  assert.equal(dayFactor('2027-09-30', 'tier1'), 1.6); // eve of 国庆 (Thursday): the peak departure night
-  assert.equal(dayFactor('2027-09-30', 'tourist'), 1.8);
-  assert.equal(dayFactor('2027-10-07', 'tier1'), 1, 'last night of 国庆: everyone is heading home');
-  assert.equal(dayFactor('2027-10-07', 'tourist'), 1);
-  assert.equal(dayFactor('2027-02-13', 'tier1'), 1, 'last night of 春节, a Saturday before a 调休 Sunday');
-  assert.equal(dayFactor('2027-06-09', 'tier1'), 1.3, 'a one-day holiday keeps its premium');
-  assert.equal(dayFactor('2026-10-09', 'tier1'), 1); // Friday before 调休 Saturday 10-10
-  assert.equal(dayFactor('2027-10-08', 'tier1'), 1); // Friday before 调休 Saturday 2027-10-09
+test('holiday nights cost more, by market; city-specific windows only count in their cities', () => {
+  // New Year's Eve, a Thursday, in New York (mixed): 1.05 × 1.6.
+  assert.ok(Math.abs(dayFactor('2026-12-31', 'mixed', ny) - 1.05 * 1.6) < 1e-9);
+  assert.equal(holidayMultiplier(holidayOn('2026-12-31'), 'business'), 1.25);
+  assert.equal(holidayMultiplier(holidayOn('2026-12-31'), 'leisure'), 1.7);
+  // Mardi Gras is a New Orleans affair; spring break is Miami, Orlando and Las Vegas.
+  assert.equal(holidayOn('2027-02-08', 'nola').key, 'mardigras');
+  assert.equal(holidayOn('2027-02-08', 'nyc'), null);
+  assert.equal(holidayOn('2027-02-08'), null);
+  assert.equal(holidayOn('2027-03-16', 'mia').key, 'springbreak');
+  assert.equal(holidayOn('2027-03-16', 'chi'), null);
+  assert.ok(dayFactor('2027-02-08', 'leisure', nola) > 1.5);
+  assert.equal(dayFactor('2027-02-08', 'mixed', ny), 1, 'a Monday in New York');
   for (const h of HOLIDAYS) {
-    for (const tier of ['tier1', 'tourist']) {
-      const f = dayFactor(h.start, tier);
-      assert.ok(f >= 1.3 && f <= 1.8, `${h.name} ${h.start} ${tier} ${f}`);
+    for (const market of ['business', 'mixed', 'leisure']) {
+      const m = holidayMultiplier(h, market);
+      assert.ok(m >= 1.05 && m <= 1.8, `${h.name} ${h.start} ${market} ${m}`);
     }
   }
-  // 国庆 Saturday vs an ordinary Saturday two weeks later: ≈ 1.6 / 1.25
-  const ratios = allHotels.filter(({ c }) => !c.season).map(({ h, c }) => r1Nr(h, '2027-10-02', c) / r1Nr(h, '2027-10-16', c));
-  const avg = mean(ratios);
-  assert.ok(avg > 1.2 && avg < 1.36, `avg holiday ratio ${avg}`);
+  // New Year's Eve vs an ordinary Thursday four weeks earlier in New York: ≈ 1.6 × the December season.
+  const nye = mean(nyHotels.map((h) => firstRate(h, '2026-12-31', ny).nightly[0].price / firstRate(h, '2026-12-03', ny).nightly[0].price));
+  assert.ok(nye > 1.4 && nye < 1.8, `New Year's Eve ratio ${nye}`);
+  const mardi = mean(generateHotels(nola).map((h) => firstRate(h, '2027-02-08', nola).nightly[0].price / firstRate(h, '2027-02-22', nola).nightly[0].price));
+  assert.ok(mardi > 1.5 && mardi < 2.1, `Mardi Gras ratio ${mardi}`);
 });
 
-test('tourist cities are seasonal and stacked peaks are capped', () => {
-  const syHotels = generateHotels(sy);
-  // Mid-week January (peak) vs mid-week June (low season) in 三亚
-  const ratio = mean(syHotels.map((h) => r1Nr(h, '2027-01-13', sy) / r1Nr(h, '2027-06-16', sy)));
-  assert.ok(ratio > 1.5 && ratio < 1.9, `三亚 season ratio ${ratio}`);
-  // 春节 (×1.8) in February (×1.4) would be ×2.52; the cap keeps it at ×2.3 of the anchor ±8% jitter.
-  for (const h of syHotels) {
-    const price = r1Nr(h, '2027-02-07', sy);
-    assert.ok(price <= h.priceHint * 2.3 * 1.08 + 10, `${h.id} ${price} vs hint ${h.priceHint}`);
+test('seasons follow each city: Miami peaks in winter, stacked peaks are capped', () => {
+  const ratio = mean(generateHotels(mia).map((h) => roomRate(h, '2027-01-13', mia) / roomRate(h, '2027-08-11', mia)));
+  assert.ok(ratio > 1.4 && ratio < 1.9, `Miami January/August ${ratio}`);
+  // A Saturday New Year's weekend in Las Vegas would stack 1.7 × 1.7; the cap keeps it at 2.3× the anchor (±8%).
+  for (const h of generateHotels(lv)) {
+    const rate = roomRate(h, '2027-01-01', lv);
+    assert.ok(rate <= h.priceHint * 2.3 * 1.08 + 10, `${h.id} ${rate} vs hint ${h.priceHint}`);
   }
 });
 
-test('weekday prices stay within ±8% jitter of the anchor (plus rounding)', () => {
-  for (const { h, c } of allHotels.filter(({ c }) => !c.season)) {
-    const p = r1Nr(h, '2026-11-11', c);
-    assert.ok(p >= h.priceHint * 0.92 - 10 && p <= h.priceHint * 1.08 + 10, `${h.id} ${p} vs ${h.priceHint}`);
-    assert.ok(/[89]$/.test(String(p)), `${p} ends in 8 or 9`);
-  }
-});
-
-test('realistic RMB anchors by tier and category (RESEARCH-booking §3.2 bands)', () => {
-  const ranges = {
-    tier1: { economy: [180, 420], comfort: [320, 720], premium: [500, 1150], luxury: [900, 3200] },
-    new_tier1: { economy: [130, 320], comfort: [200, 520], premium: [380, 880], luxury: [600, 2000] },
-    tourist: { economy: [120, 330], comfort: [220, 560], premium: [400, 1100], luxury: [700, 2600] },
-  };
+test('weekday room rates stay within ±8% jitter of the anchor (plus rounding)', () => {
+  // A Wednesday in a month whose season factor is 1 for the city.
   for (const { h, c } of allHotels) {
-    const [lo, hi] = ranges[c.tier][h.category];
-    assert.ok(h.priceHint >= lo && h.priceHint <= hi, `${h.id} ${c.tier} ${h.category} ${h.priceHint}`);
+    const date = c.season[4] === 1 ? '2027-05-12' : c.season[3] === 1 ? '2027-04-14' : null;
+    if (!date) continue;
+    const anchor = h.priceHint * c.weekdays[3];
+    const rate = roomRate(h, date, c);
+    assert.ok(rate >= anchor * 0.92 - 10 && rate <= anchor * 1.08 + 10, `${h.id} ${rate} vs ${anchor}`);
   }
-  // Medians stay close to the ADR-anchored §3.2 values, so the inflation (1.3–2.7×) cannot creep back.
-  const anchors = { tier1: [250, 420, 700, 1200], new_tier1: [180, 320, 500, 850], tourist: [180, 300, 600, 1100] };
-  const median = (xs) => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)];
-  const med = (tier, cat) => median(allHotels.filter(({ h, c }) => c.tier === tier && h.category === cat).map(({ h }) => h.priceHint));
-  ['economy', 'comfort', 'premium', 'luxury'].forEach((cat, i) => {
-    for (const tier of Object.keys(anchors)) {
-      const ratio = med(tier, cat) / anchors[tier][i];
-      assert.ok(ratio >= 0.9 && ratio <= (cat === 'luxury' ? 1.9 : 1.4), `${tier} ${cat} median ${med(tier, cat)} vs ${anchors[tier][i]}`);
-    }
-    assert.ok(med('tier1', cat) >= med('new_tier1', cat), `tier1 ${cat} ≥ new_tier1`);
-  });
-  assert.ok(med('tourist', 'luxury') <= med('tier1', 'luxury'), 'tourist luxury not above tier1 luxury');
-  const avgTier1Eco = mean(allHotels.filter(({ h, c }) => c.tier === 'tier1' && h.category === 'economy').map(({ h }) => h.priceHint));
-  const avgNewEco = mean(allHotels.filter(({ h, c }) => c.tier === 'new_tier1' && h.category === 'economy').map(({ h }) => h.priceHint));
-  assert.ok(avgNewEco < avgTier1Eco, 'new_tier1 a bit below tier1');
 });
 
-test('about 10% of (hotel, date, room type) combos are sold out, deterministically', () => {
+test('realistic USD anchors by category, scaled by the city\'s price level', () => {
+  const nonInn = allHotels.filter(({ h, c }) => c.areas.find((a) => a.name === h.businessArea).kind !== 'inn');
+  for (const { h, c } of nonInn) {
+    const [lo, hi] = PRICE_RANGES[h.category];
+    // Area kinds move rates by 0.85–1.12 and the rating by 0.94–1.06.
+    assert.ok(h.priceHint >= lo * c.priceLevel * 0.85 * 0.94 - 10 && h.priceHint <= hi * c.priceLevel * 1.12 * 1.06 + 10, `${h.id} ${c.code} ${h.category} ${h.priceHint}`);
+  }
+  const median = (xs) => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)];
+  const med = (code, cat) => median(allHotels.filter(({ h, c }) => c.code === code && h.category === cat).map(({ h }) => h.priceHint));
+  for (const cat of ['budget', 'midscale', 'upscale', 'luxury']) {
+    assert.ok(med('nyc', cat) > med('lv', cat), `New York ${cat} above Las Vegas`);
+  }
+  assert.ok(med('nyc', 'midscale') >= 200 && med('nyc', 'midscale') <= 320, `NYC midscale median ${med('nyc', 'midscale')}`);
+  assert.ok(med('lv', 'midscale') >= 90 && med('lv', 'midscale') <= 170, `Las Vegas midscale median ${med('lv', 'midscale')}`);
+  const lux = allHotels.filter(({ h }) => h.category === 'luxury').map(({ h }) => h.priceHint);
+  assert.ok(Math.min(...lux) >= 300 && Math.max(...lux) <= 1300, `luxury ${Math.min(...lux)}–${Math.max(...lux)}`);
+});
+
+test('about 10% of (hotel, date, room type) combos are sold out, deterministically; more on holidays', () => {
   let total = 0;
   let soldOut = 0;
+  let holidayTotal = 0;
+  let holidaySold = 0;
   for (const { h, c } of allHotels.filter((_, i) => i % 3 === 0)) {
     for (let i = 0; i < 40; i++) {
-      const date = addDays('2026-11-02', i);
-      if (holidayOn(date)) continue;
+      const date = addDays('2026-11-30', i);
       const offer = buildRoomOffer(h, { checkIn: date, checkOut: addDays(date, 1), city: c });
       for (const rt of offer.roomTypes) {
-        total++;
-        if (!rt.rates[0].available) {
-          soldOut++;
+        const sold = !rt.rates[0].available;
+        if (sold) {
           assert.equal(rt.rates[0].remaining, 0);
           assert.equal(rt.rates[0].unavailableReason, 'sold_out');
+        }
+        if (holidayOn(date, c.code)) {
+          holidayTotal++;
+          if (sold) holidaySold++;
+        } else {
+          total++;
+          if (sold) soldOut++;
         }
       }
     }
   }
   const share = soldOut / total;
   assert.ok(share > 0.07 && share < 0.13, `sold-out share ${share}`);
+  const holidayShare = holidaySold / holidayTotal;
+  assert.ok(holidayShare > 0.16 && holidayShare < 0.3, `holiday sold-out share ${holidayShare}`);
 });
 
-test('maxOccupancy: rooms × maxOcc must cover adults', () => {
-  const hotel = byCat('premium');
-  const three = buildRoomOffer(hotel, { checkIn: '2026-11-10', checkOut: '2026-11-11', adults: 3, rooms: 1, city: hz });
+test('maxOccupancy: rooms × maxOccupancy must cover the party', () => {
+  const hotel = byCat('upscale');
+  const three = buildRoomOffer(hotel, { ...STAY, adults: 3, rooms: 1, city: ny });
   for (const rt of three.roomTypes) {
     for (const r of rt.rates) {
       if (rt.maxOccupancy < 3) {
         assert.equal(r.available, false);
-        assert.equal(r.unavailableReason, 'occupancy', 'does not fit is not 满房');
+        assert.equal(r.unavailableReason, 'occupancy', 'not fitting is not sold out');
       }
     }
   }
-  const twoRooms = buildRoomOffer(hotel, { checkIn: '2026-11-10', checkOut: '2026-11-11', adults: 3, rooms: 2, city: hz });
+  const twoRooms = buildRoomOffer(hotel, { ...STAY, adults: 3, rooms: 2, city: ny });
   assert.ok(twoRooms.roomTypes.some((rt) => rt.maxOccupancy === 2 && rt.rates.some((r) => r.available)));
-  assert.equal(lowestNightly(hotel, { checkIn: '2026-11-10', checkOut: '2026-11-11', adults: 7, rooms: 1, city: hz }), null);
+  assert.equal(lowestNightly(hotel, { ...STAY, adults: 7, rooms: 1, city: ny }), null);
 });
 
 test('children count as occupants but do not change the price', () => {
-  const hotel = byCat('premium');
-  const opts = { checkIn: '2026-11-10', checkOut: '2026-11-11', adults: 2, rooms: 1, city: hz };
+  const hotel = byCat('upscale');
+  const opts = { ...STAY, adults: 2, rooms: 1, city: ny };
   const adultsOnly = buildRoomOffer(hotel, opts);
   const withChild = buildRoomOffer(hotel, { ...opts, children: 1 });
   assert.equal(withChild.children, 1);
@@ -265,154 +328,137 @@ test('children count as occupants but do not change the price', () => {
       if (rt.maxOccupancy < 3) assert.deepEqual([r.available, r.unavailableReason], [false, 'occupancy']);
     }
   }
-  assert.ok(withChild.roomTypes.some((rt) => rt.maxOccupancy === 3 && rt.rates.some((r) => r.available || r.unavailableReason === 'sold_out')), 'the family room is offered');
+  assert.ok(withChild.roomTypes.some((rt) => rt.maxOccupancy === 4 && rt.rates.some((r) => r.available || r.unavailableReason === 'sold_out')), 'a room with two queens is offered');
 });
 
 test('long stays are usually bookable: sell-outs come in runs, not independent nights', () => {
-  for (const c of [hz, bj, sy]) {
+  for (const c of [ny, lv, mia]) {
     const list = generateHotels(c);
     const bookable = list.filter((h) => lowestNightly(h, { checkIn: '2026-11-09', checkOut: '2026-12-09', city: c }) !== null);
     assert.ok(bookable.length >= list.length * 0.6, `${c.name} 30 nights: ${bookable.length}/${list.length}`);
   }
 });
 
-test('inn-area hotels get low-rise rooms whatever their name (丽江古城, 鼓浪屿, 古镇)', () => {
+test('historic inn areas (French Quarter, Garden District) get low-rise rooms whatever the hotel\'s name', () => {
   let n = 0;
   for (const { h, c } of allHotels) {
     if (c.areas.find((a) => a.name === h.businessArea).kind !== 'inn') continue;
     n++;
-    for (const rt of buildRoomOffer(h, { checkIn: '2026-11-10', checkOut: '2026-11-11', city: c }).roomTypes) {
-      assert.match(rt.floor, /^1-[23]层$/, `${h.id} ${h.name} ${rt.name} ${rt.floor}`);
+    for (const rt of buildRoomOffer(h, { ...STAY, city: c }).roomTypes) {
+      assert.match(rt.floor, /^Floors 1–[23]$/, `${h.id} ${h.name} ${rt.name} ${rt.floor}`);
+      assert.deepEqual(parseFloors(rt.floor).map((x) => x <= 3), [true, true]);
     }
   }
-  assert.ok(n >= 20);
-  const lj = generateHotels(findCity('丽江')).find((h) => h.id === 'sim-lj-002');
-  assert.equal(lj.businessArea, '大研古城');
-  const tops = buildRoomOffer(lj, { checkIn: '2026-11-10', checkOut: '2026-11-11' }).roomTypes.map((rt) => Number(/-(\d+)层/.exec(rt.floor)[1]));
-  assert.ok(tops.every((t) => t <= 3), tops.join());
+  assert.ok(n >= 6, String(n));
+  assert.deepEqual(parseFloors('Floors 4–18'), [4, 18]);
+  assert.equal(parseFloors('Ground floor'), null);
 });
 
 test('rooms multiply the total; lowestNightly is the cheapest bookable per-room average', () => {
-  const hotel = byCat('comfort');
-  const one = buildRoomOffer(hotel, { checkIn: '2026-11-10', checkOut: '2026-11-13', rooms: 1, city: hz });
-  const two = buildRoomOffer(hotel, { checkIn: '2026-11-10', checkOut: '2026-11-13', rooms: 2, adults: 4, city: hz });
-  const r1 = findRate(one, 'R1-BF0-NR').rate;
-  const r2 = findRate(two, 'R1-BF0-NR').rate;
+  const hotel = byCat('midscale');
+  const one = buildRoomOffer(hotel, { checkIn: '2026-11-10', checkOut: '2026-11-13', rooms: 1, city: ny });
+  const two = buildRoomOffer(hotel, { checkIn: '2026-11-10', checkOut: '2026-11-13', rooms: 2, adults: 4, city: ny });
+  const r1 = findRate(one, 'R1-RO-NR').rate;
+  const r2 = findRate(two, 'R1-RO-NR').rate;
   assert.equal(r2.totalPrice, r1.totalPrice * 2);
+  assert.equal(r2.taxesAndFees, r1.taxesAndFees * 2);
   const avgs = one.roomTypes.flatMap((rt) => rt.rates.filter((r) => r.available).map((r) => Math.round(r.totalPrice / 3)));
-  assert.equal(lowestNightly(hotel, { checkIn: '2026-11-10', checkOut: '2026-11-13', city: hz }), Math.min(...avgs));
+  assert.equal(lowestNightly(hotel, { checkIn: '2026-11-10', checkOut: '2026-11-13', city: ny }), Math.min(...avgs));
 });
 
 test('city may be passed as a name or omitted (looked up from hotel.city)', () => {
-  const hotel = bjHotel();
-  const a = buildRoomOffer(hotel, { checkIn: '2026-11-10', checkOut: '2026-11-11', city: bj });
-  const b = buildRoomOffer(hotel, { checkIn: '2026-11-10', checkOut: '2026-11-11', city: '北京' });
-  const c = buildRoomOffer(hotel, { checkIn: '2026-11-10', checkOut: '2026-11-11' });
+  const hotel = nyHotels[0];
+  const a = buildRoomOffer(hotel, { ...STAY, city: ny });
+  const b = buildRoomOffer(hotel, { ...STAY, city: 'New York' });
+  const c = buildRoomOffer(hotel, STAY);
   assert.deepEqual(a, b);
   assert.deepEqual(a, c);
   assert.throws(() => buildRoomOffer(hotel, { checkIn: '2026-11-11', checkOut: '2026-11-10' }), RangeError);
 });
 
-function bjHotel() {
-  return generateHotels(bj)[0];
-}
-
-test('view tags turn into view room names', () => {
-  const lakeHotel = hzHotels.find((h) => h.tags.includes('湖景房'));
-  assert.ok(lakeHotel, 'a lake-view hotel exists in 杭州');
-  const offer = buildRoomOffer(lakeHotel, { checkIn: '2026-11-10', checkOut: '2026-11-11', city: hz });
-  assert.ok(offer.roomTypes.some((rt) => rt.name.startsWith('湖景')), offer.roomTypes.map((r) => r.name).join());
-});
-
 test('every view tag has a matching view room, and a hotel has at most one view tag', () => {
-  const words = [['海景房', '海景'], ['湖景房', '湖景'], ['江景房', '江景'], ['河景房', '河景'], ['山景房', '山景']];
+  const views = [['Ocean view', 'Ocean View'], ['Bay view', 'Bay View'], ['Lake view', 'Lake View'], ['River view', 'River View'],
+    ['Park view', 'Park View'], ['Mountain view', 'Mountain View'], ['City view', 'City View']];
   let tagged = 0;
   for (const { h, c } of allHotels) {
-    const views = words.filter(([tag]) => h.tags.includes(tag));
-    assert.ok(views.length <= 1, `${h.id} ${h.tags.join()}`);
-    if (!views.length) continue;
+    const mine = views.filter(([tag]) => h.tags.includes(tag));
+    assert.ok(mine.length <= 1, `${h.id} ${h.tags.join()}`);
+    if (!mine.length) continue;
     tagged++;
-    assert.notEqual(h.category, 'economy', `${h.id} economy rooms have no view template`);
-    const names = buildRoomOffer(h, { checkIn: '2026-11-10', checkOut: '2026-11-11', city: c }).roomTypes.map((r) => r.name);
-    assert.ok(names.some((n) => n.includes(views[0][1])), `${h.id} ${h.name} ${views[0][0]}: ${names.join()}`);
+    assert.notEqual(h.category, 'budget', `${h.id}: budget rooms have no view template`);
+    const names = buildRoomOffer(h, { ...STAY, city: c }).roomTypes.map((r) => r.name);
+    assert.ok(names.some((n) => n.startsWith(mine[0][1])), `${h.id} ${h.name} ${mine[0][0]}: ${names.join()}`);
   }
-  assert.ok(tagged > 50, String(tagged));
+  assert.ok(tagged > 40, String(tagged));
 });
 
-test('holidays: 2026 official windows, 2027 flagged as estimated', () => {
-  const national2026 = HOLIDAYS.find((h) => h.key === 'national' && h.year === 2026);
-  assert.deepEqual([national2026.start, national2026.end, national2026.days], ['2026-10-01', '2026-10-07', 7]);
-  const spring2026 = HOLIDAYS.find((h) => h.key === 'spring' && h.year === 2026);
-  assert.deepEqual([spring2026.start, spring2026.end, spring2026.days], ['2026-02-15', '2026-02-23', 9]);
-  assert.equal(spring2026.festival, '2026-02-17');
-  for (const h of HOLIDAYS) {
-    assert.equal(h.estimated, h.year >= 2027, `${h.name} ${h.year}`);
-    assert.ok(h.start <= h.festival && h.festival <= h.end || h.key === 'spring', `${h.name} festival inside window`);
+test('holidays follow the federal rules for 2026 and 2027', () => {
+  const at = (key, year) => HOLIDAYS.find((h) => h.key === key && h.year === year);
+  // [festival, first night, last night]
+  const expected = {
+    mlk: [['2026-01-19', '2026-01-16', '2026-01-18'], ['2027-01-18', '2027-01-15', '2027-01-17']], // third Monday of January
+    presidents: [['2026-02-16', '2026-02-13', '2026-02-15'], ['2027-02-15', '2027-02-12', '2027-02-14']], // third Monday of February
+    mardigras: [['2026-02-17', '2026-02-13', '2026-02-17'], ['2027-02-09', '2027-02-05', '2027-02-09']], // 47 days before Easter
+    memorial: [['2026-05-25', '2026-05-22', '2026-05-24'], ['2027-05-31', '2027-05-28', '2027-05-30']], // last Monday of May
+    july4: [['2026-07-04', '2026-07-03', '2026-07-05'], ['2027-07-04', '2027-07-02', '2027-07-04']],
+    labor: [['2026-09-07', '2026-09-04', '2026-09-06'], ['2027-09-06', '2027-09-03', '2027-09-05']], // first Monday of September
+    thanksgiving: [['2026-11-26', '2026-11-25', '2026-11-28'], ['2027-11-25', '2027-11-24', '2027-11-27']], // fourth Thursday of November
+  };
+  for (const [key, [y26, y27]] of Object.entries(expected)) {
+    for (const [festival, start, end] of [y26, y27]) {
+      const h = at(key, Number(festival.slice(0, 4)));
+      assert.deepEqual([h.festival, h.start, h.end], [festival, start, end], `${key} ${festival}`);
+    }
   }
-  const keys = new Set(HOLIDAYS.filter((h) => h.year === 2027).map((h) => h.key));
-  assert.deepEqual([...keys].sort(), ['dragonboat', 'labor', 'midautumn', 'national', 'newyear', 'qingming', 'spring']);
-  assert.equal(HOLIDAYS.find((h) => h.key === 'spring' && h.year === 2027).festival, '2027-02-06');
-  assert.equal(HOLIDAYS.find((h) => h.key === 'midautumn' && h.year === 2027).festival, '2027-09-15');
-  assert.equal(HOLIDAYS.find((h) => h.key === 'dragonboat' && h.year === 2027).festival, '2027-06-09');
-  assert.equal(HOLIDAYS.find((h) => h.key === 'spring' && h.year === 2028).festival, '2028-01-26');
-  assert.equal(HOLIDAYS.find((h) => h.key === 'dragonboat' && h.year === 2028).festival, '2028-05-28');
-  assert.equal(HOLIDAYS.find((h) => h.key === 'midautumn' && h.year === 2028).festival, '2028-10-03');
+  for (const h of HOLIDAYS.filter((x) => ['mlk', 'presidents', 'memorial', 'labor'].includes(x.key))) {
+    assert.equal(dayOfWeek(h.festival), 1, `${h.name} ${h.festival} is a Monday`);
+    assert.equal(dayOfWeek(h.start), 5, `${h.name} starts on a Friday night`);
+    assert.equal(h.nights, 3);
+  }
+  for (const h of HOLIDAYS.filter((x) => x.key === 'thanksgiving')) assert.equal(dayOfWeek(h.festival), 4);
+  for (const h of HOLIDAYS) assert.ok(h.start <= h.end && h.nights >= 3, `${h.name} ${h.start}`);
+  assert.deepEqual(at('mardigras', 2027).cities, ['nola']);
+  assert.deepEqual([...at('springbreak', 2027).cities].sort(), ['lv', 'mia', 'orl']);
+  assert.equal(at('springbreak', 2027).long, true);
 });
 
 test('the holiday table covers every year the 365-day booking window can reach', () => {
-  const horizon = addDays(todayCN(), 365);
-  const years = new Set(HOLIDAYS.map((h) => h.year));
-  for (let y = Number(todayCN().slice(0, 4)); y <= Number(horizon.slice(0, 4)); y++) {
-    for (const key of ['newyear', 'spring', 'qingming', 'labor', 'dragonboat', 'midautumn', 'national']) {
-      assert.ok(HOLIDAYS.some((h) => h.year === y && h.key === key), `${y} ${key} missing: add the next year's holidays`);
-    }
+  const keys = ['newyear', 'mlk', 'presidents', 'mardigras', 'springbreak', 'memorial', 'july4', 'labor', 'thanksgiving', 'christmas'];
+  for (const year of [2026, 2027]) {
+    for (const key of keys) assert.ok(HOLIDAYS.some((h) => h.key === key && h.year === year), `${year} ${key}`);
   }
-  assert.ok(years.has(2028));
-  assert.equal(holidayOn('2028-01-27').name, '春节');
-  assert.ok(dayFactor('2028-01-27', 'tourist') > 1.5, '2028 春节 is priced as a holiday');
-});
-
-test('estimated windows longer than statutory days + weekends carry 调休 workdays', () => {
-  // 2025 rules: 春节 4, 劳动节 2, 国庆 3 statutory days (+1 for 中秋 inside the 国庆 window).
-  const statutory = { newyear: 1, spring: 4, qingming: 1, labor: 2, dragonboat: 1, midautumn: 1, national: 3 };
-  for (const h of HOLIDAYS.filter((x) => x.estimated)) {
-    let weekdaysOff = 0;
-    for (let i = 0; i < h.days; i++) if (![0, 6].includes(dayOfWeek(addDays(h.start, i)))) weekdaysOff++;
-    const shared = HOLIDAYS.filter((x) => x.start === h.start && x.end === h.end);
-    const days = shared.reduce((s, x) => s + statutory[x.key], 0);
-    // Statutory days falling on a weekend are made up on weekdays, so at most `days` weekdays are free.
-    const needed = Math.max(0, weekdaysOff - days);
-    assert.equal(h.makeupWorkdays.length, needed, `${h.name} ${h.year}: ${weekdaysOff} weekdays off, ${days} statutory`);
-    for (const d of h.makeupWorkdays) assert.ok([0, 6].includes(dayOfWeek(d)), `${d} is a weekend day`);
-  }
-  assert.deepEqual(HOLIDAYS.find((h) => h.key === 'national' && h.year === 2027).makeupWorkdays, ['2027-09-26', '2027-10-09']);
-  assert.match(describeHoliday(HOLIDAYS.find((h) => h.key === 'labor' && h.year === 2027)), /调休上班：2027-04-25（周日）/);
-  assert.equal(holidayStartingOn('2027-10-01').key, 'national');
+  // Holidays repeat every year, so a table that runs past the horizon lists every holiday a booking can reach.
+  const horizon = addDays(todayIn('America/New_York'), 365);
+  const last = HOLIDAYS.map((h) => h.end).sort().pop();
+  assert.ok(last >= horizon, `the table ends ${last}, before ${horizon}: add the next year's holidays`);
+  assert.equal(holidayOn('2027-12-31').key, 'newyear');
 });
 
 test('holiday lookups', () => {
-  assert.equal(holidayOn('2026-10-03').name, '国庆节');
-  assert.equal(holidayOn('2026-10-08'), null);
-  assert.equal(isHolidayEve('2026-09-30'), true);
-  assert.equal(isHolidayEve('2026-10-01'), false);
-  assert.equal(isMakeupWorkday('2026-10-10'), true);
-  assert.equal(dayOfWeek('2026-10-10'), 6);
-  assert.equal(findHoliday('国庆去哪玩', '2026-10-25').start, '2027-10-01');
-  assert.equal(findHoliday('十一', '2026-10-02').start, '2026-10-01', 'an ongoing holiday still counts');
-  assert.equal(findHoliday('五一', '2026-10-25').start, '2027-05-01');
-  assert.equal(findHoliday('过年回家', '2026-10-25').key, 'spring');
-  assert.equal(findHoliday('十一月去三亚', '2026-10-25'), null);
-  assert.equal(findHoliday('五一路附近', '2026-10-25'), null);
-  assert.equal(findHoliday('', '2026-10-25'), null);
+  assert.equal(holidayOn('2026-11-27').name, 'Thanksgiving');
+  assert.equal(holidayOn('2026-11-29'), null);
+  assert.equal(findHoliday('Thanksgiving in Chicago', '2026-11-04').start, '2026-11-25');
+  assert.equal(findHoliday('thanksgiving', '2026-11-27').start, '2026-11-25', 'an ongoing holiday still counts');
+  assert.equal(findHoliday('4th of July weekend', '2026-11-04').start, '2027-07-02');
+  assert.equal(findHoliday('over July 4th', '2026-11-04').key, 'july4');
+  assert.equal(findHoliday("New Year's Eve in Vegas", '2026-11-04').start, '2026-12-30');
+  assert.equal(findHoliday('spring break', '2026-11-04').key, 'springbreak');
+  assert.equal(findHoliday('Memorial Day', '2026-11-04').year, 2027);
+  assert.equal(findHoliday('a laboratory tour', '2026-11-04'), null, 'whole words only');
+  assert.equal(findHoliday('next weekend', '2026-11-04'), null);
+  assert.equal(findHoliday('', '2026-11-04'), null);
 });
 
-test('holiday descriptions for the prompt are honest about estimates', () => {
-  const next = upcomingHolidays('2026-10-25', { count: 3 });
-  assert.deepEqual(next.map((h) => h.key), ['newyear', 'spring', 'qingming']);
-  const text = describeUpcomingHolidays('2026-10-25');
-  assert.match(text, /^元旦：/);
-  assert.match(text, /按惯例推算/);
-  assert.match(text, /除夕 2027-02-05（周五），正月初一 2027-02-06（周六）/);
-  const official = describeHoliday(HOLIDAYS.find((h) => h.key === 'national' && h.year === 2026));
-  assert.equal(official, '国庆节：放假 2026-10-01（周四） 至 2026-10-07（周三），共7天；调休上班：2026-09-20（周日）、2026-10-10（周六）');
+test('holiday descriptions for the prompt', () => {
+  const next = upcomingHolidays('2026-11-04', { count: 3 });
+  assert.deepEqual(next.map((h) => h.key), ['thanksgiving', 'christmas', 'newyear']);
+  assert.ok(upcomingHolidays('2027-01-20', { count: 3 }).every((h) => !h.cities), 'nationwide only by default');
+  assert.ok(upcomingHolidays('2027-01-20', { count: 3, cityCode: 'nola' }).some((h) => h.key === 'mardigras'));
+  const text = describeUpcomingHolidays('2026-11-04');
+  assert.match(text, /^Thanksgiving \(Thu, Nov 26\): nights Wed, Nov 25 – Sat, Nov 28/);
+  assert.equal(describeHoliday(HOLIDAYS.find((h) => h.key === 'mardigras' && h.year === 2027), '2026-11-04'),
+    'Mardi Gras (Tue, Feb 9, 2027) in New Orleans: nights Fri, Feb 5, 2027 – Tue, Feb 9, 2027');
+  assert.equal(describeHoliday(HOLIDAYS.find((h) => h.key === 'springbreak' && h.year === 2027), '2027-01-01'),
+    'Spring break in Miami, Orlando, Las Vegas: nights Fri, Mar 5 – Sat, Apr 3');
+  assert.doesNotMatch(text, /[㐀-鿿]/);
 });

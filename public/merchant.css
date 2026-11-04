@@ -1,4 +1,4 @@
-/* 小宿商家版 — the hotel's console: black and gold, dense but calm. Dark only. */
+/* NanaHotel for Hotels — the hotel's console: black and gold, dense but calm. Dark only. */
 
 :root {
   --bg: #0d0c0a;
@@ -23,11 +23,12 @@
   --danger-soft: #3a1714;
   --info: #7cb4ff;
   --info-soft: #14243b;
-  /* Channels: validated as a set on --surface (dataviz validator, dark). Color follows the channel, never its rank. */
-  --ch-xiaosu: #c98500;
-  --ch-ctrip: #3987e5;
-  --ch-meituan: #199e70;
-  --ch-fliggy: #d95926;
+  /* Channels: validated as a set on --surface (dataviz validator, dark). Color follows the channel, never its rank;
+     NanaHotel keeps the gold slot. */
+  --ch-nanahotel: #c98500;
+  --ch-expedia: #3987e5;
+  --ch-booking: #199e70;
+  --ch-google: #d95926;
   --ch-direct: #9085e9;
   /* Room states (status colors, always shown with their label). */
   --st-vacant: #4ade80;
@@ -39,6 +40,8 @@
   --radius: 18px;
   --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --font: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif,
+    "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji";
   color-scheme: dark;
 }
 
@@ -49,9 +52,10 @@ html, body { margin: 0; min-height: 100%; }
   background: radial-gradient(90% 40% at 0% 0%, rgba(245, 184, 61, 0.1), transparent 60%) var(--bg);
   background-attachment: fixed;
   color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  font-family: var(--font);
   font-size: 15px;
-  line-height: 1.5;
+  line-height: 1.45;
+  letter-spacing: -0.003em;
   -webkit-font-smoothing: antialiased;
   -webkit-tap-highlight-color: transparent;
   -webkit-text-size-adjust: 100%;
@@ -88,8 +92,8 @@ a { color: var(--gold-ink); }
 }
 
 .m-hotel { display: grid; min-width: 0; text-align: left; }
-.m-hotel-kicker { font-size: 11.5px; font-weight: 650; letter-spacing: 0.04em; color: var(--gold-ink); }
-.m-hotel-name { overflow: hidden; font-size: 17px; font-weight: 750; white-space: nowrap; text-overflow: ellipsis; }
+.m-hotel-kicker { font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--gold-ink); }
+.m-hotel-name { overflow: hidden; font-size: 17px; font-weight: 750; letter-spacing: -0.01em; white-space: nowrap; text-overflow: ellipsis; }
 .m-hotel-name::after { content: " ▾"; color: var(--text-3); font-size: 13px; }
 
 .m-to-guest {
@@ -128,6 +132,8 @@ a { color: var(--gold-ink); }
   color: var(--text-3);
   font-size: 11.5px;
   font-weight: 650;
+  line-height: 1.2;
+  white-space: nowrap;
 }
 
 .m-tab .icon { width: 22px; height: 22px; }
@@ -177,8 +183,8 @@ a { color: var(--gold-ink); }
 
 .m-section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin: 18px 2px 10px; }
 .m-section-head:first-child { margin-top: 4px; }
-.m-h2 { margin: 0; font-size: 18px; font-weight: 750; }
-.m-sub { margin: 0; font-size: 12.5px; color: var(--text-3); }
+.m-h2 { margin: 0; font-size: 18px; font-weight: 750; letter-spacing: -0.01em; }
+.m-sub { margin: 0; font-size: 12.5px; color: var(--text-3); text-wrap: pretty; }
 
 .m-grid { display: grid; gap: 12px; }
 @media (min-width: 720px) { .m-grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); } .m-grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
@@ -203,7 +209,7 @@ a { color: var(--gold-ink); }
 .kpi-hero { grid-column: 1 / -1; background: linear-gradient(140deg, #2a2112, var(--surface) 70%); border-color: #3b2f17; }
 @media (min-width: 720px) { .kpi-hero { grid-column: auto; grid-row: span 2; } }
 .kpi-label { font-size: 12.5px; font-weight: 650; color: var(--text-3); }
-.kpi-value { font-size: 28px; font-weight: 800; line-height: 1.15; font-variant-numeric: tabular-nums; }
+.kpi-value { font-size: 28px; font-weight: 800; line-height: 1.15; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
 .kpi-hero .kpi-value { font-size: 44px; color: var(--gold-ink); }
 .kpi-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; color: var(--text-3); }
 .delta { display: inline-flex; align-items: center; gap: 2px; padding: 1px 7px; border-radius: 999px; font-weight: 700; font-variant-numeric: tabular-nums; }
@@ -216,7 +222,7 @@ a { color: var(--gold-ink); }
 .stat-k { display: block; font-size: 12px; color: var(--text-3); }
 .stat-v { display: block; font-size: 20px; font-weight: 800; font-variant-numeric: tabular-nums; }
 
-/* Insights from 小宿: tips with an action. */
+/* Tips from Nana: insights with an action. */
 .insights { display: grid; gap: 10px; }
 .insight { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 10px; align-items: start; }
 .insight-mark { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 10px; background: var(--gold-soft); color: var(--gold-ink); }
@@ -233,7 +239,7 @@ a { color: var(--gold-ink); }
 .chart .grid line { stroke: var(--line); stroke-width: 1; }
 .chart .axis text { fill: var(--text-3); font-size: 11px; }
 .chart .bar { fill: var(--gold); }
-.chart .bar.is-xiaosu { fill: var(--gold-top); }
+.chart .bar.is-nanahotel { fill: var(--gold-top); }
 .chart .bar.is-future { fill: var(--surface-3); }
 .chart .line { fill: none; stroke: var(--gold); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
 .chart .line.is-forecast { stroke-dasharray: 4 4; }
@@ -258,14 +264,15 @@ a { color: var(--gold-ink); }
 
 .stack { display: flex; gap: 2px; height: 14px; margin-top: 12px; overflow: hidden; border-radius: 7px; }
 .stack span { display: block; height: 100%; min-width: 4px; }
-.ch-xiaosu { background: var(--ch-xiaosu); }
-.ch-ctrip { background: var(--ch-ctrip); }
-.ch-meituan { background: var(--ch-meituan); }
-.ch-fliggy { background: var(--ch-fliggy); }
+.ch-nanahotel { background: var(--ch-nanahotel); }
+.ch-expedia { background: var(--ch-expedia); }
+.ch-booking { background: var(--ch-booking); }
+.ch-google { background: var(--ch-google); }
 .ch-direct { background: var(--ch-direct); }
 
 .dist { display: grid; gap: 6px; margin-top: 10px; }
-.dist-row { display: grid; grid-template-columns: 2.4em minmax(0, 1fr) 2.8em; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-2); }
+.dist-row { display: grid; grid-template-columns: 2.4em minmax(0, 1fr) 3.4em; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-2); }
+.dist-row .num { text-align: right; }
 .dist-track { height: 8px; border-radius: 4px; background: var(--surface-3); overflow: hidden; }
 .dist-fill { display: block; height: 100%; border-radius: 4px; background: var(--gold); }
 
@@ -289,7 +296,7 @@ a { color: var(--gold-ink); }
 /* ---------- Lists ---------- */
 
 .rows { margin: 0; padding: 0; list-style: none; }
-.rows > li { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-top: 1px solid var(--line); }
+.rows > li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 10px 0; border-top: 1px solid var(--line); }
 .rows > li:first-child { border-top: 0; }
 .row-main { flex: 1; min-width: 0; }
 .row-title { display: block; font-size: 14.5px; font-weight: 650; }
@@ -309,7 +316,7 @@ a { color: var(--gold-ink); }
   white-space: nowrap;
 }
 
-.chip-xiaosu { background: var(--gold-soft); color: var(--gold-ink); }
+.chip-nanahotel { background: var(--gold-soft); color: var(--gold-ink); }
 .chip-ok { background: var(--ok-soft); color: var(--ok); }
 .chip-warn { background: var(--warn-soft); color: var(--warn); }
 .chip-danger { background: var(--danger-soft); color: var(--danger); }
@@ -327,8 +334,11 @@ a { color: var(--gold-ink); }
   border-radius: 999px;
   font-size: 14px;
   font-weight: 700;
+  white-space: nowrap;
   transition: transform 0.12s var(--ease);
 }
+
+.m-section-head > .m-btn, .m-section-head > .chart-toggle { flex: none; }
 
 .m-btn:active:not(:disabled) { transform: scale(0.97); }
 .m-btn-gold { background: linear-gradient(180deg, var(--gold-top), var(--gold)); color: var(--on-gold); }
@@ -382,10 +392,10 @@ a { color: var(--gold-ink); }
 
 .room:active { transform: scale(0.97); }
 .room-no { font-size: 15px; font-weight: 800; font-variant-numeric: tabular-nums; }
-.room-st { font-size: 11px; color: var(--text-3); }
-.room-guest { font-size: 11px; color: var(--text-2); }
-.room.is-xiaosu { border-color: var(--gold); box-shadow: 0 0 0 1px var(--gold) inset; }
-.room.is-xiaosu::after { content: "小宿"; position: absolute; top: -9px; right: 4px; padding: 0 5px; border-radius: 6px; background: var(--gold); color: var(--on-gold); font-size: 10px; font-weight: 800; line-height: 15px; }
+.room-st { font-size: 10.5px; line-height: 1.2; color: var(--text-3); white-space: nowrap; }
+.room-guest { max-width: 100%; overflow: hidden; font-size: 10.5px; line-height: 1.2; color: var(--text-2); white-space: nowrap; text-overflow: ellipsis; }
+.room.is-nanahotel { border-color: var(--gold); box-shadow: 0 0 0 1px var(--gold) inset; }
+.room.is-nanahotel::after { content: "Nana"; position: absolute; top: -9px; right: 4px; padding: 0 5px; border-radius: 6px; background: var(--gold); color: var(--on-gold); font-size: 10px; font-weight: 800; line-height: 15px; }
 .room-dot { position: absolute; top: 5px; left: 6px; width: 7px; height: 7px; border-radius: 50%; background: var(--danger); }
 .room.is-dim { opacity: 0.28; }
 
@@ -393,12 +403,12 @@ a { color: var(--gold-ink); }
 
 .tickets { display: grid; gap: 10px; }
 .ticket { display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: 12px; align-items: start; }
-.ticket-room { display: grid; place-items: center; height: 58px; border-radius: 14px; background: var(--surface-2); }
+.ticket-room { display: grid; place-content: center; justify-items: center; height: 58px; border-radius: 14px; background: var(--surface-2); line-height: 1.15; }
 .ticket-room b { font-size: 18px; font-variant-numeric: tabular-nums; }
-.ticket-room small { font-size: 10.5px; color: var(--text-3); }
+.ticket-room small { font-size: 10px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-3); }
 .ticket.is-new .ticket-room { background: var(--gold-soft); color: var(--gold-ink); }
 .ticket-top { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.ticket-title { font-size: 15.5px; font-weight: 750; }
+.ticket-title { font-size: 15.5px; font-weight: 750; letter-spacing: -0.005em; }
 .ticket-meta { margin: 2px 0 0; font-size: 12.5px; color: var(--text-3); }
 .ticket-note { margin: 6px 0 0; font-size: 13px; color: var(--text-2); }
 .ticket-acts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
@@ -417,7 +427,7 @@ a { color: var(--gold-ink); }
 .review-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .review-who { font-size: 13.5px; font-weight: 700; }
 .review-when { font-size: 12px; color: var(--text-3); }
-.review-text { margin: 0; font-size: 14px; line-height: 1.6; }
+.review-text { margin: 0; font-size: 14px; line-height: 1.5; text-wrap: pretty; }
 .review-reply { padding: 8px 12px; border-left: 3px solid var(--gold); border-radius: 0 10px 10px 0; background: var(--surface-2); font-size: 13px; color: var(--text-2); }
 .review-reply b { color: var(--gold-ink); }
 .reply-box { display: grid; gap: 8px; }
@@ -439,7 +449,7 @@ a { color: var(--gold-ink); }
 
 /* Promotions */
 .promo { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; }
-.promo-off { font-size: 26px; font-weight: 800; color: var(--gold-ink); font-variant-numeric: tabular-nums; }
+.promo-off { font-size: 22px; font-weight: 800; letter-spacing: -0.01em; color: var(--gold-ink); font-variant-numeric: tabular-nums; }
 .promo-title { font-size: 15px; font-weight: 700; }
 .promo-meta { font-size: 12.5px; color: var(--text-3); }
 .switch { position: relative; width: 46px; height: 28px; border-radius: 14px; background: var(--surface-3); transition: background 0.2s; }
@@ -472,9 +482,9 @@ a { color: var(--gold-ink); }
 .sheet { max-height: 86dvh; overflow-y: auto; padding: 6px 18px calc(18px + var(--safe-bottom)); border: 1px solid var(--line-strong); border-radius: 22px 22px 0 0; background: var(--surface); }
 .sheet-grabber { width: 36px; height: 5px; margin: 2px auto 0; border-radius: 3px; background: var(--line-strong); }
 .sheet-head { display: flex; align-items: center; justify-content: space-between; min-height: 48px; }
-.sheet-title { margin: 0; font-size: 17px; font-weight: 750; }
+.sheet-title { margin: 0; font-size: 17px; font-weight: 750; letter-spacing: -0.01em; }
 .sheet-close { display: grid; place-items: center; width: 40px; height: 40px; margin-right: -10px; border-radius: 50%; color: var(--text-3); }
-.kv { display: grid; grid-template-columns: 4.5em minmax(0, 1fr); gap: 8px; padding: 6px 0; font-size: 14px; }
+.kv { display: grid; grid-template-columns: 6.2em minmax(0, 1fr); gap: 8px; padding: 6px 0; font-size: 14px; }
 .kv-k { color: var(--text-3); }
 .sheet-acts { display: grid; gap: 8px; margin-top: 14px; }
 

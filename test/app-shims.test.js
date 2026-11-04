@@ -11,6 +11,13 @@ import { createServer } from '../app/shims/node-http.js';
 
 const ROOT = nodePath.resolve(nodePath.dirname(fileURLToPath(import.meta.url)), '..');
 
+function walkAll(dir) {
+  return fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+    const p = nodePath.join(dir, e.name);
+    return e.isDirectory() ? walkAll(p) : [p];
+  });
+}
+
 function walk(dir) {
   return fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
     const p = nodePath.join(dir, e.name);
@@ -81,41 +88,20 @@ test('http shim: createApp can create and close its server without a network', a
   await new Promise((resolve) => server.close(resolve));
 });
 
-test('the Android bridge can reach every provider in providers.js (and Bocha), and nothing else', async () => {
+test('the phone app and the APK hold no API key and call no AI provider: the offline copy is the scripted demo', async () => {
   const { PROVIDERS } = await import('../src/llm/providers.js');
   const { BOCHA_ENDPOINT } = await import('../src/services/websearch.js');
-  const kotlin = fs.readFileSync(nodePath.join(ROOT, 'android/app/src/main/java/com/nina/xiaosu/HttpBridge.kt'), 'utf8');
-  const allowed = new Set([...kotlin.match(/ALLOWED_HOSTS = setOf\(([\s\S]*?)\)/)[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]));
-  const needed = new Set([...Object.values(PROVIDERS).map((p) => new URL(p.baseUrl).host), new URL(BOCHA_ENDPOINT).host]);
-  assert.deepEqual([...allowed].sort(), [...needed].sort());
-});
-
-test('the app moves to the next DeepSeek model id when the current one does not exist, and remembers it', async () => {
-  const { withModelFallback } = await import('../app/local-server.js');
-  const { classifyProviderError } = await import('../src/llm/client.js');
-  const missing = classifyProviderError(400, { error: { message: 'Model Not Exist', type: 'invalid_request_error' } });
-  assert.equal(missing.reason, 'model_not_found');
-  const calls = [];
-  let remembered = null;
-  const llm = withModelFallback((model) => ({
-    provider: 'deepseek',
-    async chat() {
-      calls.push(model);
-      if (model !== 'b') throw missing;
-      return { content: 'ok' };
-    },
-  }), ['a', 'b', 'c'], { onModel: (m) => { remembered = m; } });
-  assert.equal((await llm.chat({})).content, 'ok');
-  assert.equal((await llm.chat({})).content, 'ok');
-  assert.deepEqual(calls, ['a', 'b', 'b']);
-  assert.equal(llm.model, 'b');
-  assert.equal(remembered, 'b');
-  // Any other error is not a reason to switch models.
-  const auth = classifyProviderError(401, { error: { message: 'Authentication Fails' } });
-  const broken = withModelFallback(() => ({ chat: async () => { throw auth; } }), ['a', 'b']);
-  await assert.rejects(broken.chat({}), (err) => err === auth);
-  assert.equal(broken.model, 'a');
-  // The last id's error reaches the user.
-  const none = withModelFallback(() => ({ chat: async () => { throw missing; } }), ['a', 'b']);
-  await assert.rejects(none.chat({}), (err) => err === missing);
+  const hosts = [...Object.values(PROVIDERS).map((p) => new URL(p.baseUrl).host), new URL(BOCHA_ENDPOINT).host];
+  const keyNames = [...Object.values(PROVIDERS).map((p) => p.keyEnv), 'LLM_API_KEY', 'BOCHA_API_KEY', 'DEEPSEEK_API_KEY'];
+  const files = [...walkAll(nodePath.join(ROOT, 'app')), ...walkAll(nodePath.join(ROOT, 'android'))]
+    .filter((p) => /\.(?:js|html|kt|kts|gradle|xml|properties)$/.test(p));
+  assert.ok(files.some((p) => p.endsWith('MainActivity.kt')), 'the Android sources are there');
+  for (const file of files) {
+    const text = fs.readFileSync(file, 'utf8');
+    for (const needle of [...hosts, ...keyNames]) assert.ok(!text.includes(needle), `${nodePath.relative(ROOT, file)} mentions ${needle}`);
+  }
+  // The page's own server always runs the scripted model, so it works offline and needs no key.
+  const local = fs.readFileSync(nodePath.join(ROOT, 'app/local-server.js'), 'utf8');
+  assert.match(local, /from '\.\.\/src\/llm\/scripted-llm\.js'/);
+  assert.match(local, /createScriptedLlm\(demoScript/);
 });

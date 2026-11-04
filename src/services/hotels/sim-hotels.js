@@ -2,9 +2,9 @@ import { offsetPoint } from '../../util/geo.js';
 
 /**
  * Deterministic generator of FICTIONAL hotels around the real areas in sim-cities.js.
- * Every value derives from seeded PRNGs keyed by city code + hotel index, so ids, names and
- * price anchors are identical across restarts. Name parts are deliberately generic words, never
- * real hotel brands (see test/hotels.test.js for the brand blocklist).
+ * Every value derives from seeded PRNGs keyed by city code + hotel index, so ids, names and price anchors are
+ * identical across restarts. Name stems are invented words, never real hotel chains or brands (see
+ * test/hotels.test.js for the blocklist).
  */
 
 /** 32-bit string hash (FNV-1a + murmur3 finalizer so neighbouring ids land far apart). */
@@ -38,54 +38,50 @@ export function mulberry32(seed) {
   };
 }
 
-const CATS = ['economy', 'comfort', 'premium', 'luxury'];
+const CATS = ['budget', 'midscale', 'upscale', 'luxury'];
 
-/** Per area kind: hotel count weight, category mix and a price factor relative to the city tier. */
+/** Per area kind: hotel count weight, category mix and a price factor relative to the city's level. */
 const KINDS = {
-  scenic: { count: 4, mix: [0.12, 0.3, 0.33, 0.25], priceFactor: 1.12 },
-  cbd: { count: 4, mix: [0.1, 0.3, 0.32, 0.28], priceFactor: 1.08 },
-  shopping: { count: 4, mix: [0.22, 0.4, 0.26, 0.12], priceFactor: 1.0 },
-  oldtown: { count: 4, mix: [0.28, 0.42, 0.22, 0.08], priceFactor: 0.97 },
-  nightlife: { count: 3, mix: [0.25, 0.42, 0.25, 0.08], priceFactor: 1.0 },
-  university: { count: 3, mix: [0.4, 0.4, 0.2, 0], priceFactor: 0.92 },
-  inn: { count: 4, mix: [0.2, 0.45, 0.3, 0.05], priceFactor: 1.05, inn: true },
-  resort: { count: 3, mix: [0.08, 0.3, 0.35, 0.27], priceFactor: 1.05, resort: true },
-  beach: { count: 4, mix: [0.08, 0.27, 0.33, 0.32], priceFactor: 1.05, resort: true },
-  station: { count: 2, mix: [0.5, 0.38, 0.12, 0], priceFactor: 0.88 },
-  airport: { count: 2, mix: [0.4, 0.45, 0.15, 0], priceFactor: 0.9 },
+  scenic: { count: 5, mix: [0.12, 0.33, 0.33, 0.22], priceFactor: 1.12 },
+  cbd: { count: 5, mix: [0.08, 0.32, 0.38, 0.22], priceFactor: 1.08 },
+  shopping: { count: 4, mix: [0.15, 0.38, 0.32, 0.15], priceFactor: 1.03 },
+  oldtown: { count: 4, mix: [0.18, 0.4, 0.3, 0.12], priceFactor: 1.0 },
+  nightlife: { count: 4, mix: [0.2, 0.42, 0.3, 0.08], priceFactor: 1.0 },
+  university: { count: 3, mix: [0.3, 0.45, 0.25, 0], priceFactor: 0.92 },
+  inn: { count: 4, mix: [0.15, 0.45, 0.33, 0.07], priceFactor: 1.05, inn: true },
+  resort: { count: 5, mix: [0.12, 0.33, 0.33, 0.22], priceFactor: 1.05, resort: true },
+  beach: { count: 4, mix: [0.08, 0.3, 0.34, 0.28], priceFactor: 1.08, resort: true },
+  station: { count: 2, mix: [0.3, 0.45, 0.25, 0], priceFactor: 0.95 },
+  airport: { count: 3, mix: [0.42, 0.45, 0.13, 0], priceFactor: 0.85 },
 };
 
 /**
- * Weekday base price ranges (RMB, lowest room, no breakfast) by city tier × category, calibrated to the
- * ADR-anchored bands in RESEARCH-booking.md §3.2 (area kind, rating and city.priceLevel add a little).
+ * Weekday room rates in USD before taxes (lowest room, room only) for an average US market, by category;
+ * a city's priceLevel, the area kind and the rating move them (New York is about 1.35×, Las Vegas 0.7×).
  */
-export const PRICE_RANGES = Object.freeze({
-  tier1: { economy: [220, 360], comfort: [360, 600], premium: [580, 1000], luxury: [1000, 2600] },
-  new_tier1: { economy: [160, 260], comfort: [260, 440], premium: [420, 750], luxury: [700, 1700] },
-  tourist: { economy: [150, 280], comfort: [260, 480], premium: [450, 950], luxury: [800, 2200] },
-  tier2: { economy: [120, 200], comfort: [220, 350], premium: [330, 600], luxury: [550, 1100] },
-});
+export const PRICE_RANGES = Object.freeze({ budget: [89, 139], midscale: [139, 219], upscale: [219, 359], luxury: [399, 899] });
 
-const RATING = { economy: [4.0, 4.6], comfort: [4.3, 4.8], premium: [4.5, 4.9], luxury: [4.6, 4.9] };
-const YEARS = { economy: [2012, 2025], comfort: [2015, 2025], premium: [2010, 2025], luxury: [2006, 2024] };
-const REVIEWS = { economy: [400, 4800], comfort: [600, 7000], premium: [500, 6500], luxury: [300, 4500] };
+const RATING = { budget: [3.6, 4.4], midscale: [4.0, 4.6], upscale: [4.2, 4.8], luxury: [4.5, 4.9] };
+const YEARS = { budget: [2008, 2025], midscale: [2010, 2025], upscale: [2006, 2025], luxury: [2002, 2024] };
+const REVIEWS = { budget: [300, 3500], midscale: [500, 5500], upscale: [600, 6500], luxury: [300, 4000] };
 const NEWEST_YEAR = 2025;
+// Where pools are outdoors all year.
+const WARM_CITIES = new Set(['la', 'lv', 'mia', 'orl', 'hnl', 'sd', 'aus', 'nola']);
 
-// Invented stems; a stem that is a real chain (驿居, 云栖, 永乐半山 …) must not appear. Positions are kept
-// when a stem is replaced so other hotels' names and draws do not move.
+// Invented stems; none may be (or read like) a real chain or brand. Positions matter for determinism.
 const BRANDS = {
-  economy: ['悦途', '简居', '青舍', '拾光', '憩园', '行舍', '小栈', '禾宿', '朴宿', '途悠'],
-  comfort: ['栖云', '漫居', '云舍', '素履', '星屿', '屿见', '晴舍', '松间', '溪岸', '木禾'],
-  premium: ['观潮', '澜庭', '听松', '映月', '清岚', '临水', '若水', '揽月', '映岚', '叠翠'],
-  luxury: ['隐庐', '静庐', '臻园', '澄庐', '观止', '揽胜', '云麓', '鹤庐', '山澜', '望庐'],
-  inn: ['竹篱', '花溪', '青檐', '慢屿', '南风', '归园', '素心', '听雨', '木心', '檐下'],
+  budget: ['Penny Pine', 'Cozy Owl', 'Sunny Gate', 'Lamplight', 'Pebble Lane', 'Bright Acre', 'Bramble', 'Sparrow Rest', 'Pinwheel', 'Kettle Creek'],
+  midscale: ['Harborline', 'Copperleaf', 'Fernway', 'Lindenbrook', 'Silverbell', 'Wren & Willow', 'Northlight', 'Saltbox', 'Hollyhock', 'Tidewell'],
+  upscale: ['Ashgrove', 'Bellvane', 'Ironleaf', 'Quillon', 'Westmere', 'Ambergate', 'Ravelle', 'Marbleton', 'Corliss', 'Evermere'],
+  luxury: ['Aurelian', 'Vantorre', 'Halcourt', 'Solenne', 'Ardenne', 'Caelum', 'Montclaire', 'Larkhaven', 'Sable Crown', 'Ivoryline'],
+  inn: ['Wisteria', 'Honeysuckle', 'Ivy Gate', 'Lantern House', 'Bayberry', 'Primrose', 'Willowmere', 'Sweetgrass', 'Rosebay', 'Jessamine'],
 };
 
 /** Every brand stem the generator uses (tests check none is a real chain and none repeats within an area). */
 export const BRAND_STEMS = Object.freeze([...new Set(Object.values(BRANDS).flat())]);
 
-// Area names that are trademarks: '迪士尼度假区澄庐' would read like an official on-site hotel.
-const TRADEMARK_RE = /迪士尼|长隆|欢乐谷|世界之窗|华侨城|环球影城|方特|海昌/;
+// Place names that are trademarks: 'Disney Copperleaf Suites' would read like an official park hotel.
+const TRADEMARK_RE = /disney|universal|epcot|seaworld|opry|caesars|bellagio/i;
 
 function pick(rng, list) {
   return list[Math.floor(rng() * list.length)];
@@ -95,9 +91,9 @@ function round1(x) {
   return Math.round(x * 10) / 10;
 }
 
-/** Whole yuan ending in 8 (Chinese hotels love 8). */
-function priceEnding8(x) {
-  return Math.max(98, Math.round(x / 10) * 10 - 2);
+/** Whole dollars ending in 9 ($189, $229), as US rates usually are. */
+function priceEnding9(x) {
+  return Math.max(59, Math.round(x / 10) * 10 - 1);
 }
 
 /** Largest-remainder split of `n` hotels over the 4 categories, with seeded wobble so areas differ. */
@@ -131,43 +127,44 @@ function areaCounts(city) {
   return counts;
 }
 
+/** The area as hotels are named after it: 'Times Square', 'Las Vegas Strip' (not 'The Strip'). */
 function placeName(city, area) {
-  return area.short.startsWith(city.name) ? area.short : `${city.name}${area.short}`;
+  return area.short.startsWith('The ') ? `${city.name.replace(/ DC$/, '')} ${area.short.slice(4)}` : area.short;
 }
 
 /** @returns {{ brand: string, list: string[] }} the brand stem drawn and the name patterns using it */
 function nameCandidates(rng, { city, area, category, inn, resort }) {
-  const place = placeName(city, area);
-  const s = area.short;
+  const place = TRADEMARK_RE.test(placeName(city, area)) ? city.name : placeName(city, area);
+  const cityName = city.name.replace(/ DC$/, '');
   if (inn && category !== 'luxury') {
     const b = pick(rng, BRANDS.inn);
-    if (category === 'premium') return { brand: b, list: [`${s}${b}精品酒店`, `${b}·${s}院子`, `${s}${b}精品民宿`] };
-    return { brand: b, list: [`${s}${b}民宿`, `${b}客栈（${s}店）`, `${s}${b}小院`, `${b}精品民宿（${s}店）`] };
+    if (category === 'upscale') return { brand: b, list: [`The ${b} Inn`, `${b} Manor`, `The ${b} Courtyard Hotel`] };
+    return { brand: b, list: [`${b} Inn`, `${b} Bed & Breakfast`, `The ${b} Guesthouse`, `${b} House ${place}`] };
   }
   const b = pick(rng, BRANDS[category]);
   const list = (() => {
     switch (category) {
-      case 'economy':
-        return [`${b}酒店（${place}店）`, `${b}公寓酒店（${place}店）`, `${b}精选酒店（${s}店）`];
-      case 'comfort':
-        return [`${b}酒店（${place}店）`, `${b}设计酒店（${s}店）`, `${b}精品酒店（${place}店）`];
-      case 'premium':
-        if (TRADEMARK_RE.test(place)) return [`${b}度假酒店（${place}店）`, `${b}酒店（${place}店）`];
+      case 'budget':
+        return area.kind === 'airport'
+          ? [`${b} Airport Inn`, `${b} Inn ${place}`, `${b} Stay ${place}`]
+          : [`${b} Inn ${place}`, `${b} Stay ${place}`, `${b} Inn & Suites ${place}`, `${b} Lodge ${place}`];
+      case 'midscale':
+        return [`${b} Hotel ${place}`, `${b} Suites ${place}`, `Hotel ${b} ${place}`, `${b} ${place}`];
+      case 'upscale':
         return resort
-          ? [`${place}${b}度假酒店`, `${b}度假酒店（${place}店）`, `${s}${b}酒店`]
-          : [`${place}${b}酒店`, `${b}酒店（${place}店）`, `${city.name}${b}艺术酒店`, `${place}${b}精品酒店`];
+          ? [`${b} Resort ${place}`, `The ${b} ${place}`, `${b} House ${place}`]
+          : [`The ${b} ${place}`, `${b} House ${place}`, `The ${b} Hotel ${cityName}`, `${b} ${cityName}`];
       default:
-        if (TRADEMARK_RE.test(place)) return [`${b}度假酒店（${place}店）`, `${city.name}${b}度假酒店`];
-        if (inn) return [`${s}${b}`, `${b}·${s}`, `${place}${b}精品酒店`];
+        if (inn) return [`The ${b} ${place}`, `${b} House ${place}`];
         return resort
-          ? [`${place}${b}度假酒店`, `${city.name}${b}度假酒店`, `${s}${b}`]
-          : [`${city.name}${b}酒店`, `${place}${b}大酒店`, `${s}${b}`];
+          ? [`The ${b} Resort & Spa`, `${b} Resort ${place}`, `The ${b} ${place}`]
+          : [`The ${b}`, `The ${b} ${cityName}`, `${b} Grand ${place}`];
     }
   })();
   return { brand: b, list };
 }
 
-/** Unique within the city, and no brand stem twice in one area ('晴舍设计酒店（钟楼店）' next to '晴舍酒店（西安钟楼店）'). */
+/** Unique within the city, and no brand stem twice in one area ('Copperleaf Suites SoHo' next to 'Copperleaf SoHo'). */
 function uniqueName(rng, ctx, used, areaBrands) {
   for (let attempt = 0; attempt < 60; attempt++) {
     const { brand, list } = nameCandidates(rng, ctx);
@@ -178,78 +175,91 @@ function uniqueName(rng, ctx, used, areaBrands) {
       return name;
     }
   }
-  const fallback = `${nameCandidates(rng, ctx).list[0]}${used.size}`;
+  const fallback = `${nameCandidates(rng, ctx).list[0]} ${used.size}`;
   used.add(fallback);
   return fallback;
 }
 
-function makeAmenities(rng, { category, kind, area, inn }) {
+function makeAmenities(rng, { category, kind, area, inn, city }) {
   const out = new Set();
   const add = (x, p = 1) => { if (rng() < p) out.add(x); };
   const f = area.features;
-  // Courtyard 民宿/客栈 have no gym, pool, meeting rooms or delivery robots (those need a big building with lifts).
+  const warm = WARM_CITIES.has(city.code);
+  const urban = f.includes('subway');
+  const upscale = category === 'upscale' || category === 'luxury';
+  const pool = kind.resort || warm ? 'Outdoor pool' : 'Indoor pool';
+  // Historic inns and B&Bs have no gym, big pool or meeting rooms: they are converted townhouses.
   if (inn && category !== 'luxury') {
-    add('行李寄存'); add('免费WiFi'); add('公共休息区', 0.7); add('庭院', 0.6); add('茶室', 0.4);
-    add('管家服务', category === 'premium' ? 0.8 : 0.3); add('代订门票', 0.5);
-    if (category === 'economy') add('自助洗衣房', 0.3);
-    else if (category === 'comfort') { add('洗衣服务', 0.5); add('早餐', 0.5); add('露台', 0.4); }
-    else { add('私房菜餐厅', 0.6); add('露台', 0.6); add('洗衣服务', 0.6); add('接站服务', 0.5); }
+    add('Free Wi-Fi'); add('Luggage storage'); add('Historic building', 0.85); add('Courtyard', 0.6); add('Garden', 0.4);
+    add('Concierge', category === 'upscale' ? 0.6 : 0.2); add('Bicycle rentals', 0.3);
+    if (category === 'budget') add('Free breakfast', 0.7);
+    else if (category === 'midscale') { add('Free breakfast', 0.6); add('Laundry service', 0.3); }
+    else { add('Bar', 0.6); add('Restaurant', 0.4); add('Laundry service', 0.5); add('Courtyard pool', 0.25); }
   } else {
-    add('24小时前台'); add('行李寄存'); add('免费WiFi');
-    if (category === 'economy') {
-      add('自助洗衣房', 0.5);
-    } else if (category === 'comfort') {
-      add('洗衣房', 0.6); add('机器人送物', 0.5); add('健身房', 0.3); add('自助早餐厅', 0.5);
-    } else if (category === 'premium') {
-      add('健身房'); add('餐厅'); add('会议室', 0.6); add('洗衣房', 0.6); add('机器人送物', 0.5);
-      add(kind.resort ? '室外泳池' : '室内泳池', kind.resort ? 0.8 : 0.35);
+    add('Free Wi-Fi'); add('24-hour front desk'); add('Luggage storage');
+    if (category === 'budget') {
+      add('Free breakfast', 0.6); add('Guest laundry', 0.5); add(pool, warm ? 0.4 : 0.15); add('Fitness center', 0.3);
+    } else if (category === 'midscale') {
+      add('Fitness center'); add('Free breakfast', 0.55); add(pool, warm || kind.resort ? 0.65 : 0.35); add('Guest laundry', 0.5);
+      add('Business center', 0.4); add('Bar', 0.35); add('Kitchenette', 0.25);
+    } else if (category === 'upscale') {
+      add('Fitness center'); add('Restaurant'); add('Bar'); add('Room service', 0.6); add('Meeting rooms', 0.6); add('Business center', 0.5);
+      add('Concierge', 0.5); add(pool, kind.resort ? 0.95 : warm ? 0.65 : 0.35); add('Rooftop bar', f.includes('night') || f.includes('skyline') ? 0.35 : 0);
+      add('Spa', kind.resort ? 0.5 : 0.2);
     } else {
-      add('健身房'); add(kind.resort ? '室外泳池' : '室内泳池'); add('SPA'); add('行政酒廊');
-      add('中餐厅'); add('管家服务', 0.7); add('接机服务', 0.5);
+      add('Fitness center'); add('Spa'); add(pool); add('Restaurant'); add('Bar'); add('Room service'); add('Concierge');
+      add('Club lounge', 0.6); add('Airport transfers', 0.5); add('Rooftop bar', f.includes('night') || f.includes('skyline') ? 0.4 : 0);
     }
   }
-  if (kind.resort && (category === 'luxury' || category === 'premium') && f.includes('sea')) add('私人沙滩', 0.5);
-  if (f.includes('family') || kind.resort) { add('儿童乐园', category === 'economy' ? 0.1 : 0.55); add('亲子房', 0.5); }
-  else if (category !== 'economy') add('亲子房', 0.25);
-  if (area.kind === 'airport') add('免费接送机', 0.75);
-  // Probabilities go to 0 rather than skipping the draw, so car-free areas keep the same random stream.
-  const carfree = f.includes('carfree');
-  const parkingP = carfree ? 0 : f.includes('subway') ? 0.3 : 0.7;
-  if (category === 'luxury' || category === 'premium') add(rng() < 0.4 ? '免费停车' : '停车场', carfree ? 0 : 0.9);
-  else add('免费停车', parkingP);
-  if (carfree) add('码头行李接送', 0.5);
+  if (f.includes('sea') && (upscale || kind.resort)) add('Beach access', kind.resort ? 0.6 : 0.3);
+  if (f.includes('family') || kind.resort) { add("Kids' club", upscale ? 0.5 : 0.1); add('Family rooms', 0.5); }
+  else if (category !== 'budget') add('Family rooms', 0.2);
+  if (area.landmarks.some((l) => l.type === 'Theme park')) add('Theme park shuttle', 0.7);
+  if (area.kind === 'airport') add('Free airport shuttle', 0.8);
+  if (city.code === 'lv' && (area.kind === 'resort' || area.kind === 'oldtown')) add('Casino', category === 'budget' ? 0.4 : 0.75);
+  // Probabilities go to 0 rather than skipping a draw, so every hotel consumes the same random stream.
+  if (area.kind === 'airport') add('Free parking', inn ? 0 : 0.6);
+  else if (urban || upscale) add(upscale ? 'Valet parking' : 'Self parking', inn ? 0 : 0.8);
+  else add('Free parking', inn ? 0.3 : 0.8);
+  add('Pet friendly', 0.3);
+  add('EV charging', upscale ? 0.35 : 0.1);
   return [...out];
 }
 
-function makeTags(rng, { category, area, amenities, openedYear }) {
+const VIEWS = [['sea', 'Ocean view'], ['harbor', 'Harbor view'], ['bay', 'Bay view'], ['lake', 'Lake view'], ['river', 'River view'], ['park', 'Park view'],
+  ['mountain', 'Mountain view'], ['skyline', 'City view']];
+
+function makeTags(rng, { category, area, amenities, openedYear, inn }) {
   const tags = [];
   const f = area.features;
-  const upscale = category === 'premium' || category === 'luxury';
+  const upscale = category === 'upscale' || category === 'luxury';
   const add = (t, p) => { if (tags.length < 4 && !tags.includes(t) && rng() < p) tags.push(t); };
-  // A view tag only where a view room exists (economy templates have none), and at most one, since the
-  // view room is named after it. p = 0 instead of skipping keeps the random stream for later tags.
-  const canView = category !== 'economy';
-  const view = (t, p) => add(t, canView && !tags.some((x) => /景房$/.test(x)) ? p : 0);
-  if (openedYear >= NEWEST_YEAR) add('新开业', 1);
-  if (f.includes('lake')) view('湖景房', upscale ? 0.7 : 0.3);
-  if (f.includes('river')) view('江景房', upscale ? 0.6 : 0.25);
-  if (f.includes('canal')) view('河景房', upscale ? 0.6 : 0.25);
-  if (f.includes('sea')) view('海景房', upscale ? 0.8 : 0.4);
-  if (f.includes('mountain')) view('山景房', 0.3);
-  if (area.kind === 'station') add(/南站|东站|北站|西站|虹桥/.test(area.name) ? '近高铁站' : '近火车站', 0.9);
-  if (area.kind === 'airport') add('近机场', 0.9);
-  if (amenities.includes('免费接送机')) add('免费接送机', 0.9);
-  if (amenities.includes('亲子房') || f.includes('family')) add('亲子', 0.7);
-  if (f.includes('subway')) add('近地铁', 0.6);
-  if (area.kind === 'scenic' || area.kind === 'oldtown' || area.kind === 'inn') add('步行到景点', 0.4);
-  if (f.includes('quiet')) add('安静', 0.5);
-  if (f.includes('night')) add('网红', 0.3);
-  if (area.kind === 'cbd') add('商务出行', 0.45);
-  if (amenities.includes('室外泳池') || amenities.includes('室内泳池')) add('带泳池', 0.35);
-  if (amenities.includes('免费停车')) add('免费停车', 0.5);
-  if (category === 'economy' || category === 'comfort') add('含早划算', 0.25);
-  if (category === 'economy') add('性价比高', 0.35);
-  if (!tags.length) tags.push(upscale ? '服务好' : '干净卫生');
+  // A view tag only where a view room exists (budget templates have none), and at most one, since the view
+  // room is named after it. p = 0 instead of skipping keeps the random stream for later tags.
+  const canView = category !== 'budget';
+  for (const [feature, tag] of VIEWS) {
+    if (!f.includes(feature)) continue;
+    const p = feature === 'sea' || feature === 'harbor' ? (upscale ? 0.8 : 0.4) : feature === 'skyline' ? (upscale ? 0.5 : 0.2) : upscale ? 0.6 : 0.3;
+    add(tag, canView && !tags.some((x) => / view$/.test(x)) ? p : 0);
+  }
+  if (openedYear >= NEWEST_YEAR) add('Newly opened', 1);
+  if (area.kind === 'station') add('Near the station', 0.9);
+  if (area.kind === 'airport') add('Near the airport', 0.9);
+  if (amenities.includes('Free airport shuttle')) add('Free airport shuttle', 0.9);
+  if (amenities.includes('Family rooms') || f.includes('family')) add('Family-friendly', 0.7);
+  if (f.includes('subway')) add('Near transit', 0.6);
+  if (area.kind === 'scenic' || area.kind === 'oldtown' || area.kind === 'inn') add('Walk to sights', 0.45);
+  if (inn && amenities.includes('Historic building')) add('Historic', 0.6);
+  if (amenities.includes('Casino')) add('Casino', 0.5);
+  if (f.includes('quiet')) add('Quiet', 0.5);
+  if (f.includes('night')) add('Trendy', 0.3);
+  if (area.kind === 'cbd') add('Business-friendly', 0.45);
+  if (amenities.some((a) => / pool$/i.test(a))) add('Pool', 0.35);
+  if (amenities.includes('Free breakfast')) add('Free breakfast', 0.6);
+  if (amenities.includes('Free parking')) add('Free parking', 0.5);
+  if (category === 'upscale' && ['shopping', 'oldtown', 'nightlife'].includes(area.kind)) add('Boutique', 0.3);
+  if (category === 'budget') add('Great value', 0.35);
+  if (!tags.length) tags.push(upscale ? 'Great service' : 'Spotless');
   return tags;
 }
 
@@ -276,20 +286,23 @@ function makeHotel(city, area, category, index, used, areaBrands) {
   const age = Math.max(1, NEWEST_YEAR + 1 - openedYear);
   const reviewCount = Math.max(36, Math.round((cLo + (cHi - cLo) * rng()) * Math.min(1, 0.2 + age / 8)));
 
-  const [pLo, pHi] = (PRICE_RANGES[city.tier] || PRICE_RANGES.tier2)[category];
+  const [pLo, pHi] = PRICE_RANGES[category];
   const ratingLift = 0.94 + 0.12 * ((rating - rLo) / (rHi - rLo || 1));
-  const priceHint = priceEnding8((pLo + (pHi - pLo) * rng() ** 1.25) * kind.priceFactor * ratingLift * (city.priceLevel || 1));
+  const priceHint = priceEnding9((pLo + (pHi - pLo) * rng() ** 1.25) * kind.priceFactor * ratingLift * (city.priceLevel || 1));
 
-  const amenities = makeAmenities(rng, { category, kind, area, inn });
-  const tags = makeTags(rng, { category, area, amenities, openedYear });
-  const tel = rng() < 0.2 ? '' : `${city.telCode}-0000${String(Math.floor(rng() * 10000)).padStart(4, '0')}`;
+  const amenities = makeAmenities(rng, { category, kind, area, inn, city });
+  const tags = makeTags(rng, { category, area, amenities, openedYear, inn });
+  // Fictional numbers only: 555-0100 to 555-0199 are reserved for fiction.
+  const tel = rng() < 0.1 ? '' : `(${city.areaCode}) 555-01${String(Math.floor(rng() * 100)).padStart(2, '0')}`;
+  const near = area.short === area.district ? '' : `Near ${area.short}, `;
 
   return {
     id,
     name,
-    city: city.fullName,
+    city: city.name,
+    state: city.state,
     district: area.district,
-    address: `${area.district}·${area.short}附近（模拟地址）`,
+    address: `${near}${area.district}, ${city.fullName} (simulated address)`,
     location,
     tel,
     rating,
@@ -301,6 +314,7 @@ function makeHotel(city, area, category, index, used, areaBrands) {
     tags,
     photos: [],
     priceHint,
+    timeZone: city.zone,
     source: 'sim',
   };
 }

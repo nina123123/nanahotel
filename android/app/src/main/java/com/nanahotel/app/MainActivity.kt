@@ -1,23 +1,25 @@
-package com.nina.xiaosu
+package com.nanahotel.app
 
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.res.Configuration
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.view.WindowInsets
 import android.view.WindowInsetsController
+import android.webkit.CookieManager
 import android.webkit.WebView
 import android.widget.FrameLayout
 
 class MainActivity : Activity() {
     private lateinit var webView: WebView
-    private lateinit var http: HttpBridge
 
-    @SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
+    @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val background = getColor(R.color.bg)
+        val server = BuildConfig.SERVER_URL
 
         webView = WebView(this).apply {
             setBackgroundColor(background)
@@ -25,10 +27,16 @@ class MainActivity : Activity() {
             settings.domStorageEnabled = true
             settings.allowFileAccess = false
             settings.allowContentAccess = false
-            webViewClient = AssetClient(applicationContext)
+            settings.userAgentString = "${settings.userAgentString} NanaHotelAndroid/${BuildConfig.VERSION_NAME}"
         }
-        http = HttpBridge(webView)
-        webView.addJavascriptInterface(http, "XiaosuNative")
+        if (server.isEmpty()) {
+            // Demo build: the app's own copy of NanaHotel runs inside the page (simulated hotels, no keys).
+            webView.webViewClient = AssetClient(applicationContext)
+        } else {
+            // Connected build: the hosted server's pages. The card form's Stripe frames need their cookies.
+            CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
+            webView.webViewClient = RemoteClient(applicationContext, Uri.parse(server))
+        }
 
         val root = FrameLayout(this)
         root.setBackgroundColor(background)
@@ -36,7 +44,14 @@ class MainActivity : Activity() {
         setContentView(root)
         fitSystemBars(root)
 
-        webView.loadUrl(AssetClient.url("app/index.html"))
+        if (savedInstanceState == null || webView.restoreState(savedInstanceState) == null) {
+            webView.loadUrl(if (server.isEmpty()) AssetClient.url("app/index.html") else "$server/")
+        }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        webView.saveState(outState)
     }
 
     // Draw behind the status and navigation bars (required from Android 15) and pad the content.
@@ -68,18 +83,23 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
-        http.shutdown()
         webView.destroy()
         super.onDestroy()
     }
 
     @Deprecated("Still the simplest way to intercept back on every supported version")
     override fun onBackPressed() {
-        // Back closes the top sheet or dialog first (the page treats a cancel event like its close button).
+        // Back closes the top sheet or dialog first (the page treats a cancel event like its close button), then goes
+        // back a page, then leaves the app.
         val js = "(function(){var d=document.querySelectorAll('dialog[open]');if(!d.length)return false;" +
             "d[d.length-1].dispatchEvent(new Event('cancel',{cancelable:true}));return true;})()"
         webView.evaluateJavascript(js) { handled ->
-            if (handled != "true") super@MainActivity.onBackPressed()
+            when {
+                handled == "true" -> Unit
+                // e.g. from the hotel console back to the chat
+                webView.canGoBack() -> webView.goBack()
+                else -> super@MainActivity.onBackPressed()
+            }
         }
     }
 }

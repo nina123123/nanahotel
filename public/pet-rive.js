@@ -1,4 +1,4 @@
-// The animated pet: 小宿 as a Rive animation (public/art/xiaosu.riv, built by tools/build-pet-riv.mjs from pet.js's
+// The animated pet: Nana as a Rive animation (public/art/nana.riv, built by tools/build-pet-riv.mjs from pet.js's
 // drawing), played by the Rive web runtime vendored in public/vendor/rive (@rive-app/canvas-lite, MIT), so nothing
 // comes from a CDN. Loading starts once the page is up. Until it is ready, and wherever it cannot run (no
 // WebAssembly, reduced motion, a load error), the SVG pet from pet.js stays, so the page never depends on it.
@@ -31,8 +31,8 @@ async function load() {
   rive.RuntimeLoader.setWasmUrl(new URL('vendor/rive/rive.wasm', BASE).href);
   rive.RuntimeLoader.setWasmFallbackUrl(new URL('vendor/rive/rive_fallback.wasm', BASE).href);
   rive.Rive.suppressDeprecationWarnings = ['state-machine-inputs'];
-  const res = await fetch(new URL('art/xiaosu.riv', BASE));
-  if (!res.ok) throw new Error(`xiaosu.riv: ${res.status}`);
+  const res = await fetch(new URL('art/nana.riv', BASE));
+  if (!res.ok) throw new Error(`nana.riv: ${res.status}`);
   const file = new rive.RiveFile({ buffer: await res.arrayBuffer() });
   await file.init();
   return { rive, file };

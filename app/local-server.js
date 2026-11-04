@@ -3,70 +3,17 @@
 // objects; data lives in IndexedDB (shims/node-fs-promises.js).
 import { createApp, buildDeps } from '../src/server.js';
 import { DEFAULTS, DEFAULT_LIMITS } from '../src/config.js';
-import { resolveLlmConfig } from '../src/llm/providers.js';
-import { createLlmClient } from '../src/llm/client.js';
 import { createScriptedLlm, demoScript } from '../src/llm/scripted-llm.js';
-import { outboundFetch, originalFetch, hasBuiltInModel } from './native-fetch.js';
 
-const DEMO_LLM = Object.freeze({ provider: 'scripted', label: '演示模式', model: 'demo-script', configured: true, keyEnv: '' });
-// The Android app's native bridge adds the real key (built into the APK) to DeepSeek requests; the page never has it.
-const BUILT_IN_KEY_PLACEHOLDER = 'built-in';
+// The phone app's own copy is always the demo: simulated hotels and a scripted Nana. Nothing here holds an API key;
+// the connected app shows the hosted server's pages instead (android/…/RemoteClient.kt), and the keys stay there.
+const DEMO_LLM = Object.freeze({ provider: 'scripted', label: 'Demo mode', model: 'demo-script', configured: true, keyEnv: '' });
 
 const quietLogger = { info() {}, warn: (...a) => console.warn(...a), error: (...a) => console.error(...a) };
+const originalFetch = globalThis.fetch.bind(globalThis);
 
-// DeepSeek renames models now and then; nobody using the app can change a setting, so try the next name instead.
-const DEEPSEEK_MODELS = ['deepseek-v4-flash', 'deepseek-flash', 'deepseek-chat'];
-const MODEL_KEY = 'xiaosu-model';
-
-/**
- * An LLM client that moves on to the next model id when the provider says the current one doesn't exist,
- * and remembers the one that worked (onModel) so later launches start there.
- */
-export function withModelFallback(makeClient, models, { start = 0, onModel = () => {} } = {}) {
-  let index = Math.min(Math.max(start, 0), models.length - 1);
-  let client = makeClient(models[index]);
-  return {
-    get provider() { return client.provider; },
-    get model() { return models[index]; },
-    async chat(args) {
-      for (;;) {
-        try {
-          const out = await client.chat(args);
-          onModel(models[index]);
-          return out;
-        } catch (err) {
-          if (err?.reason !== 'model_not_found' || index >= models.length - 1) throw err;
-          index += 1;
-          client = makeClient(models[index]);
-        }
-      }
-    },
-  };
-}
-
-function savedModelIndex() {
-  try {
-    return Math.max(0, DEEPSEEK_MODELS.indexOf(localStorage.getItem(MODEL_KEY)));
-  } catch {
-    return 0;
-  }
-}
-
-/** DeepSeek through the native bridge when the APK has a key built in; otherwise the scripted demo. */
 function createLlm() {
-  if (!hasBuiltInModel) return { config: DEMO_LLM, client: createScriptedLlm(demoScript, { delayMs: 12 }) };
-  const config = resolveLlmConfig({ LLM_PROVIDER: 'deepseek', LLM_API_KEY: BUILT_IN_KEY_PLACEHOLDER });
-  const client = withModelFallback((model) => createLlmClient({ ...config, model, fetch: outboundFetch }), DEEPSEEK_MODELS, {
-    start: savedModelIndex(),
-    onModel: (model) => {
-      try {
-        localStorage.setItem(MODEL_KEY, model);
-      } catch {
-        // not remembered; the fallback just runs again next launch
-      }
-    },
-  });
-  return { config, client };
+  return { config: DEMO_LLM, client: createScriptedLlm(demoScript, { delayMs: 12 }) };
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -221,7 +168,7 @@ class LocalResponse extends Emitter {
     return this;
   }
 
-  /** The page aborted the request: the server sees a closed connection (e.g. 停止 during a reply). */
+  /** The page aborted the request: the server sees a closed connection (e.g. Stop during a reply). */
   disconnect(reason) {
     if (this.destroyed || this.writableFinished) return;
     this.destroyed = true;
@@ -245,7 +192,7 @@ let app = null;
 function config(llm) {
   return {
     appName: DEFAULTS.appName,
-    dataDir: '/xiaosu-data',
+    dataDir: '/nanahotel-data',
     publicDir: '/public',
     trustProxy: false,
     // Every copy of the app shares one DeepSeek key, so each phone gets a modest number of turns per 10 minutes.
@@ -277,15 +224,15 @@ function handleApi(url, init) {
       res.disconnect(signal.reason);
     }, { once: true });
     app.handler(req, res).catch((err) => {
-      console.error('[xiaosu] 本地服务出错', err);
-      if (!res.headersSent) reject(new TypeError('本地服务出错'));
+      console.error('[nanahotel] The in-app server failed', err);
+      if (!res.headersSent) reject(new TypeError('The in-app server failed'));
     });
   });
 }
 
 export async function startLocalServer() {
   const llm = createLlm();
-  const deps = await buildDeps(config(llm.config), { llm: null, webSearch: { enabled: false }, fetch: outboundFetch, logger: quietLogger });
+  const deps = await buildDeps(config(llm.config), { llm: null, webSearch: { enabled: false }, fetch: originalFetch, logger: quietLogger });
   app = createApp({ ...deps, config: config(llm.config), llm: llm.client, logger: quietLogger });
 
   globalThis.fetch = (input, init = {}) => {
@@ -298,5 +245,5 @@ export async function startLocalServer() {
   };
 
   // Read by the page: demo mode gets one quiet line saying the replies are scripted.
-  globalThis.xiaosuApp = Object.freeze({ mode: hasBuiltInModel ? 'ai' : 'demo' });
+  globalThis.nanahotelApp = Object.freeze({ mode: 'demo' });
 }

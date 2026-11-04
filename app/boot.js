@@ -42,6 +42,6 @@ async function start() {
 }
 
 start().catch((err) => {
-  console.error('[xiaosu] 启动失败', err);
-  fail('启动失败：这个浏览器版本可能太旧了。请把 iPhone 升级到 iOS 16.4 以上，或在安卓上更新「Android System WebView」后重试。');
+  console.error('[nanahotel] Could not start', err);
+  fail("NanaHotel couldn't start. This browser may be too old: update your iPhone to iOS 16.4 or later, or update Android System WebView, then try again.");
 });

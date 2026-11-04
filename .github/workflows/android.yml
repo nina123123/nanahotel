@@ -1,34 +1,37 @@
-name: 小宿 Android APK
-
+name: Android APK
+# Builds the Android app and publishes it as a release. With the repository variable NANAHOTEL_SERVER_URL
+# (Settings → Secrets and variables → Actions → Variables), the app shows that hosted NanaHotel server, which keeps
+# every API key; without it, the app runs its own offline demo. No key is ever built into the APK.
 on:
   push:
+    branches: [main]
     paths:
-      - 'hotel-agent/app/**'
-      - 'hotel-agent/public/**'
-      - 'hotel-agent/src/**'
-      - 'hotel-agent/android/**'
-      - '.github/workflows/xiaosu-android.yml'
+      - 'app/**'
+      - 'public/**'
+      - 'src/**'
+      - 'android/**'
+      - '.github/workflows/android.yml'
   workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
-  group: xiaosu-android-${{ github.ref }}
+  group: android-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: '22'
+          node-version: 22
 
       - name: Test the app code
-        working-directory: hotel-agent
         run: npm test
 
       - uses: actions/setup-java@v4
@@ -40,33 +43,31 @@ jobs:
         with:
           gradle-version: '8.10.2'
 
-      - name: Bundle the web app into the APK
+      - name: Bundle the offline demo into the APK
         run: |
-          dest=hotel-agent/android/app/src/main/assets/web
+          dest=android/app/src/main/assets/web
           mkdir -p "$dest"
-          cp -r hotel-agent/app hotel-agent/public hotel-agent/src "$dest"/
+          cp -r app public src "$dest"/
 
       - name: Build APK
         env:
-          # Repository secret (Settings → Secrets and variables → Actions). Empty → the app runs the scripted demo.
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-        run: gradle -p hotel-agent/android assembleRelease --no-daemon --stacktrace
+          NANAHOTEL_SERVER_URL: ${{ vars.NANAHOTEL_SERVER_URL }}
+        run: gradle -p android assembleRelease --no-daemon --stacktrace
 
       - name: Publish as a release
         env:
           GH_TOKEN: ${{ github.token }}
-          HAS_AI: ${{ secrets.DEEPSEEK_API_KEY != '' }}
+          SERVER_URL: ${{ vars.NANAHOTEL_SERVER_URL }}
         run: |
-          apk="xiaosu-0.1.${GITHUB_RUN_NUMBER}.apk"
-          cp hotel-agent/android/app/build/outputs/apk/release/app-release.apk "$apk"
-          if [ "$HAS_AI" = "true" ]; then
-            ai="AI 已接入 DeepSeek，打开就能用。"
+          version="0.1.${GITHUB_RUN_NUMBER}"
+          apk="nanahotel-${version}.apk"
+          cp android/app/build/outputs/apk/release/app-release.apk "$apk"
+          if [ -n "$SERVER_URL" ]; then
+            mode="Connected to the NanaHotel server at ${SERVER_URL}: real hotels and prices, Nana's AI, emails. While the server uses LiteAPI's sandbox, bookings are test bookings and nothing is charged."
           else
-            ai="这一版没有内置 AI（仓库还没有设置 DEEPSEEK_API_KEY），回复是写好的演示脚本。"
+            mode="Offline demo: hotels, prices and payments are simulated and Nana's replies are scripted. Nothing is charged."
           fi
-          # Not marked latest: the repo's "latest release" link stays on 小账本.
-          gh release create "xiaosu-android-${GITHUB_RUN_NUMBER}" "$apk" \
+          gh release create "android-${GITHUB_RUN_NUMBER}" "$apk" \
             --target "$GITHUB_SHA" \
-            --latest=false \
-            --title "小宿 安卓版 0.1.${GITHUB_RUN_NUMBER}" \
-            --notes "小宿 · AI 订房管家（演示版）。在安卓手机上点下面的 ${apk} 下载并安装（第一次要允许浏览器「安装未知应用」）。新版本直接覆盖安装，数据不会丢。${ai}酒店、价格、订单和支付都是模拟的，不会真实扣款。"
+            --title "NanaHotel for Android ${version}" \
+            --notes "On an Android phone, tap ${apk} below to download and install it (the first time, allow your browser to install unknown apps). New versions install over the old one and keep your data. ${mode}"

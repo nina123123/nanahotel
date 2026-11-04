@@ -1,0 +1,52 @@
+# Render Blueprint: https://render.com → New → Blueprint → pick this repository.
+# One web service in the US with a small disk for NanaHotel's data (conversations, bookings, traveler details).
+# Render asks for each value marked `sync: false` while creating it; paste the same keys you added as GitHub
+# secrets. Keys live only here and in GitHub, never in the code. docs/LIVE.md explains every variable.
+services:
+  - type: web
+    name: nanahotel
+    runtime: node
+    region: virginia
+    # A disk needs a paid instance; Starter is the smallest (about $7 a month, plus about $0.25 for the disk).
+    plan: starter
+    branch: main
+    buildCommand: npm install --omit=dev
+    startCommand: npm start
+    healthCheckPath: /api/health
+    disk:
+      name: nanahotel-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_VERSION
+        value: '22'
+      - key: HOST
+        value: 0.0.0.0
+      - key: DATA_DIR
+        value: /var/data
+      # Render's proxy is in front of the app: rate limits use the guest's address from X-Forwarded-For.
+      - key: TRUST_PROXY
+        value: '1'
+      - key: DEFAULT_TIME_ZONE
+        value: America/New_York
+      # Nana's AI (Claude). Set a monthly spend limit in the Anthropic Console too.
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      # Hotels, prices, booking and the card form (sandbox keys: test bookings, nothing is charged).
+      - key: LITEAPI_API_KEY
+        sync: false
+      - key: LITEAPI_PAYMENT_KEY
+        sync: false
+      # "Near Times Square" (Places API (New)).
+      - key: GOOGLE_MAPS_API_KEY
+        sync: false
+      # Booking confirmations and receipts.
+      - key: RESEND_API_KEY
+        sync: false
+      # Optional: an address on a domain verified in Resend, e.g. NanaHotel <bookings@yourdomain.com>.
+      # Empty = Resend's test sender, which only delivers to your own Resend account's email.
+      - key: EMAIL_FROM
+        sync: false
+      # The password for the hotel console (/merchant). Render makes a random one: see it under Environment.
+      - key: MERCHANT_PASSWORD
+        generateValue: true

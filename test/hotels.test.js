@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { CITIES, findCity } from '../src/services/hotels/sim-cities.js';
+import { CITIES, findCity, cityZone } from '../src/services/hotels/sim-cities.js';
 import { generateHotels, hashString, mulberry32, BRAND_STEMS } from '../src/services/hotels/sim-hotels.js';
 import { buildRoomOffer } from '../src/services/hotels/pricing.js';
 import { createSimSupplier } from '../src/services/hotels/sim-supplier.js';
@@ -10,56 +10,91 @@ import { BookingError } from '../src/services/bookings.js';
 import { distanceM } from '../src/util/geo.js';
 import { addDays } from '../src/util/dates.js';
 
-const NOW = new Date('2026-10-25T10:00:00+08:00'); // a Sunday
+const NOW = new Date('2026-11-04T15:00:00Z'); // Wed, Nov 4, 2026, 10 AM in New York
 const clock = { now: () => NOW };
 const supplier = createSimSupplier();
 const hotels = createHotelService({ supplier, clock });
+const at = (iso) => createHotelService({ supplier, clock: { now: () => new Date(iso) } });
 
+// Real chains, brands and famous hotels: no generated name may contain one (whole words, case-insensitive).
 const REAL_BRANDS = [
-  '汉庭', '如家', '7天', '七天', '全季', '亚朵', '桔子', '麗枫', '丽枫', '维也纳', '锦江', '华住', '洲际', '万豪', '希尔顿', '凯悦',
-  '香格里拉', '喜来登', '威斯汀', '丽思', '四季', '半岛', '文华东方', '柏悦', '安缦', '悦榕', '君悦', '皇冠假日', '假日', '智选',
-  '宜必思', '格林豪泰', '城市便捷', '尚客优', '莫泰', '速8', '布丁', '星程', '漫心', '美居', '美豪', '开元', '君澜', '花间堂', '松赞',
-  '途家', '隐居', '朗廷', '瑰丽', '宝格丽', '艾迪逊', '英迪格', '逸林', '欢朋', '希岸', '喆啡', '宜尚', '丽怡', '康铂', '白玉兰',
-  '锦江之星', '海友', '秋果', '和颐', '雅阁', '璞隐', '轻住', '星野', '观澜湖', '枕水', '晴川', '万达', '温德姆', '雅高', '诺富特',
-  '铂尔曼', '索菲特', '凯宾斯基', '雅诗阁', '东呈', '城家', '诗莉莉', '宿适', '书香', '金陵饭店', '建国饭店', '康莱德', '万丽',
-  '驿居', '如家驿居', '云栖', '永乐半山',
+  'Hilton', 'Marriott', 'Hyatt', 'Sheraton', 'Westin', 'Holiday Inn', 'Best Western', 'Motel 6', 'Super 8', 'Days Inn', 'Comfort Inn',
+  'Comfort Suites', 'Hampton', 'Courtyard by', 'Fairfield', 'Ritz', 'Four Seasons', 'St. Regis', 'Kimpton', 'Omni', 'Loews', 'Wyndham',
+  'Radisson', 'La Quinta', 'Red Roof', 'Extended Stay', 'Embassy Suites', 'DoubleTree', 'Waldorf', 'Conrad', 'InterContinental',
+  'Crowne Plaza', 'Indigo', 'Aloft', 'Moxy', 'Ace Hotel', 'Hard Rock', 'Mandarin Oriental', 'Peninsula', 'Aman', 'Rosewood', 'Fontainebleau',
+  'Bellagio', 'Caesars', 'MGM', 'Venetian', 'Wynn', 'Aria', 'Mirage', 'Luxor', 'Excalibur', 'Flamingo', 'Drury', 'Homewood', 'Home2',
+  'TownePlace', 'SpringHill', 'Residence Inn', 'Candlewood', 'Staybridge', 'Graduate', 'Virgin', 'Nobu', 'Edition', 'Thompson', 'Andaz',
+  'Sonesta', 'Quality Inn', 'Econo Lodge', 'Rodeway', 'Sleep Inn', 'Clarion', 'Cambria', 'citizenM', 'Yotel', 'Arlo', 'Hoxton', 'Freehand',
+  'Le Meridien', 'Renaissance', 'Autograph', 'Six Senses', 'Regent', 'Montage', 'Pendry', 'Auberge', 'Langham', 'Fairmont', 'Raffles',
+  'Sofitel', 'Novotel', 'Pullman', 'Mercure', 'ibis', 'Shangri-La', 'Gaylord', 'Margaritaville', 'Great Wolf', 'Harrah', 'Tropicana',
+  'Golden Nugget', 'Circus Circus', 'Cosmopolitan', 'Mandalay', 'Delano', 'Vdara', 'NoMad', 'Mondrian', 'Sahara', 'Plaza Hotel', 'Carlyle',
+  'Chateau Marmont', 'Biltmore', 'Broadmoor', 'Halekulani', 'Royal Hawaiian', 'Moana Surfrider', 'Outrigger', 'Driskill', 'Monteleone', 'Peabody',
+  'Palmer House', 'Willard', 'Hay-Adams', 'Thistle', 'Linden Row', 'Pod Hotel', 'Standard Hotel', 'W Hotel', 'JW', 'Tru by', 'Curio',
 ];
 
-const REQUIRED_CITIES = ['北京', '上海', '广州', '深圳', '杭州', '成都', '重庆', '西安', '南京', '苏州', '厦门', '三亚'];
+const REQUIRED_CITIES = ['New York', 'Los Angeles', 'San Francisco', 'Las Vegas', 'Miami', 'Orlando', 'Chicago', 'Seattle', 'Boston',
+  'Washington DC', 'New Orleans', 'Honolulu', 'San Diego', 'Nashville', 'Austin', 'Denver'];
+const ZONES = new Set(['America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles', 'Pacific/Honolulu']);
 
-test('city guide: required cities, tiers, 4–8 areas each with real-world fields', () => {
-  for (const name of REQUIRED_CITIES) assert.ok(findCity(name), name);
-  assert.ok(CITIES.length >= 12);
+const allHotels = CITIES.flatMap((c) => generateHotels(c).map((h) => ({ h, c })));
+const areaOf = (h, c) => c.areas.find((a) => a.name === h.businessArea);
+
+test('city guide: the 16 US cities, each with its zone, area code, market and 4–8 real neighborhoods', () => {
+  assert.equal(CITIES.length, 16);
+  assert.deepEqual(CITIES.map((c) => c.name), REQUIRED_CITIES);
   const codes = new Set();
   for (const c of CITIES) {
     assert.ok(!codes.has(c.code), `duplicate code ${c.code}`);
     codes.add(c.code);
-    assert.ok(['tier1', 'new_tier1', 'tourist', 'tier2'].includes(c.tier), c.name);
-    assert.equal(c.fullName, `${c.name}市`);
-    assert.ok(c.aliases.includes(`${c.name}市`), `${c.name} alias 市`);
+    assert.match(c.state, /^[A-Z]{2}$/);
+    assert.equal(c.fullName, `${c.name.replace(/ DC$/, '')}, ${c.state}`);
+    assert.ok(ZONES.has(c.zone), `${c.name} ${c.zone}`);
+    assert.equal(cityZone(c.name), c.zone);
+    assert.match(c.areaCode, /^\d{3}$/);
+    assert.ok(['business', 'mixed', 'leisure'].includes(c.market), c.name);
     assert.ok(c.areas.length >= 4 && c.areas.length <= 8, `${c.name} has ${c.areas.length} areas`);
-    if (c.season) assert.equal(c.season.length, 12);
+    assert.equal(c.season.length, 12);
+    assert.equal(c.weekdays.length, 7);
     for (const a of c.areas) {
-      assert.ok(a.name && a.district && a.reason && a.reason.length >= 8, `${c.name}/${a.name}`);
+      assert.ok(a.name && a.district && a.reason && a.reason.length >= 20, `${c.name}/${a.name}`);
       assert.ok(a.landmarks.length >= 1 && a.landmarks.length <= 6, `${c.name}/${a.name} landmarks`);
       for (const p of [a.center, ...a.landmarks.map((l) => l.location)]) {
-        assert.ok(p.lng > 98 && p.lng < 123 && p.lat > 18 && p.lat < 41, `${c.name}/${a.name} coords in China`);
+        // The continental US plus Hawaii.
+        assert.ok((p.lng > -125 && p.lng < -66 && p.lat > 24 && p.lat < 50) || (p.lng > -160 && p.lng < -154 && p.lat > 18 && p.lat < 23), `${c.name}/${a.name} coords in the US`);
       }
       assert.ok(distanceM(a.center, c.center) < 45000, `${c.name}/${a.name} near its city`);
       for (const l of a.landmarks) {
         assert.ok(l.name && l.type, `${a.name} landmark`);
         assert.ok(distanceM(l.location, a.center) < 16000, `${l.name} close to ${a.name}`);
       }
+      assert.doesNotMatch(`${a.name} ${a.reason} ${a.landmarks.map((l) => `${l.name} ${l.type}`).join(' ')}`, /[㐀-鿿]/);
     }
   }
-  assert.equal(findCity('杭州').tier, 'new_tier1');
-  assert.equal(findCity('上海').tier, 'tier1');
-  for (const n of ['三亚', '丽江', '厦门']) assert.equal(findCity(n).tier, 'tourist');
+  assert.equal(findCity('New York').zone, 'America/New_York');
+  assert.equal(findCity('Las Vegas').zone, 'America/Los_Angeles');
+  assert.equal(findCity('Honolulu').zone, 'Pacific/Honolulu');
+  assert.equal(findCity('Denver').zone, 'America/Denver');
+  assert.equal(findCity('Nashville').zone, 'America/Chicago');
+  assert.equal(findCity('Las Vegas').market, 'leisure');
+  assert.equal(findCity('San Francisco').market, 'business');
+});
+
+test('the National Mall runs east–west: its monuments share one latitude (real coordinates)', () => {
+  const dc = findCity('Washington DC');
+  const lm = (name) => dc.areas.flatMap((a) => a.landmarks).find((l) => l.name === name).location;
+  const lat = lm('U.S. Capitol').lat;
+  for (const name of ['Lincoln Memorial', 'Washington Monument', 'National Mall']) assert.ok(Math.abs(lm(name).lat - lat) < 0.002, `${name} ${lm(name).lat} vs ${lat}`);
+  assert.ok(lm('Lincoln Memorial').lng < lm('Washington Monument').lng && lm('Washington Monument').lng < lm('U.S. Capitol').lng, 'west to east');
+  // Times Square → Empire State Building: about 1.1 km south.
+  const ny = findCity('New York');
+  const nyLm = (name) => ny.areas.flatMap((a) => a.landmarks).find((l) => l.name === name).location;
+  const d = distanceM(nyLm('Times Square'), nyLm('Empire State Building'));
+  assert.ok(d > 900 && d < 1300, String(d));
 });
 
 test('PRNG and hash are deterministic', () => {
-  assert.equal(hashString('sim-hz-001'), hashString('sim-hz-001'));
-  assert.notEqual(hashString('sim-hz-001'), hashString('sim-hz-002'));
+  assert.equal(hashString('sim-nyc-001'), hashString('sim-nyc-001'));
+  assert.notEqual(hashString('sim-nyc-001'), hashString('sim-nyc-002'));
   const a = mulberry32(42);
   const b = mulberry32(42);
   const xs = Array.from({ length: 5 }, () => a());
@@ -67,52 +102,53 @@ test('PRNG and hash are deterministic', () => {
   assert.ok(xs.every((x) => x >= 0 && x < 1));
 });
 
-test('generated hotels: 15–30 per city, every Hotel field filled, stable ids', () => {
+test('generated hotels: 18–30 per city, every Hotel field filled, stable ids', () => {
   for (const c of CITIES) {
     const list = generateHotels(c);
-    assert.ok(list.length >= 15 && list.length <= 30, `${c.name}: ${list.length}`);
+    assert.ok(list.length >= 18 && list.length <= 30, `${c.name}: ${list.length}`);
     assert.deepEqual(generateHotels(c), list, `${c.name} deterministic`);
     const names = new Set();
     list.forEach((h, i) => {
       assert.equal(h.id, `sim-${c.code}-${String(i + 1).padStart(3, '0')}`);
       assert.ok(!names.has(h.name), `duplicate name ${h.name}`);
       names.add(h.name);
-      assert.equal(h.city, c.fullName);
+      assert.equal(h.city, c.name);
+      assert.equal(h.state, c.state);
+      assert.equal(h.timeZone, c.zone);
       assert.equal(h.source, 'sim');
       assert.ok(Object.isFrozen(h));
-      assert.match(h.address, /（模拟地址）$/);
-      assert.ok(h.address.startsWith(h.district));
-      assert.ok(['economy', 'comfort', 'premium', 'luxury'].includes(h.category));
-      assert.ok(h.rating >= 4.0 && h.rating <= 4.9 && Math.round(h.rating * 10) === h.rating * 10, `${h.id} rating ${h.rating}`);
+      assert.match(h.address, / \(simulated address\)$/);
+      assert.ok(h.address.includes(`${h.district}, ${c.fullName}`), h.address);
+      assert.ok(['budget', 'midscale', 'upscale', 'luxury'].includes(h.category));
+      assert.ok(h.rating >= 3.6 && h.rating <= 4.9 && Math.round(h.rating * 10) === h.rating * 10, `${h.id} rating ${h.rating}`);
       assert.ok(Number.isInteger(h.reviewCount) && h.reviewCount > 0);
-      assert.ok(h.openedYear >= 2005 && h.openedYear <= 2025);
+      assert.ok(h.openedYear >= 2002 && h.openedYear <= 2025);
       assert.ok(Array.isArray(h.amenities) && h.amenities.length >= 3);
       assert.ok(Array.isArray(h.tags) && h.tags.length >= 1 && h.tags.length <= 4, `${h.id} tags`);
       assert.deepEqual(h.photos, []);
       assert.ok(Number.isInteger(h.priceHint) && h.priceHint > 0);
-      assert.ok(h.tel === '' || /^0\d{2,3}-0000\d{4}$/.test(h.tel), h.tel);
-      const area = c.areas.find((a) => a.name === h.businessArea);
+      // 555-0100…0199 are the numbers reserved for fiction.
+      assert.ok(h.tel === '' || new RegExp(`^\\(${c.areaCode}\\) 555-01\\d{2}$`).test(h.tel), h.tel);
+      const area = areaOf(h, c);
       assert.ok(area, `${h.id} businessArea`);
       assert.equal(h.district, area.district);
       const d = distanceM(h.location, area.center);
       assert.ok(d >= 140 && d <= area.spreadM + 20, `${h.id} ${d}m from ${area.name}`);
+      assert.doesNotMatch([h.name, h.address, ...h.amenities, ...h.tags].join(' '), /[㐀-鿿]/);
     });
   }
 });
 
-test('hotel names are fictional: none contain a real hotel brand', () => {
-  for (const c of CITIES) {
-    for (const h of generateHotels(c)) {
-      for (const brand of REAL_BRANDS) assert.ok(!h.name.includes(brand), `${h.name} contains ${brand}`);
-    }
-  }
-  for (const stem of ['驿居', '云栖', '半山']) assert.ok(!BRAND_STEMS.includes(stem), `${stem} is (close to) a real chain`);
+test('hotel names are fictional: none contain a real chain, brand or famous hotel', () => {
+  const re = new RegExp(`(^|[^A-Za-z])(${REAL_BRANDS.map((b) => b.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})($|[^A-Za-z])`, 'i');
+  for (const { h } of allHotels) assert.doesNotMatch(h.name, re, h.name);
+  for (const stem of BRAND_STEMS) assert.doesNotMatch(stem, re, stem);
 });
 
-test('no name reads like an official on-site hotel of a trademarked park (迪士尼, 长隆, 华侨城)', () => {
-  for (const c of CITIES) {
-    for (const h of generateHotels(c)) assert.ok(!/^(上海|广州|深圳)?(迪士尼|长隆|华侨城|欢乐谷|世界之窗)/.test(h.name), h.name);
-  }
+test('no name reads like an official hotel of a trademarked park or resort (Disney, Universal, SeaWorld, Opryland)', () => {
+  for (const { h } of allHotels) assert.doesNotMatch(h.name, /disney|universal|epcot|seaworld|opry|caesars|bellagio/i, h.name);
+  const orlando = generateHotels(findCity('Orlando')).filter((h) => /Disney|Universal/.test(h.businessArea));
+  assert.ok(orlando.length >= 4, 'the Orlando parks still have hotels nearby');
 });
 
 test('no brand stem appears twice in one area (no near-duplicate listings)', () => {
@@ -126,82 +162,43 @@ test('no brand stem appears twice in one area (no near-duplicate listings)', () 
       }
     }
   }
-  const r = hotels.searchHotels({ city: '西安', near: '钟楼', checkIn: '2026-11-10' });
+  const r = hotels.searchHotels({ city: 'New York', near: 'Times Square', checkIn: '2026-11-10' });
   const stems = r.hotels.flatMap((h) => BRAND_STEMS.filter((b) => h.name.includes(b)));
   assert.equal(new Set(stems).size, stems.length, r.hotels.map((h) => h.name).join(' | '));
 });
 
-test('inn-style hotels (民宿/客栈/院子) have no hotel-only amenities', () => {
+test('historic inns (French Quarter, Garden District) have no big-hotel amenities', () => {
   let n = 0;
-  for (const c of CITIES) {
-    for (const h of generateHotels(c)) {
-      const area = c.areas.find((a) => a.name === h.businessArea);
-      if (area.kind !== 'inn' || h.category === 'luxury') continue;
-      n++;
-      for (const a of ['机器人送物', '会议室', '室内泳池', '健身房', '24小时前台']) assert.ok(!h.amenities.includes(a), `${h.id} ${h.name} has ${a}`);
-      assert.ok(!h.tags.includes('带泳池'), `${h.id} tagged 带泳池`);
+  for (const { h, c } of allHotels) {
+    if (areaOf(h, c).kind !== 'inn' || h.category === 'luxury') continue;
+    n++;
+    for (const a of ['Fitness center', 'Meeting rooms', 'Business center', '24-hour front desk', 'Indoor pool', 'Outdoor pool']) {
+      assert.ok(!h.amenities.includes(a), `${h.id} ${h.name} has ${a}`);
     }
   }
-  assert.ok(n >= 20, String(n));
-  const r = hotels.searchHotels({ city: '北京', near: '什刹海', keyword: '泳池', checkIn: '2026-11-10' });
-  for (const h of r.hotels) if (/民宿|客栈|院子|小院/.test(h.name)) assert.deepEqual(h.matchedKeywords, [], h.name);
+  assert.ok(n >= 6, String(n));
 });
 
-test('car-free 鼓浪屿 offers no parking', () => {
-  const xm = generateHotels(findCity('厦门')).filter((h) => h.businessArea === '鼓浪屿');
-  assert.ok(xm.length >= 3);
-  for (const h of xm) assert.ok(![...h.amenities, ...h.tags].some((x) => /停车/.test(x)), `${h.name}: ${h.amenities.join()}`);
-  const r = hotels.searchHotels({ city: '厦门', near: '鼓浪屿', keyword: '能停车', checkIn: '2026-11-10', limit: 10 });
-  for (const h of r.hotels) if (h.businessArea === '鼓浪屿') assert.deepEqual(h.matchedKeywords, [], h.name);
-  assert.ok(r.hotels.some((h) => h.matchedKeywords.includes('停车')), 'mainland hotels still match 停车');
-  assert.notEqual(r.hotels[0].businessArea, '鼓浪屿');
-});
-
-test('canals and the 秦淮河 give 河景, never 江景', () => {
-  const suz = findCity('苏州');
-  const nj = findCity('南京');
-  const canalHotels = [...generateHotels(suz), ...generateHotels(nj).filter((h) => h.businessArea === '夫子庙/老门东')];
-  let river = 0;
-  for (const h of canalHotels) {
-    assert.ok(!h.tags.includes('江景房'), `${h.id} ${h.name}`);
-    const names = buildRoomOffer(h, { checkIn: '2026-11-10', checkOut: '2026-11-11' }).roomTypes.map((r) => r.name);
-    assert.ok(!names.some((n) => n.startsWith('江景')), `${h.id}: ${names.join()}`);
-    if (h.tags.includes('河景房')) {
-      river++;
-      assert.ok(names.some((n) => n.startsWith('河景')), `${h.id}: ${names.join()}`);
+test('amenities and views follow the place: casinos only in Las Vegas, oceans only on the coasts', () => {
+  for (const { h, c } of allHotels) {
+    if (h.amenities.includes('Casino')) assert.equal(c.code, 'lv', `${h.id} ${h.name}`);
+    if (['lv', 'den', 'bna', 'aus', 'chi', 'orl', 'nola', 'dc'].includes(c.code)) {
+      assert.ok(!h.tags.includes('Ocean view') && !h.tags.includes('Beach access'), `${h.id} ${c.name} ${h.tags.join()}`);
+      assert.ok(!h.amenities.includes('Beach access'), `${h.id} ${c.name}`);
     }
+    if (c.code === 'bos') assert.ok(!h.tags.includes('Ocean view'), `${h.id}: Boston's Seaport looks at the harbor`);
   }
-  assert.ok(river >= 1);
-  const r = hotels.searchHotels({ city: '苏州', near: '平江路', keyword: '河景', checkIn: '2026-11-10' });
-  assert.ok(r.hotels[0].matchedKeywords.includes('河景'), r.hotels.map((h) => h.name).join());
-  assert.ok(!r.notes.some((n) => n.includes('没有找到')), r.notes.join('|'));
-  assert.ok(generateHotels(findCity('上海')).some((h) => h.tags.includes('江景房')), '黄浦江 still gives 江景房');
+  assert.ok(generateHotels(findCity('Chicago')).some((h) => h.tags.includes('Lake view')), 'Lake Michigan gives lake views');
+  assert.ok(generateHotels(findCity('Boston')).some((h) => h.tags.includes('Harbor view')));
+  assert.ok(generateHotels(findCity('Honolulu')).some((h) => h.tags.includes('Ocean view')));
+  const airport = allHotels.filter(({ h, c }) => areaOf(h, c).kind === 'airport');
+  assert.ok(airport.filter(({ h }) => h.amenities.includes('Free airport shuttle')).length > airport.length / 2, 'most airport hotels run a shuttle');
 });
 
-test('far places are not passed off as near: 熊猫谷 (都江堰) and 崂山', () => {
-  assert.equal(supplier.resolveLandmark('成都', '熊猫谷'), null);
-  const panda = hotels.searchHotels({ city: '成都', near: '熊猫谷', checkIn: '2026-10-30', checkOut: '2026-10-31' });
-  assert.ok(panda.notes.some((n) => n.includes('没找到「熊猫谷」')), panda.notes.join('|'));
-  for (const near of ['崂山', '崂山风景区']) {
-    const r = hotels.searchHotels({ city: '青岛', near, checkIn: '2026-10-30', checkOut: '2026-10-31' });
-    assert.equal(r.landmark.name, '崂山风景区', near);
-    assert.ok(r.hotels.length > 0 && r.hotels.every((h) => h.distanceM > 5000), r.hotels.map((h) => h.distanceM).join());
-    assert.ok(r.notes.length > 0, 'the wider radius is explained');
-  }
-  assert.equal(supplier.resolveCity('崂山').name, '青岛');
-});
-
-test('北京 central-axis landmarks share one datum (GCJ-02)', () => {
-  const bj = findCity('北京');
-  const lm = (name) => bj.areas.flatMap((a) => a.landmarks).find((l) => l.name === name).location;
-  const axis = lm('故宫博物院').lng;
-  for (const name of ['天安门广场', '前门大街', '鼓楼']) assert.ok(Math.abs(lm(name).lng - axis) < 0.002, `${name} ${lm(name).lng} vs ${axis}`);
-});
-
-test('category mix follows the area: scenic/CBD/beach skew upscale, stations/airports skew budget', () => {
-  const rank = { economy: 0, comfort: 1, premium: 2, luxury: 3 };
+test('category mix follows the area: sights, downtown and beaches skew upscale, airports skew budget', () => {
+  const rank = { budget: 0, midscale: 1, upscale: 2, luxury: 3 };
   const avgRank = (kinds) => {
-    const xs = CITIES.flatMap((c) => generateHotels(c).filter((h) => kinds.includes(c.areas.find((a) => a.name === h.businessArea).kind)).map((h) => rank[h.category]));
+    const xs = allHotels.filter(({ h, c }) => kinds.includes(areaOf(h, c).kind)).map(({ h }) => rank[h.category]);
     return xs.reduce((a, b) => a + b, 0) / xs.length;
   };
   assert.ok(avgRank(['scenic', 'cbd', 'beach']) > avgRank(['station', 'airport']) + 0.8);
@@ -209,42 +206,47 @@ test('category mix follows the area: scenic/CBD/beach skew upscale, stations/air
     const cats = new Set(generateHotels(c).map((h) => h.category));
     assert.ok(cats.size >= 3, `${c.name} has a category mix`);
   }
-  const stationLuxury = CITIES.flatMap((c) => generateHotels(c).filter((h) => h.category === 'luxury' && ['station', 'airport'].includes(c.areas.find((a) => a.name === h.businessArea).kind)));
-  assert.equal(stationLuxury.length, 0);
+  const airportLuxury = allHotels.filter(({ h, c }) => h.category === 'luxury' && ['station', 'airport'].includes(areaOf(h, c).kind));
+  assert.equal(airportLuxury.length, 0);
 });
 
 test('supplier.resolveCity is tolerant', () => {
-  for (const t of ['杭州', '杭州市', 'hz', 'Hangzhou', ' HANGZHOU ', '去杭州玩', '杭州西湖']) assert.equal(supplier.resolveCity(t)?.name, '杭州', t);
-  assert.equal(supplier.resolveCity('sz').name, '深圳');
-  assert.equal(supplier.resolveCity('suzhou').name, '苏州');
-  assert.equal(supplier.resolveCity('魔都').name, '上海');
-  assert.equal(supplier.resolveCity('鼓浪屿').name, '厦门', 'a unique landmark identifies its city');
-  assert.equal(supplier.resolveCity('外滩').name, '上海');
-  assert.equal(supplier.resolveCity('拉萨'), null);
-  assert.equal(supplier.resolveCity(''), null);
-  // Street names that contain another city's name: '广州北京路' is 广州, '长安街' is not 西安.
-  assert.equal(supplier.resolveCity('广州北京路').name, '广州');
-  assert.equal(supplier.resolveCity('广州北京路步行街').name, '广州');
-  assert.equal(supplier.resolveCity('北京路').name, '广州');
-  assert.equal(supplier.resolveCity('南京东路').name, '上海');
-  assert.equal(supplier.resolveCity('上海南京路').name, '上海');
-  assert.equal(supplier.resolveCity('北京长安街').name, '北京');
-  assert.notEqual(supplier.resolveCity('长安街')?.name, '西安');
-  assert.equal(supplier.resolveCity('长安').name, '西安');
-  const hz = supplier.resolveCity('杭州');
-  assert.deepEqual(Object.keys(hz).sort(), ['center', 'code', 'fullName', 'name', 'season', 'tier']);
-  assert.deepEqual(supplier.listCities().find((c) => c.name === '三亚'), { name: '三亚', tier: 'tourist' });
+  for (const t of ['New York', 'new york city', 'NYC', 'New York, NY', ' NEW YORK ', 'Manhattan', 'Brooklyn', 'Times Square']) {
+    assert.equal(supplier.resolveCity(t)?.name, 'New York', t);
+  }
+  const cases = [
+    ['going to Vegas next week', 'Las Vegas'], ['LA', 'Los Angeles'], ['L.A.', 'Los Angeles'], ['Hollywood', 'Los Angeles'], ['SF', 'San Francisco'],
+    ['DC', 'Washington DC'], ['D.C.', 'Washington DC'], ['Washington', 'Washington DC'], ['Washington, DC', 'Washington DC'], ['NOLA', 'New Orleans'],
+    ['the Big Easy', 'New Orleans'], ['Miami Beach', 'Miami'], ['Waikiki', 'Honolulu'], ['Oahu', 'Honolulu'], ['Austin, TX', 'Austin'],
+    ['Music City', 'Nashville'], ['Mile High City', 'Denver'], ['Chi-town', 'Chicago'], ['Beantown', 'Boston'], ['Disney World', 'Orlando'],
+    ['the Las Vegas Strip', 'Las Vegas'],
+  ];
+  for (const [t, name] of cases) assert.equal(supplier.resolveCity(t)?.name, name, t);
+  // A place name that contains another city's name: Washington Square Park is in New York.
+  assert.equal(supplier.resolveCity('Washington Square Park').name, 'New York');
+  assert.equal(supplier.resolveCity('near Washington Square Park').name, 'New York');
+  // A place several cities share is not enough on its own; with a city name it is.
+  assert.equal(supplier.resolveCity('Union Station'), null);
+  assert.equal(supplier.resolveCity('Union Station in Chicago').name, 'Chicago');
+  for (const none of ['Portland', 'Paris', '', 'Mars']) assert.equal(supplier.resolveCity(none), null, none);
+  const ny = supplier.resolveCity('New York');
+  assert.deepEqual(Object.keys(ny).sort(), ['areaCode', 'center', 'code', 'fullName', 'market', 'name', 'priceLevel', 'season', 'state', 'tax', 'weekdays', 'zone']);
+  assert.deepEqual(supplier.listCities().find((c) => c.name === 'Honolulu'), { name: 'Honolulu', state: 'HI', zone: 'Pacific/Honolulu', market: 'leisure' });
+  assert.equal(supplier.listCities().length, 16);
 });
 
-test('supplier.resolveLandmark: required aliases resolve to the right real place', () => {
+test('supplier.resolveLandmark: aliases resolve to the right real place', () => {
   const cases = [
-    ['杭州', '西湖边', '西湖'], ['杭州', '灵隐寺', '灵隐寺'], ['上海', '外滩', '外滩'], ['上海', '迪士尼', '上海迪士尼乐园'],
-    ['成都', '春熙路', '春熙路'], ['成都', '宽窄巷子', '宽窄巷子'], ['西安', '兵马俑', '秦始皇帝陵博物院'], ['厦门', '鼓浪屿', '鼓浪屿'],
-    ['三亚', '亚龙湾', '亚龙湾'], ['杭州', '断桥', '断桥残雪'], ['杭州', '杭州东站附近', '杭州东站'], ['杭州', '离西湖近一点', '西湖'],
-    ['杭州', '城站', '杭州站'], ['杭州', '西湖边的酒店', '西湖'], ['杭州', '杭州西湖', '西湖'], ['北京', '故宫', '故宫博物院'],
-    ['北京', '天安门', '天安门广场'], ['北京', '北京南站', '北京南站'], ['上海', '虹桥机场', '虹桥机场T2航站楼'],
-    ['广州', '小蛮腰', '广州塔'], ['深圳', '世界之窗', '世界之窗'], ['重庆', '洪崖洞', '洪崖洞'], ['南京', '夫子庙', '夫子庙'],
-    ['苏州', '拙政园', '拙政园'], ['青岛', '栈桥', '栈桥'], ['长沙', '橘子洲头', '橘子洲'], ['武汉', '黄鹤楼', '黄鹤楼'], ['丽江', '古城', '丽江古城'],
+    ['New York', 'Times Square', 'Times Square'], ['New York', 'near Times Sq', 'Times Square'], ['New York', 'the Met', 'The Metropolitan Museum of Art'],
+    ['New York', 'JFK', 'John F. Kennedy International Airport'], ['New York', 'Penn Station', 'Penn Station'], ['New York', 'Empire State', 'Empire State Building'],
+    ['New York', 'Brooklyn Bridge', 'Brooklyn Bridge'], ['Los Angeles', 'LAX', 'Los Angeles International Airport'], ['Los Angeles', 'Santa Monica Pier', 'Santa Monica Pier'],
+    ['San Francisco', 'Golden Gate', 'Golden Gate Bridge'], ['San Francisco', 'SFO', 'San Francisco International Airport'], ['Las Vegas', 'the Strip', 'Las Vegas Strip'],
+    ['Las Vegas', 'Fremont Street', 'Fremont Street Experience'], ['Orlando', 'Disney World', 'Walt Disney World Resort'], ['Orlando', 'Universal', 'Universal Orlando Resort'],
+    ['Chicago', 'the Bean', 'Cloud Gate'], ['Chicago', "O'Hare", "O'Hare International Airport"], ['Chicago', 'Wrigley Field', 'Wrigley Field'],
+    ['Seattle', 'Pike Place', 'Pike Place Market'], ['Boston', 'Fenway', 'Fenway Park'], ['Washington DC', 'Capitol', 'U.S. Capitol'],
+    ['New Orleans', 'Bourbon St', 'Bourbon Street'], ['Honolulu', 'Waikiki', 'Waikiki Beach'], ['Honolulu', 'Pearl Harbor', 'Pearl Harbor National Memorial'],
+    ['San Diego', 'Gaslamp', 'Gaslamp Quarter'], ['Nashville', 'Broadway', 'Lower Broadway'], ['Austin', '6th Street', 'Sixth Street'],
+    ['Denver', 'Union Station', 'Denver Union Station'], ['Miami', 'South Beach', 'South Beach'],
   ];
   for (const [city, text, expected] of cases) {
     const lm = supplier.resolveLandmark(city, text);
@@ -252,315 +254,383 @@ test('supplier.resolveLandmark: required aliases resolve to the right real place
     assert.ok(lm.location && Number.isFinite(lm.location.lng));
     assert.equal(typeof lm.area, 'string');
   }
-  assert.equal(supplier.resolveLandmark('杭州', '湖滨').type, '商圈');
-  assert.equal(supplier.resolveLandmark('杭州', '湖滨路').matched, 'partial');
-  assert.equal(supplier.resolveLandmark('杭州', '外滩'), null, '外滩 is not in 杭州');
-  assert.equal(supplier.resolveLandmark('杭州', '火星'), null);
-  assert.equal(supplier.resolveLandmark('杭州', '杭州'), null, 'the city itself is not a landmark');
-  assert.equal(supplier.resolveLandmark('杭州', '杭州市区'), null);
-  assert.equal(supplier.resolveLandmark('拉萨', '布达拉宫'), null);
+  assert.equal(supplier.resolveLandmark('New York', 'Midtown').type, 'Neighborhood');
+  assert.equal(supplier.resolveLandmark('New Orleans', 'French Quarter').name, 'French Quarter');
+  assert.equal(supplier.resolveLandmark('New York', 'Times Square subway station').matched, 'partial');
+  assert.equal(supplier.resolveLandmark('New York', 'Fenway Park'), null, 'Fenway is not in New York');
+  assert.equal(supplier.resolveLandmark('New York', 'Mars'), null);
+  assert.equal(supplier.resolveLandmark('New York', 'New York'), null, 'the city itself is not a landmark');
+  assert.equal(supplier.resolveLandmark('New York', 'New York City'), null);
+  assert.equal(supplier.resolveLandmark('Paris', 'Eiffel Tower'), null);
+});
+
+test('far places are not passed off as near: Disneyland, the Grand Canyon, Red Rocks', () => {
+  assert.equal(supplier.resolveLandmark('Los Angeles', 'Disneyland'), null, 'Disneyland is in Anaheim');
+  assert.equal(supplier.resolveLandmark('Las Vegas', 'Grand Canyon'), null);
+  assert.equal(supplier.resolveLandmark('Denver', 'Red Rocks'), null);
+  const r = hotels.searchHotels({ city: 'Las Vegas', near: 'Grand Canyon', checkIn: '2026-11-10' });
+  assert.ok(r.notes.includes('Couldn\'t find "Grand Canyon" in Las Vegas, so I searched the whole city'), r.notes.join('|'));
+  assert.equal(r.landmark, null);
 });
 
 test('supplier.searchHotels filters by radius, categories and keyword; getHotel round-trips', () => {
-  const west = supplier.resolveLandmark('杭州', '西湖');
-  const near = supplier.searchHotels({ city: '杭州', location: west.location, radiusM: 2000 });
+  const ts = supplier.resolveLandmark('New York', 'Times Square');
+  const near = supplier.searchHotels({ city: 'New York', location: ts.location, radiusM: 1600 });
   assert.ok(near.length > 0);
-  assert.ok(near.every((h) => distanceM(h.location, west.location) <= 2000));
-  const lux = supplier.searchHotels({ city: '杭州', categories: ['luxury'] });
+  assert.ok(near.every((h) => distanceM(h.location, ts.location) <= 1600));
+  const lux = supplier.searchHotels({ city: 'New York', categories: ['luxury'] });
   assert.ok(lux.length && lux.every((h) => h.category === 'luxury'));
-  const family = supplier.searchHotels({ city: '杭州', keyword: '亲子' });
-  assert.ok(family.length && family.every((h) => hotelMatchesKeyword(h, ['亲子'])));
-  assert.deepEqual(supplier.searchHotels({ city: '拉萨' }), []);
-  const h = supplier.searchHotels({ city: '杭州' })[3];
+  const family = supplier.searchHotels({ city: 'Orlando', keyword: 'family' });
+  assert.ok(family.length && family.every((h) => hotelMatchesKeyword(h, ['family'])));
+  assert.deepEqual(supplier.searchHotels({ city: 'Paris' }), []);
+  const h = supplier.searchHotels({ city: 'New York' })[3];
   assert.equal(supplier.getHotel(h.id), h);
-  assert.equal(supplier.getHotel('sim-hz-999'), null);
+  assert.equal(supplier.getHotel('sim-nyc-999'), null);
   assert.equal(supplier.getHotel('sim-xx-001'), null);
   assert.equal(supplier.getHotel('nope'), null);
 });
 
-test('keyword parsing: 和 separates wishes but not words', () => {
-  assert.deepEqual(parseKeyword('亲子和泳池').tokens, ['亲子', '泳池']);
-  assert.deepEqual(parseKeyword('温和').tokens, ['温和']);
-  assert.deepEqual(parseKeyword('临河').tokens, ['河景']);
+test('keyword parsing: wishes, stop words, phrases, synonyms and category words', () => {
+  assert.deepEqual(parseKeyword('pool and spa').tokens, ['pool', 'spa']);
+  assert.deepEqual(parseKeyword('family-friendly with a pool'), { tokens: ['family', 'pool'], categories: [] });
+  assert.deepEqual(parseKeyword('five-star ocean view'), { tokens: ['ocean view'], categories: ['luxury'] });
+  assert.deepEqual(parseKeyword('cheap'), { tokens: [], categories: ['budget'] });
+  assert.deepEqual(parseKeyword('breakfast included, kids'), { tokens: ['breakfast', 'family'], categories: [] });
+  assert.deepEqual(parseKeyword('mid-range near the subway'), { tokens: ['transit'], categories: ['midscale'] });
+  assert.deepEqual(parseKeyword('brand new').tokens, ['newly opened']);
+  assert.deepEqual(parseKeyword('pet friendly, free parking').tokens.sort(), ['parking', 'pet']);
+  assert.deepEqual(parseKeyword('harbor view').tokens, ['harbor view']);
+  assert.deepEqual(parseKeyword('New York quiet', { ignore: ['new york'] }), { tokens: ['quiet'], categories: [] });
+  assert.equal(normalizeCategory('Luxury'), 'luxury');
+  assert.equal(normalizeCategory('five-star'), 'luxury');
+  assert.equal(normalizeCategory('cheap'), 'budget');
+  assert.equal(normalizeCategory('upscale'), 'upscale');
+  assert.equal(normalizeCategory('whatever'), null);
+  // Whole words only: 'bar' is not in 'Harborline'; 'pool' is in 'Outdoor pool'; 'view' alone is any view.
+  const h = { name: 'Harborline Suites', businessArea: 'X', district: 'Y', tags: ['City view'], amenities: ['Outdoor pool'], category: 'midscale' };
+  assert.equal(hotelMatchesKeyword(h, ['pool']), true);
+  assert.equal(hotelMatchesKeyword(h, ['bar']), false);
+  assert.equal(hotelMatchesKeyword(h, ['view']), true);
+  assert.equal(hotelMatchesKeyword(h, ['ocean view']), false);
+  assert.equal(hotelMatchesKeyword(h, ['midscale']), true);
 });
 
-test('keyword parsing: stop words, prefixes, synonyms and category words', () => {
-  assert.deepEqual(parseKeyword('亲子 带泳池的酒店'), { tokens: ['亲子', '泳池'], categories: [] });
-  assert.deepEqual(parseKeyword('五星，江景'), { tokens: ['江景'], categories: ['luxury'] });
-  assert.deepEqual(parseKeyword('经济型'), { tokens: [], categories: ['economy'] });
-  assert.deepEqual(parseKeyword('含早 带娃'), { tokens: ['含早', '亲子'], categories: [] });
-  assert.deepEqual(parseKeyword('杭州 安静', { ignore: ['杭州'] }), { tokens: ['安静'], categories: [] });
-  assert.equal(normalizeCategory('豪华型'), 'luxury');
-  assert.equal(normalizeCategory('premium'), 'premium');
-  assert.equal(normalizeCategory('随便'), null);
-});
-
-test('searchHotels: unsupported / missing city errors are typed and Chinese', () => {
-  assert.throws(() => hotels.searchHotels({ city: '拉萨' }), (err) => {
+test('searchHotels: unsupported / missing city errors are typed and English', () => {
+  assert.throws(() => hotels.searchHotels({ city: 'Paris' }), (err) => {
     assert.ok(err instanceof HotelError);
     assert.equal(err.code, 'city_not_supported');
-    assert.match(err.message, /^演示版暂时只覆盖：北京、上海、广州、深圳、杭州/);
-    assert.match(err.message, /拉萨/);
+    assert.match(err.message, /^The demo covers New York, Los Angeles, San Francisco, Las Vegas, Miami/);
+    assert.match(err.message, /"Paris" isn't covered yet$/);
     return true;
   });
-  assert.throws(() => hotels.searchHotels({}), (err) => err instanceof HotelError && err.code === 'city_required');
+  assert.throws(() => hotels.searchHotels({}), (err) => err instanceof HotelError && err.code === 'city_required' && err.message === 'Which city are you going to?');
 });
 
-test('凌晨入住: before 06:00 the night in progress (yesterday\'s date) is bookable and is the default', () => {
-  const at = (iso) => createHotelService({ supplier, clock: { now: () => new Date(iso) } });
-  const late = at('2026-10-26T01:30:00+08:00');
-  const r = late.searchHotels({ city: '杭州' });
-  assert.deepEqual([r.query.checkIn, r.query.checkOut], ['2026-10-25', '2026-10-26']);
-  assert.ok(r.notes.some((n) => n.includes('凌晨') && n.includes('今晚')), r.notes.join('|'));
-  assert.equal(late.searchHotels({ city: '杭州', checkIn: '2026-10-25', checkOut: '2026-10-26' }).query.checkIn, '2026-10-25');
-  assert.equal(late.priceCheck({ hotelId: 'sim-hz-001', rateId: 'R1-BF0-NR', checkIn: '2026-10-25', checkOut: '2026-10-26' }).rate.rateId, 'R1-BF0-NR');
-  assert.throws(() => late.searchHotels({ city: '杭州', checkIn: '2026-10-24', checkOut: '2026-10-25' }), (e) => e.code === 'invalid_dates' && /凌晨/.test(e.message));
-  const morning = at('2026-10-26T06:30:00+08:00');
-  assert.equal(morning.searchHotels({ city: '杭州' }).query.checkIn, '2026-10-26');
-  assert.throws(() => morning.searchHotels({ city: '杭州', checkIn: '2026-10-25', checkOut: '2026-10-26' }), (e) => e.code === 'invalid_dates');
+test('"tonight" is the user\'s tonight: Los Angeles at 11 PM, and the night in progress after midnight', () => {
+  // 11 PM Wednesday in Los Angeles is 2 AM Thursday in New York.
+  const la11pm = at('2026-11-05T07:00:00Z');
+  const vegas = la11pm.searchHotels({ city: 'Las Vegas', timeZone: 'America/Los_Angeles' });
+  assert.deepEqual([vegas.query.checkIn, vegas.query.checkOut], ['2026-11-04', '2026-11-05']);
+  assert.ok(vegas.notes.includes('No dates given, so I searched one night from tonight'), vegas.notes.join('|'));
+  assert.equal(vegas.query.timeZone, 'America/Los_Angeles', 'the hotel\'s own zone');
+  // In New York it is already 2 AM, so the same night is "the night in progress" there, and still bookable.
+  const ny = la11pm.searchHotels({ city: 'New York', timeZone: 'America/Los_Angeles' });
+  assert.deepEqual([ny.query.checkIn, ny.query.checkOut], ['2026-11-04', '2026-11-05']);
+  assert.ok(ny.notes.some((n) => n.startsWith("No dates given and it's after midnight, so I searched the night in progress (check in Wed, Nov 4")), ny.notes.join('|'));
+  assert.equal(ny.query.timeZone, 'America/New_York');
+  // Honolulu (9 PM) agrees.
+  assert.equal(la11pm.searchHotels({ city: 'Honolulu', timeZone: 'America/Los_Angeles' }).query.checkIn, '2026-11-04');
+
+  // 1:30 AM in Los Angeles: still the night of Nov 4 for the user, bookable and the default.
+  const late = at('2026-11-05T09:30:00Z');
+  const r = late.searchHotels({ city: 'Los Angeles', timeZone: 'America/Los_Angeles' });
+  assert.deepEqual([r.query.checkIn, r.query.checkOut], ['2026-11-04', '2026-11-05']);
+  assert.ok(r.notes.some((n) => n.includes('after midnight') && n.includes('night in progress')), r.notes.join('|'));
+  assert.equal(late.searchHotels({ city: 'Los Angeles', checkIn: '2026-11-04', checkOut: '2026-11-05' }).query.checkIn, '2026-11-04');
+  assert.equal(late.priceCheck({ hotelId: 'sim-la-002', rateId: 'R1-RO-NR', checkIn: '2026-11-04', checkOut: '2026-11-05' }).rate.rateId, 'R1-RO-NR');
+  assert.throws(() => late.searchHotels({ city: 'Los Angeles', checkIn: '2026-11-03', checkOut: '2026-11-04' }),
+    (e) => e.code === 'invalid_dates' && /night in progress/.test(e.message));
+  // 6:30 AM in Los Angeles: a new day.
+  const morning = at('2026-11-05T14:30:00Z');
+  assert.equal(morning.searchHotels({ city: 'Los Angeles', timeZone: 'America/Los_Angeles' }).query.checkIn, '2026-11-05');
+  assert.throws(() => morning.searchHotels({ city: 'Los Angeles', checkIn: '2026-11-04', checkOut: '2026-11-05' }), (e) => e.code === 'invalid_dates');
+  // A New York user at 7 AM (4 AM in Los Angeles) asking for Los Angeles "tonight" means Thursday night.
+  const nyMorning = at('2026-11-05T12:00:00Z');
+  assert.equal(nyMorning.searchHotels({ city: 'Los Angeles', timeZone: 'America/New_York' }).query.checkIn, '2026-11-05');
 });
 
-test('searchHotels: a party that does not fit is not 满房 (fitsParty / needRooms), children count as occupants', () => {
-  const r = hotels.searchHotels({ city: '成都', near: '春熙路', checkIn: '2026-10-25', checkOut: '2026-10-26', adults: 3, categories: ['economy'] });
+test('searchHotels: a party that does not fit is not sold out (fitsParty / needRooms), children count as occupants', () => {
+  const stay = { checkIn: '2026-11-10', checkOut: '2026-11-11' };
+  const r = hotels.searchHotels({ city: 'Chicago', near: 'the Loop', ...stay, adults: 5, categories: ['budget'] });
   assert.ok(r.hotels.length > 0);
-  assert.ok(!r.notes.some((n) => n.includes('都满房了')), r.notes.join('|'));
-  assert.ok(r.notes.some((n) => n.includes('2间') && n.includes('3位成人')), r.notes.join('|'));
+  assert.ok(!r.notes.some((n) => n.includes('sold out')), r.notes.join('|'));
+  assert.ok(r.notes.some((n) => /^5 adults in 1 room: .* at most 4, so book 2 rooms or a suite there$/.test(n)), r.notes.join('|'));
   for (const h of r.hotels) {
-    if (h.lowestPrice !== null) continue;
+    assert.equal(h.lowestPrice, null);
     assert.equal(h.fitsParty, false, h.id);
     assert.equal(h.needRooms, 2);
-    assert.equal(h.maxOccupancy, 2);
+    assert.equal(h.maxOccupancy, 4);
   }
-  const kids = hotels.searchHotels({ city: '成都', near: '春熙路', checkIn: '2026-10-25', checkOut: '2026-10-26', adults: 2, children: 1, categories: ['economy'] });
+  const kids = hotels.searchHotels({ city: 'Chicago', near: 'the Loop', ...stay, adults: 4, children: 1, categories: ['budget'] });
   assert.equal(kids.query.children, 1);
   assert.deepEqual(kids.hotels.map((h) => [h.id, h.lowestPrice, h.fitsParty]), r.hotels.map((h) => [h.id, h.lowestPrice, h.fitsParty]));
-  assert.ok(kids.notes.some((n) => n.includes('1名儿童')), kids.notes.join('|'));
-  const two = hotels.searchHotels({ city: '成都', near: '春熙路', checkIn: '2026-10-25', checkOut: '2026-10-26', adults: 2, children: 1, rooms: 2, categories: ['economy'] });
+  assert.ok(kids.notes.some((n) => n.startsWith('4 adults and 1 child in 1 room')), kids.notes.join('|'));
+  const two = hotels.searchHotels({ city: 'Chicago', near: 'the Loop', ...stay, adults: 4, children: 1, rooms: 2, categories: ['budget'] });
   assert.ok(two.hotels.every((h) => h.fitsParty), 'two rooms fit');
-  const four = hotels.searchHotels({ city: '上海', near: '外滩', checkIn: '2026-11-10', adults: 4, rooms: 1 });
-  assert.ok(!four.notes.some((n) => n.includes('都满房了')), four.notes.join('|'));
-  assert.equal(hotels.searchHotels({ city: '杭州' }).query.children, 0);
-  assert.throws(() => hotels.priceCheck({ hotelId: 'sim-hz-001', rateId: 'R1-BF0-NR', checkIn: '2026-11-10', checkOut: '2026-11-11', adults: 2, children: 1 }), (e) => e.code === 'too_many_guests' && /1名儿童/.test(e.message));
-  const { offer } = hotels.getRoomOffer({ hotelId: 'sim-hz-001', checkIn: '2026-11-10', checkOut: '2026-11-11', adults: 2, children: 1 });
+  assert.equal(hotels.searchHotels({ city: 'New York' }).query.children, 0);
+  assert.throws(() => hotels.priceCheck({ hotelId: 'sim-nyc-002', rateId: 'R1-RO-NR', ...stay, adults: 2, children: 1 }),
+    (e) => e.code === 'too_many_guests' && /2 adults and 1 child/.test(e.message));
+  const { offer } = hotels.getRoomOffer({ hotelId: 'sim-nyc-002', ...stay, adults: 2, children: 1 });
   assert.equal(offer.children, 1);
   assert.ok(offer.roomTypes.every((rt) => rt.maxOccupancy >= 3 || rt.rates.every((x) => x.unavailableReason === 'occupancy')));
 });
 
 test('searchHotels: dates default to tonight → tomorrow and are validated', () => {
-  const r = hotels.searchHotels({ city: '杭州' });
-  assert.equal(r.query.checkIn, '2026-10-25');
-  assert.equal(r.query.checkOut, '2026-10-26');
+  const r = hotels.searchHotels({ city: 'New York' });
+  assert.equal(r.query.checkIn, '2026-11-04');
+  assert.equal(r.query.checkOut, '2026-11-05');
   assert.equal(r.query.nights, 1);
   assert.equal(r.query.datesAssumed, true);
-  assert.ok(r.notes.some((n) => n.includes('今晚')));
+  assert.ok(r.notes.includes('No dates given, so I searched one night from tonight'), r.notes.join('|'));
   assert.equal(r.demo, true);
 
-  const given = hotels.searchHotels({ city: '杭州', checkIn: '2026-10-30', checkOut: '2026-11-01' });
+  const given = hotels.searchHotels({ city: 'New York', checkIn: '2026-11-06', checkOut: '2026-11-08' });
   assert.equal(given.query.datesAssumed, false);
   assert.equal(given.query.nights, 2);
+  assert.ok(!given.notes.some((n) => n.startsWith('No dates')));
+  assert.ok(hotels.searchHotels({ city: 'New York', checkIn: '2026-11-06' }).notes.includes('No check-out date given, so I searched one night'));
 
-  for (const [ci, co, re] of [['2026-10-24', '2026-10-25', /已经过去/], ['2026-10-30', '2026-10-29', /晚于/], ['2026-11-30', '2027-01-30', /30晚/], ['下周五', '', /格式/]]) {
-    assert.throws(() => hotels.searchHotels({ city: '杭州', checkIn: ci, checkOut: co }), (err) => err instanceof HotelError && err.code === 'invalid_dates' && re.test(err.message));
+  for (const [ci, co, re] of [['2026-11-03', '2026-11-04', /has already passed/], ['2026-11-10', '2026-11-09', /Check-out needs to be after check-in/],
+    ['2026-11-30', '2027-01-30', /at most 30 nights/], ['next friday', '', /isn't a valid date; use YYYY-MM-DD/]]) {
+    assert.throws(() => hotels.searchHotels({ city: 'New York', checkIn: ci, checkOut: co }), (err) => err instanceof HotelError && err.code === 'invalid_dates' && re.test(err.message), ci);
   }
 });
 
-test('searchHotels: defaults and clamping', () => {
-  const r = hotels.searchHotels({ city: 'hangzhou', limit: 50, radiusKm: 100, adults: '3', rooms: 9, sort: 'weird', near: '西湖' });
-  assert.equal(r.query.city, '杭州');
+test('searchHotels: defaults and clamping (miles; radius_km still understood)', () => {
+  const r = hotels.searchHotels({ city: 'nyc', limit: 50, radiusMiles: 100, adults: '3', rooms: 9, sort: 'weird', near: 'Times Square' });
+  assert.equal(r.query.city, 'New York');
+  assert.equal(r.query.state, 'NY');
   assert.equal(r.query.limit, 10);
-  assert.equal(r.query.radiusKm, 20);
+  assert.equal(r.query.radiusMiles, 12);
   assert.equal(r.query.adults, 3);
   assert.equal(r.query.rooms, 5);
   assert.equal(r.query.sort, 'recommended');
-  const d = hotels.searchHotels({ city: '杭州' });
-  assert.deepEqual([d.query.adults, d.query.rooms, d.query.radiusKm, d.query.limit], [2, 1, 3, 6]);
+  assert.equal(r.query.currency, 'USD');
+  const d = hotels.searchHotels({ city: 'New York' });
+  assert.deepEqual([d.query.adults, d.query.rooms, d.query.radiusMiles, d.query.limit], [2, 1, 2, 6]);
   assert.ok(d.hotels.length <= 6);
+  assert.equal(hotels.searchHotels({ city: 'New York', near: 'Times Square', radiusKm: 1.6 }).query.radiusMiles, 1);
 });
 
-test('searchHotels near a landmark: distances, radius and the result shape', () => {
-  const r = hotels.searchHotels({ city: '杭州', near: '西湖边', checkIn: '2026-11-10', checkOut: '2026-11-12', limit: 10 });
-  assert.equal(r.landmark.name, '西湖');
+test('searchHotels near a landmark: distances in miles, radius and the result shape', () => {
+  const r = hotels.searchHotels({ city: 'New York', near: 'Times Square', checkIn: '2026-11-10', checkOut: '2026-11-12', limit: 10 });
+  assert.equal(r.landmark.name, 'Times Square');
   assert.ok(r.totalFound >= r.hotels.length && r.hotels.length > 0);
   for (const h of r.hotels) {
-    assert.ok(Number.isInteger(h.distanceM) && h.distanceM <= 3000, `${h.id} ${h.distanceM}`);
+    assert.ok(Number.isInteger(h.distanceM) && h.distanceM <= 3300, `${h.id} ${h.distanceM}`);
+    assert.equal(h.distanceMiles, Math.round((h.distanceM / 1609.344) * 10) / 10);
     assert.ok(h.lowestPrice === null || Number.isInteger(h.lowestPrice));
-    for (const k of ['id', 'name', 'city', 'district', 'address', 'location', 'tel', 'rating', 'reviewCount', 'openedYear', 'amenities', 'category', 'businessArea', 'tags', 'photos', 'priceHint', 'source']) {
+    for (const k of ['id', 'name', 'city', 'state', 'district', 'address', 'location', 'tel', 'rating', 'reviewCount', 'openedYear', 'amenities',
+      'category', 'businessArea', 'tags', 'photos', 'priceHint', 'timeZone', 'source']) {
       assert.ok(k in h, `hotel.${k}`);
     }
   }
-  const byDistance = hotels.searchHotels({ city: '杭州', near: '灵隐寺', sort: 'distance', checkIn: '2026-11-10' });
+  const byDistance = hotels.searchHotels({ city: 'Seattle', near: 'Space Needle', sort: 'distance', checkIn: '2026-11-10' });
   const ds = byDistance.hotels.map((h) => h.distanceM);
   assert.deepEqual(ds, [...ds].sort((a, b) => a - b));
-  const noLandmark = hotels.searchHotels({ city: '杭州', sort: 'distance' });
+  const noLandmark = hotels.searchHotels({ city: 'New York', sort: 'distance' });
   assert.equal(noLandmark.query.sort, 'recommended');
-  assert.ok(noLandmark.hotels.every((h) => h.distanceM === null));
+  assert.ok(noLandmark.hotels.every((h) => h.distanceM === null && h.distanceMiles === undefined));
 });
 
 test('searchHotels: an unknown `near` falls back to the whole city with a note', () => {
-  const r = hotels.searchHotels({ city: '杭州', near: '火星基地' });
+  const r = hotels.searchHotels({ city: 'New York', near: 'Mars base' });
   assert.equal(r.landmark, null);
-  assert.ok(r.notes.some((n) => n.includes('没找到「火星基地」')));
+  assert.ok(r.notes.includes('Couldn\'t find "Mars base" in New York, so I searched the whole city'), r.notes.join('|'));
   assert.ok(r.hotels.length > 0);
 });
 
 test('searchHotels: a landmark given as keyword is treated as near', () => {
-  const r = hotels.searchHotels({ city: '上海', keyword: '迪士尼' });
-  assert.equal(r.landmark?.name, '上海迪士尼乐园');
-  assert.ok(r.hotels.every((h) => h.distanceM !== null));
+  const r = hotels.searchHotels({ city: 'Orlando', keyword: 'Disney World' });
+  assert.equal(r.landmark?.name, 'Walt Disney World Resort');
+  assert.ok(r.hotels.length > 0 && r.hotels.every((h) => h.distanceM !== null));
 });
 
 test('searchHotels: radius expands with a note when nothing is close enough', () => {
-  const r = hotels.searchHotels({ city: '丽江', near: '玉龙雪山', radiusKm: 1 });
+  const r = hotels.searchHotels({ city: 'San Diego', near: 'Torrey Pines', radiusMiles: 0.3 });
   assert.ok(r.hotels.length > 0);
-  assert.ok(r.notes.some((n) => /1公里内没有找到合适的，已扩大到\d+公里/.test(n)), r.notes.join('|'));
+  assert.ok(r.notes.some((n) => /^Nothing suitable within 0\.3 miles, so I widened the search to \d+(\.\d)? miles$/.test(n)), r.notes.join('|'));
 });
 
-test('searchHotels: categories filter and Chinese category words', () => {
-  const r = hotels.searchHotels({ city: '成都', near: '春熙路', categories: ['economy'] });
-  assert.ok(r.hotels.length > 0 && r.hotels.every((h) => h.category === 'economy'));
-  const zh = hotels.searchHotels({ city: '北京', categories: ['豪华型'] });
-  assert.ok(zh.hotels.every((h) => h.category === 'luxury'));
-  assert.deepEqual(zh.query.categories, ['luxury']);
-  const kw = hotels.searchHotels({ city: '北京', keyword: '五星' });
+test('searchHotels: categories filter, also as words', () => {
+  const r = hotels.searchHotels({ city: 'New York', near: 'Times Square', categories: ['budget'] });
+  assert.ok(r.hotels.length > 0 && r.hotels.every((h) => h.category === 'budget'));
+  const word = hotels.searchHotels({ city: 'Boston', categories: ['Luxury'] });
+  assert.ok(word.hotels.length > 0 && word.hotels.every((h) => h.category === 'luxury'));
+  assert.deepEqual(word.query.categories, ['luxury']);
+  const kw = hotels.searchHotels({ city: 'Boston', keyword: 'five-star' });
   assert.ok(kw.hotels.every((h) => h.category === 'luxury'));
+  const cheap = hotels.searchHotels({ city: 'Las Vegas', near: 'the Strip', keyword: 'cheap' });
+  assert.ok(cheap.hotels.length > 0 && cheap.hotels.every((h) => h.category === 'budget'), 'the "Vegas … cheap" demo phrase');
 });
 
 test('searchHotels: keyword is a soft preference — matches rank first, nothing is dropped, misses get a note', () => {
-  const r = hotels.searchHotels({ city: '上海', near: '外滩', keyword: '亲子', checkIn: '2026-10-26', limit: 10 });
-  const all = hotels.searchHotels({ city: '上海', near: '外滩', checkIn: '2026-10-26', limit: 10 });
+  const opts = { city: 'Orlando', near: 'Disney World', checkIn: '2026-11-10', limit: 10 };
+  const r = hotels.searchHotels({ ...opts, keyword: 'family' });
+  const all = hotels.searchHotels(opts);
   assert.equal(r.totalFound, all.totalFound, 'no hotel is dropped for a missing preference');
-  assert.ok(hotelMatchesKeyword(r.hotels[0], ['亲子']));
-  for (const h of r.hotels) assert.deepEqual(h.matchedKeywords, hotelMatchesKeyword(h, ['亲子']) ? ['亲子'] : []);
+  assert.ok(hotelMatchesKeyword(r.hotels[0], ['family']));
+  for (const h of r.hotels) assert.deepEqual(h.matchedKeywords, hotelMatchesKeyword(h, ['family']) ? ['family'] : []);
   const flags = r.hotels.filter((h) => h.lowestPrice !== null).map((h) => h.matchedKeywords.length);
   assert.deepEqual(flags, [...flags].sort((a, b) => b - a), 'matching hotels come first');
   assert.ok(flags.includes(0), 'non-matching hotels are still listed');
-  assert.equal(r.notes.filter((n) => n.includes('没有找到')).length, 0);
-  const none = hotels.searchHotels({ city: '杭州', keyword: '温泉滑雪场' });
+  assert.ok(!r.notes.some((n) => n.startsWith('Nothing matches')), r.notes.join('|'));
+  const none = hotels.searchHotels({ city: 'New York', keyword: 'ski-in ski-out' });
   assert.ok(none.hotels.length > 0);
-  assert.ok(none.notes.includes('没有找到完全符合「温泉滑雪场」的酒店，以下按综合推荐排序'), none.notes.join('|'));
+  assert.ok(none.notes.includes('Nothing matches "ski-in ski-out", so these are sorted by our picks'), none.notes.join('|'));
 });
 
 test('searchHotels: an unmatched preference does not throw away the ones that matched', () => {
-  const r = hotels.searchHotels({ city: '杭州', near: '西湖', keyword: '亲子 高楼层', checkIn: '2026-11-10' });
-  const family = hotels.searchHotels({ city: '杭州', near: '西湖', keyword: '亲子', checkIn: '2026-11-10' });
+  const opts = { city: 'New York', near: 'Times Square', checkIn: '2026-11-10' };
+  const r = hotels.searchHotels({ ...opts, keyword: 'pool high floor' });
+  const pool = hotels.searchHotels({ ...opts, keyword: 'pool' });
   assert.ok(r.hotels.length > 0);
-  assert.deepEqual(r.hotels.map((h) => h.id), family.hotels.map((h) => h.id), 'ranked exactly as for 亲子 alone');
-  assert.ok(hotelMatchesKeyword(r.hotels[0], ['亲子']));
-  assert.ok(r.notes.includes('没有找到「高楼层」相关的酒店，已优先显示符合「亲子」的'), r.notes.join('|'));
-  assert.ok(!r.notes.some((n) => n.includes('「亲子 高楼层」')), r.notes.join('|'));
-  // Two wishes nobody satisfies together: ranked by how many they meet, with a note.
-  const both = hotels.searchHotels({ city: '杭州', near: '西湖', keyword: '亲子 网红 带泳池 新开业', checkIn: '2026-11-10' });
-  const counts = both.hotels.filter((h) => h.lowestPrice !== null).map((h) => h.matchedKeywords.length);
+  assert.deepEqual(r.hotels.map((h) => h.id), pool.hotels.map((h) => h.id), 'ranked exactly as for "pool" alone');
+  assert.ok(hotelMatchesKeyword(r.hotels[0], ['pool']));
+  assert.ok(r.notes.includes('Nothing matches "high floor"; hotels with "pool" come first'), r.notes.join('|'));
+  // Several wishes nobody satisfies together: ranked by how many they meet.
+  const many = hotels.searchHotels({ ...opts, keyword: 'pool spa trendy newly opened' });
+  const counts = many.hotels.filter((h) => h.lowestPrice !== null).map((h) => h.matchedKeywords.length);
   assert.deepEqual(counts, [...counts].sort((a, b) => b - a));
 });
 
-test('searchHotels: 含早 is matched against bookable breakfast rates, not hotel tags', () => {
-  const r = hotels.searchHotels({ city: '杭州', near: '西湖', keyword: '湖景 含早', checkIn: '2026-10-30', checkOut: '2026-11-01', limit: 10 });
-  assert.ok(!r.notes.some((n) => n.includes('含早')), r.notes.join('|'));
-  const lakeAndBreakfast = r.hotels.filter((h) => h.matchedKeywords.includes('湖景') && h.matchedKeywords.includes('含早'));
-  assert.ok(lakeAndBreakfast.length > 0, 'lake-view hotels with breakfast rates match both');
-  assert.ok(r.hotels[0].matchedKeywords.includes('湖景'), 'a lake-view hotel ranks first');
+test('searchHotels: breakfast is matched against bookable breakfast rates, not hotel tags', () => {
+  const stay = { checkIn: '2026-11-06', checkOut: '2026-11-08' };
+  const r = hotels.searchHotels({ city: 'New York', near: 'Central Park', keyword: 'park view breakfast', ...stay, limit: 10 });
+  assert.ok(!r.notes.some((n) => n.includes('breakfast')), r.notes.join('|'));
+  assert.ok(r.hotels[0].matchedKeywords.includes('park view'), 'a park-view hotel ranks first');
+  assert.ok(r.hotels.some((h) => h.matchedKeywords.includes('breakfast')));
   for (const h of r.hotels) {
-    const offer = hotels.getRoomOffer({ hotelId: h.id, checkIn: '2026-10-30', checkOut: '2026-11-01' }).offer;
+    const offer = hotels.getRoomOffer({ hotelId: h.id, ...stay }).offer;
     const hasBreakfast = offer.roomTypes.some((rt) => rt.rates.some((x) => x.available && x.breakfast > 0));
-    assert.equal(h.matchedKeywords.includes('含早'), hasBreakfast, h.id);
+    assert.equal(h.matchedKeywords.includes('breakfast'), hasBreakfast, h.id);
   }
 });
 
-test('searchHotels: budget filter, then relaxation up to +30% with a note', () => {
-  const ok = hotels.searchHotels({ city: '杭州', priceMax: 500, checkIn: '2026-11-10' });
-  assert.ok(ok.hotels.length > 0 && ok.hotels.every((h) => h.lowestPrice <= 500));
-  assert.equal(ok.notes.filter((n) => n.includes('预算')).length, 0);
+test('searchHotels: budget filter (all-in, per night), then relaxation up to +30% with a note', () => {
+  const ok = hotels.searchHotels({ city: 'Chicago', priceMax: 250, checkIn: '2026-11-10' });
+  assert.ok(ok.hotels.length > 0 && ok.hotels.every((h) => h.lowestPrice <= 250));
+  assert.ok(!ok.notes.some((n) => n.startsWith('Nothing under')));
 
-  // Find a budget just under the cheapest option near 鼓浪屿 so that only relaxation can satisfy it.
-  const base = hotels.searchHotels({ city: '厦门', near: '鼓浪屿', checkIn: '2026-11-10', sort: 'price_asc', limit: 10 });
+  // A budget just under the cheapest option near Fisherman's Wharf, so that only relaxation can satisfy it.
+  const base = hotels.searchHotels({ city: 'San Francisco', near: "Fisherman's Wharf", checkIn: '2026-11-10', sort: 'price_asc', limit: 10 });
   const cheapest = base.hotels.find((h) => h.lowestPrice !== null).lowestPrice;
   const budget = Math.floor((cheapest / 1.15) / 10) * 10;
-  const relaxed = hotels.searchHotels({ city: '厦门', near: '鼓浪屿', checkIn: '2026-11-10', priceMax: budget });
-  const note = relaxed.notes.find((n) => n.includes('放宽到了'));
+  const relaxed = hotels.searchHotels({ city: 'San Francisco', near: "Fisherman's Wharf", checkIn: '2026-11-10', priceMax: budget });
+  const note = relaxed.notes.find((n) => n.startsWith(`Nothing under $${budget} a night, so I went up to $`));
   assert.ok(note, relaxed.notes.join('|'));
-  const hi = Number(/放宽到了 ¥(\d+)/.exec(note)[1]);
-  assert.ok(hi <= Math.ceil((budget * 1.3) / 10) * 10 && hi > budget);
+  const hi = Number(/went up to \$([\d,]+)/.exec(note)[1].replace(/,/g, ''));
+  assert.ok(hi <= Math.ceil((budget * 1.3) / 10) * 10 && hi > budget, `${hi} vs ${budget}`);
   assert.ok(relaxed.hotels.every((h) => h.lowestPrice <= hi));
 
-  const tiny = hotels.searchHotels({ city: '上海', near: '外滩', priceMax: 50 });
+  const tiny = hotels.searchHotels({ city: 'New York', near: 'Times Square', priceMax: 50 });
   assert.ok(tiny.hotels.length > 0);
   assert.equal(tiny.query.sort, 'price_asc');
-  assert.ok(tiny.notes.some((n) => n.includes('最便宜的也要')));
+  assert.ok(tiny.notes.some((n) => /^Nothing close to \$50 a night: the cheapest is \$\d+, so these are sorted from low to high$/.test(n)), tiny.notes.join('|'));
 
-  const swapped = hotels.searchHotels({ city: '杭州', priceMin: 900, priceMax: 300 });
+  const swapped = hotels.searchHotels({ city: 'New York', priceMin: 900, priceMax: 300 });
   assert.deepEqual([swapped.query.priceMin, swapped.query.priceMax], [300, 900]);
+
+  // The §12 demo phrase: this Friday in New York near Times Square, two nights, under $300.
+  const demo = hotels.searchHotels({ city: 'New York', near: 'Times Square', checkIn: '2026-11-06', checkOut: '2026-11-08', priceMax: 300 });
+  assert.ok(demo.hotels.length >= 3 && demo.hotels.every((h) => h.lowestPrice <= 300), JSON.stringify(demo.notes));
 });
 
 test('searchHotels: sort orders', () => {
-  const asc = hotels.searchHotels({ city: '北京', sort: 'price_asc', limit: 10, checkIn: '2026-11-10' }).hotels.filter((h) => h.lowestPrice !== null).map((h) => h.lowestPrice);
+  const opts = { city: 'Chicago', limit: 10, checkIn: '2026-11-10' };
+  const asc = hotels.searchHotels({ ...opts, sort: 'price_asc' }).hotels.filter((h) => h.lowestPrice !== null).map((h) => h.lowestPrice);
   assert.deepEqual(asc, [...asc].sort((a, b) => a - b));
-  const desc = hotels.searchHotels({ city: '北京', sort: 'price_desc', limit: 10, checkIn: '2026-11-10' }).hotels.filter((h) => h.lowestPrice !== null).map((h) => h.lowestPrice);
+  const desc = hotels.searchHotels({ ...opts, sort: 'price_desc' }).hotels.filter((h) => h.lowestPrice !== null).map((h) => h.lowestPrice);
   assert.deepEqual(desc, [...desc].sort((a, b) => b - a));
-  const rating = hotels.searchHotels({ city: '北京', sort: 'rating', limit: 10, checkIn: '2026-11-10' }).hotels.map((h) => h.rating);
+  const rating = hotels.searchHotels({ ...opts, sort: 'rating' }).hotels.map((h) => h.rating);
   assert.deepEqual(rating, [...rating].sort((a, b) => b - a));
-  const rec1 = hotels.searchHotels({ city: '北京', near: '故宫', checkIn: '2026-11-10' });
-  const rec2 = hotels.searchHotels({ city: '北京', near: '故宫', checkIn: '2026-11-10' });
+  const rec1 = hotels.searchHotels({ city: 'Chicago', near: 'the Bean', checkIn: '2026-11-10' });
+  const rec2 = hotels.searchHotels({ city: 'Chicago', near: 'the Bean', checkIn: '2026-11-10' });
   assert.deepEqual(rec1, rec2, 'recommended is deterministic');
 });
 
-test('the demo suggestion chips all produce results', () => {
-  // 这周五去杭州，西湖边住两晚，预算 600
-  const a = hotels.searchHotels({ city: '杭州', near: '西湖边', checkIn: '2026-10-30', checkOut: '2026-11-01', priceMax: 600 });
-  assert.ok(a.hotels.length >= 2 && a.hotels.every((h) => h.lowestPrice <= 600), JSON.stringify(a.notes));
-  // 上海外滩附近的亲子酒店，明晚
-  const b = hotels.searchHotels({ city: '上海', near: '外滩', keyword: '亲子酒店', checkIn: '2026-10-26', checkOut: '2026-10-27' });
-  assert.ok(b.hotels.length >= 1);
-  // 成都春熙路附近经济型，今晚
-  const c = hotels.searchHotels({ city: '成都', near: '春熙路附近', categories: ['economy'] });
-  assert.ok(c.hotels.length >= 1 && c.hotels.every((h) => h.category === 'economy'));
+test('the demo phrases all produce results', () => {
+  // "Next weekend in Miami Beach, 2 adults and 1 kid"
+  const a = hotels.searchHotels({ city: 'Miami', near: 'Miami Beach', checkIn: '2026-11-13', checkOut: '2026-11-15', adults: 2, children: 1 });
+  assert.ok(a.hotels.length >= 2 && a.hotels.some((h) => h.lowestPrice !== null), JSON.stringify(a.notes));
+  // "Tonight in Las Vegas on the Strip, cheap"
+  const b = hotels.searchHotels({ city: 'Las Vegas', near: 'the Strip', categories: ['budget'] });
+  assert.ok(b.hotels.length >= 1 && b.hotels.every((h) => h.category === 'budget'));
+  // "Show cheaper ones" after the New York search
+  const c = hotels.searchHotels({ city: 'New York', near: 'Times Square', checkIn: '2026-11-06', checkOut: '2026-11-08', sort: 'price_asc' });
+  const prices = c.hotels.filter((h) => h.lowestPrice !== null).map((h) => h.lowestPrice);
+  assert.deepEqual(prices, [...prices].sort((x, y) => x - y));
 });
 
 test('getRoomOffer and getHotel', () => {
-  const { hotel, offer, datesAssumed } = hotels.getRoomOffer({ hotelId: 'sim-hz-001', checkIn: '2026-11-10', checkOut: '2026-11-12', adults: 2, rooms: 1 });
-  assert.equal(hotel.id, 'sim-hz-001');
-  assert.equal(offer.hotelId, 'sim-hz-001');
+  const { hotel, offer, datesAssumed } = hotels.getRoomOffer({ hotelId: 'sim-nyc-002', checkIn: '2026-11-10', checkOut: '2026-11-12', adults: 2, rooms: 1 });
+  assert.equal(hotel.id, 'sim-nyc-002');
+  assert.equal(offer.hotelId, 'sim-nyc-002');
   assert.equal(offer.nights, 2);
+  assert.equal(offer.currency, 'USD');
   assert.equal(datesAssumed, false);
   assert.ok(offer.roomTypes.length >= 2);
-  assert.equal(hotels.getRoomOffer({ hotelId: 'sim-hz-001' }).offer.checkIn, '2026-10-25');
-  assert.throws(() => hotels.getRoomOffer({ hotelId: 'sim-hz-999' }), (e) => e instanceof HotelError && e.code === 'hotel_not_found');
-  assert.equal(hotels.getHotel('sim-hz-001').name, hotel.name);
+  assert.equal(hotels.getRoomOffer({ hotelId: 'sim-nyc-002' }).offer.checkIn, '2026-11-04');
+  assert.equal(at('2026-11-05T07:00:00Z').getRoomOffer({ hotelId: 'sim-lv-002', timeZone: 'America/Los_Angeles' }).offer.checkIn, '2026-11-04', 'tonight for an LA user at 11 PM');
+  assert.throws(() => hotels.getRoomOffer({ hotelId: 'sim-nyc-999' }), (e) => e instanceof HotelError && e.code === 'hotel_not_found');
+  assert.equal(hotels.getHotel('sim-nyc-002').name, hotel.name);
   assert.equal(hotels.getHotel('missing'), null);
-  assert.equal(CATEGORY_LABELS[hotel.category].endsWith('型'), true);
+  assert.equal(CATEGORY_LABELS[hotel.category], 'Upscale');
+  assert.equal(hotels.zoneOfHotel(hotel), 'America/New_York');
+  assert.equal(hotels.zoneOfHotel(hotels.getHotel('sim-hnl-001')), 'Pacific/Honolulu');
 });
 
 test('priceCheck returns the rate or throws BookingError with a precise code', () => {
-  const ok = hotels.priceCheck({ hotelId: 'sim-hz-001', rateId: 'R1-BF2-FC', checkIn: '2026-11-10', checkOut: '2026-11-12', rooms: 1, adults: 2 });
-  assert.equal(ok.rate.rateId, 'R1-BF2-FC');
+  const ok = hotels.priceCheck({ hotelId: 'sim-nyc-002', rateId: 'R1-RO-FC', checkIn: '2026-11-10', checkOut: '2026-11-12', rooms: 1, adults: 2 });
+  assert.equal(ok.rate.rateId, 'R1-RO-FC');
   assert.equal(ok.roomType.roomId, 'R1');
   assert.equal(ok.roomType.rates, undefined);
-  assert.equal(ok.hotel.id, 'sim-hz-001');
+  assert.equal(ok.hotel.id, 'sim-nyc-002');
   const codeOf = (args) => {
     try {
       hotels.priceCheck(args);
       return 'ok';
     } catch (e) {
       assert.ok(e instanceof BookingError, e.name);
+      assert.doesNotMatch(e.message, /[㐀-鿿]/);
       return e.code;
     }
   };
   const stay = { checkIn: '2026-11-10', checkOut: '2026-11-12' };
-  assert.equal(codeOf({ hotelId: 'sim-hz-999', rateId: 'R1-BF0-NR', ...stay }), 'hotel_not_found');
-  assert.equal(codeOf({ hotelId: 'sim-hz-001', rateId: 'R9-XX', ...stay }), 'rate_not_found');
-  assert.equal(codeOf({ hotelId: 'sim-hz-001', rateId: 'R1-BF0-NR', checkIn: '2026-11-10' }), 'invalid_dates');
-  assert.equal(codeOf({ hotelId: 'sim-hz-001', rateId: 'R1-BF0-NR', ...stay, adults: 3, rooms: 1 }), 'too_many_guests');
+  assert.equal(codeOf({ hotelId: 'sim-nyc-999', rateId: 'R1-RO-NR', ...stay }), 'hotel_not_found');
+  assert.equal(codeOf({ hotelId: 'sim-nyc-002', rateId: 'R9-XX', ...stay }), 'rate_not_found');
+  assert.equal(codeOf({ hotelId: 'sim-nyc-002', rateId: 'R1-RO-NR', checkIn: '2026-11-10' }), 'invalid_dates');
+  assert.equal(codeOf({ hotelId: 'sim-nyc-002', rateId: 'R1-RO-NR', ...stay, adults: 3, rooms: 1 }), 'too_many_guests');
 
   // Find a deterministic sold-out combination and check it is reported as such.
   let soldOut = null;
   for (let i = 0; i < 60 && !soldOut; i++) {
-    const checkIn = addDays('2026-11-02', i);
-    const { offer } = hotels.getRoomOffer({ hotelId: 'sim-hz-002', checkIn, checkOut: addDays(checkIn, 1) });
+    const checkIn = addDays('2026-11-10', i);
+    const { offer } = hotels.getRoomOffer({ hotelId: 'sim-nyc-003', checkIn, checkOut: addDays(checkIn, 1) });
     const rt = offer.roomTypes.find((r) => !r.rates[0].available);
     if (rt) soldOut = { checkIn, rateId: rt.rates[0].rateId };
   }
   assert.ok(soldOut, 'some night is sold out');
-  assert.equal(codeOf({ hotelId: 'sim-hz-002', rateId: soldOut.rateId, checkIn: soldOut.checkIn, checkOut: addDays(soldOut.checkIn, 1) }), 'sold_out');
+  assert.equal(codeOf({ hotelId: 'sim-nyc-003', rateId: soldOut.rateId, checkIn: soldOut.checkIn, checkOut: addDays(soldOut.checkIn, 1) }), 'sold_out');
+});
+
+test('room offers are in the hotel\'s own time zone (cancellation deadlines)', () => {
+  const { offer } = hotels.getRoomOffer({ hotelId: 'sim-hnl-002', checkIn: '2026-11-10', checkOut: '2026-11-11' });
+  const free = offer.roomTypes[0].rates.find((r) => r.cancelPolicy.type === 'free');
+  assert.equal(free.cancelPolicy.freeUntil, '2026-11-09T15:00:00-10:00');
+  assert.match(free.cancelPolicy.text, /3:00 PM HST on Mon, Nov 9/);
+  assert.ok(buildRoomOffer(hotels.getHotel('sim-den-002'), { checkIn: '2026-11-10', checkOut: '2026-11-11' }).roomTypes[0].rates
+    .some((r) => r.cancelPolicy.freeUntil === '2026-11-09T15:00:00-07:00'));
 });
 
 test('createHotelService requires a supplier', () => {

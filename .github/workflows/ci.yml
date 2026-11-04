@@ -1,0 +1,42 @@
+name: Tests
+# Unit tests and the three browser walk-throughs (guest trip, phone app, hotel console), all in demo mode:
+# no keys, nothing leaves the runner. The live services have their own check (live-smoke.yml).
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Unit tests
+        run: npm test
+      - name: Install Playwright and Chromium
+        run: |
+          npm install --no-save --no-package-lock playwright@1.63.0
+          npx playwright install --with-deps chromium
+      - name: Start the scripted demo server
+        run: |
+          node test/e2e/run-server.js > demo-server.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf http://localhost:8787/api/health > /dev/null && exit 0; sleep 1; done
+          cat demo-server.log; exit 1
+      - name: Browser walk-through, guest trip
+        run: npm run test:e2e
+      - name: Browser walk-through, hotel console
+        run: npm run test:merchant
+      - name: Browser walk-through, phone app
+        run: npm run test:app

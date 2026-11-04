@@ -1,15 +1,15 @@
 /**
- * Optional web search ("搜寻资料") via the Bocha Web Search API. Disabled (and the tool is not offered
- * to the model) when no API key is configured.
+ * Optional web search via the Bocha Web Search API. Disabled (and the tool is not offered to the model) when no
+ * API key is configured.
  */
 
 export const BOCHA_ENDPOINT = 'https://api.bochaai.com/v1/web-search';
 const FRESHNESS = new Map([
-  ['nolimit', 'noLimit'], ['any', 'noLimit'], ['all', 'noLimit'], ['不限', 'noLimit'],
-  ['oneday', 'oneDay'], ['day', 'oneDay'], ['24h', 'oneDay'], ['一天', 'oneDay'], ['今天', 'oneDay'],
-  ['oneweek', 'oneWeek'], ['week', 'oneWeek'], ['一周', 'oneWeek'], ['本周', 'oneWeek'],
-  ['onemonth', 'oneMonth'], ['month', 'oneMonth'], ['一个月', 'oneMonth'], ['本月', 'oneMonth'],
-  ['oneyear', 'oneYear'], ['year', 'oneYear'], ['一年', 'oneYear'], ['今年', 'oneYear'],
+  ['nolimit', 'noLimit'], ['any', 'noLimit'], ['all', 'noLimit'], ['anytime', 'noLimit'],
+  ['oneday', 'oneDay'], ['day', 'oneDay'], ['24h', 'oneDay'], ['today', 'oneDay'], ['past day', 'oneDay'],
+  ['oneweek', 'oneWeek'], ['week', 'oneWeek'], ['this week', 'oneWeek'], ['past week', 'oneWeek'],
+  ['onemonth', 'oneMonth'], ['month', 'oneMonth'], ['this month', 'oneMonth'], ['past month', 'oneMonth'],
+  ['oneyear', 'oneYear'], ['year', 'oneYear'], ['this year', 'oneYear'], ['past year', 'oneYear'],
 ]);
 
 export class WebSearchError extends Error {
@@ -30,11 +30,11 @@ function freshnessOf(v) {
 
 function errorFor(status, apiCode, apiMsg) {
   const code = status || apiCode;
-  if (code === 401) return new WebSearchError('auth', '联网搜索的 API Key 无效，请检查 BOCHA_API_KEY', 401);
-  if (code === 403) return new WebSearchError('quota', '联网搜索额度不足或无权限，请检查博查账户余额', 403);
-  if (code === 429) return new WebSearchError('rate_limited', '联网搜索太频繁了，请稍后再试', 429);
-  if (code === 400) return new WebSearchError('bad_request', `联网搜索请求有误${apiMsg ? `：${String(apiMsg).slice(0, 80)}` : ''}`, 400);
-  return new WebSearchError('unavailable', '联网搜索暂时不可用，请稍后再试', typeof code === 'number' ? code : undefined);
+  if (code === 401) return new WebSearchError('auth', 'The web search API key is invalid; check BOCHA_API_KEY', 401);
+  if (code === 403) return new WebSearchError('quota', 'The web search quota ran out or access was denied; check the Bocha account balance', 403);
+  if (code === 429) return new WebSearchError('rate_limited', 'Too many web searches; please try again in a moment', 429);
+  if (code === 400) return new WebSearchError('bad_request', `The web search request was rejected${apiMsg ? `: ${String(apiMsg).slice(0, 80)}` : ''}`, 400);
+  return new WebSearchError('unavailable', 'Web search is unavailable right now; please try again later', typeof code === 'number' ? code : undefined);
 }
 
 function safeUrl(u) {
@@ -76,9 +76,9 @@ export function createWebSearch({ provider = 'bocha', apiKey, fetch: fetchImpl =
   const enabled = provider === 'bocha' && !!key && typeof fetchImpl === 'function';
 
   async function search(query, { freshness, count = 5, signal } = {}) {
-    if (!enabled) throw new WebSearchError('disabled', '联网搜索未开启（未配置 BOCHA_API_KEY）');
+    if (!enabled) throw new WebSearchError('disabled', 'Web search is off (BOCHA_API_KEY is not set)');
     const q = String(query || '').trim().slice(0, 200);
-    if (!q) throw new WebSearchError('bad_request', '搜索内容不能为空');
+    if (!q) throw new WebSearchError('bad_request', 'The search query is empty');
     const n = Math.min(10, Math.max(1, Math.round(Number(count) || 5)));
 
     const signals = [AbortSignal.timeout(timeoutMs)];
@@ -93,8 +93,8 @@ export function createWebSearch({ provider = 'bocha', apiKey, fetch: fetchImpl =
       });
     } catch (err) {
       if (signal?.aborted) throw err;
-      if (err?.name === 'TimeoutError' || err?.name === 'AbortError') throw new WebSearchError('timeout', '联网搜索超时了，请稍后再试');
-      throw new WebSearchError('unavailable', '联网搜索暂时不可用，请稍后再试');
+      if (err?.name === 'TimeoutError' || err?.name === 'AbortError') throw new WebSearchError('timeout', 'The web search timed out; please try again later');
+      throw new WebSearchError('unavailable', 'Web search is unavailable right now; please try again later');
     }
 
     let body = null;
@@ -104,7 +104,7 @@ export function createWebSearch({ provider = 'bocha', apiKey, fetch: fetchImpl =
       body = null;
     }
     if (!res.ok) throw errorFor(res.status, body?.code, body?.msg || body?.message);
-    if (!body || typeof body !== 'object') throw new WebSearchError('unavailable', '联网搜索返回了无法识别的结果');
+    if (!body || typeof body !== 'object') throw new WebSearchError('unavailable', 'The web search returned something unexpected');
     if (body.code !== undefined && Number(body.code) !== 200) throw errorFor(null, Number(body.code), body.msg);
 
     const values = body.data?.webPages?.value;

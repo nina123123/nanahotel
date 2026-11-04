@@ -5,17 +5,18 @@ import { loadConfig, DEFAULTS, DEFAULT_LIMITS, ROOT_DIR } from './config.js';
 import { createSseWriter } from './http/sse.js';
 import { createStaticHandler } from './http/static.js';
 import { isUuid, newId } from './util/ids.js';
-import { formatDateCN, formatDateTimeCN, weekdayCN, isValidDate, todayCN } from './util/dates.js';
+import { formatDate, formatDateTime, formatClock, formatTime, todayIn, dateIn, canonicalTimeZone, resolveTimeZone, DEFAULT_TIME_ZONE } from './util/dates.js';
+import { formatUsd } from './util/money.js';
 import { createJsonStore } from './store/json-store.js';
-import { guestNameProblem } from './util/names.js';
+import { namePartProblem, cleanName } from './util/names.js';
 import { createSimSupplier } from './services/hotels/sim-supplier.js';
 import { createHotelService, withPromotions } from './services/hotels/index.js';
 import { createPlacesService } from './services/places.js';
 import {
-  createBookingService, maskPhone, normalizePhone, toPublicOrder, toPublicQuote,
-  ORDER_STATUS_LABELS, PAYMENT_METHOD_LABELS,
+  createBookingService, maskPhone, normalizePhone, normalizeEmail, toPublicOrder, toPublicQuote,
+  ORDER_STATUS_LABELS, PAYMENT_METHOD_LABELS, PHONE_MESSAGE, NAME_MESSAGE, EMAIL_MESSAGE,
 } from './services/bookings.js';
-import { createStayService } from './services/stays.js';
+import { createStayService, STANDARD_CHECKIN } from './services/stays.js';
 import { createMerchantService, createPromotionBook } from './services/merchant.js';
 import { createWebSearch } from './services/websearch.js';
 import { PROVIDERS } from './llm/providers.js';
@@ -39,16 +40,17 @@ const SECURITY_HEADERS = Object.freeze({
   'X-Frame-Options': 'DENY',
 });
 
-export const NOTICE_PREFIX = '【系统通知，非用户输入】';
+/** Every notice in the model's history starts with this (then a space and the account). */
+export const NOTICE_PREFIX = '[System notice — not from the user]';
 const ID_RE = /^[A-Za-z0-9_-]{1,80}$/;
 const MAX_STORED_MESSAGES = 200;
 const MAX_DISPLAY_ITEMS = 200;
 const MAX_VAULT_ENTRIES = 20;
 const EMPTY_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
-const MASKED_PHONE_RE = /^1\d{2}\*{4}\d{4}$/;
-const FULL_PHONE_RE = /^1[3-9]\d{9}$/;
+const MASKED_PHONE_RE = /^\*\*\*-\*\*\*-\d{4}$/;
+const FULL_PHONE_RE = /^\+1[2-9]\d{2}[2-9]\d{6}$/;
 const AGENT_EVENTS = new Set(['status', 'delta', 'card', 'error', 'retract']);
-const MSG_INTERNAL = '服务出了点问题，请稍后再试。';
+const MSG_INTERNAL = 'Something went wrong on our side. Please try again in a moment.';
 const systemClock = { now: () => new Date() };
 
 /** Error that maps straight to `{ error: { code, message } }` with an HTTP status. */
@@ -93,14 +95,14 @@ function sendError(res, err, logger) {
     sendJson(res, err.status, { error }, headers);
     return;
   }
-  logger.error(`[http] 未处理的错误：${err?.stack || err}`);
+  logger.error(`[http] unhandled error: ${err?.stack || err}`);
   sendJson(res, 500, { error: { code: 'internal', message: MSG_INTERNAL } });
 }
 
 /** Reads a JSON object body, enforcing `limit` bytes without destroying the socket mid-upload. */
 function readJsonBody(req, limit) {
   const declared = Number(req.headers['content-length']);
-  const tooLarge = () => new HttpError(413, 'body_too_large', `请求内容太大了（上限 ${Math.round(limit / 1024)}KB）`);
+  const tooLarge = () => new HttpError(413, 'body_too_large', `The request is too large (the limit is ${Math.round(limit / 1024)} KB)`);
   if (Number.isFinite(declared) && declared > limit) return Promise.reject(tooLarge());
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -128,10 +130,10 @@ function readJsonBody(req, limit) {
       try {
         data = JSON.parse(Buffer.concat(chunks).toString('utf8'));
       } catch {
-        return reject(new HttpError(400, 'invalid_json', '请求内容不是有效的 JSON'));
+        return reject(new HttpError(400, 'invalid_json', "The request body isn't valid JSON"));
       }
       if (!data || typeof data !== 'object' || Array.isArray(data)) {
-        return reject(new HttpError(400, 'invalid_json', '请求内容需要是一个 JSON 对象'));
+        return reject(new HttpError(400, 'invalid_json', 'The request body needs to be a JSON object'));
       }
       resolve(data);
     });
@@ -140,7 +142,7 @@ function readJsonBody(req, limit) {
     });
     // A client that disconnects mid-upload never sends 'end'; settle instead of hanging.
     req.on('close', () => {
-      if (!req.complete && !failed) reject(new HttpError(400, 'aborted', '请求被中断了，请重试'));
+      if (!req.complete && !failed) reject(new HttpError(400, 'aborted', 'The request was cut off; please try again'));
     });
   });
 }
@@ -215,70 +217,87 @@ function cleanVault(vault) {
   return out;
 }
 
-/** The year is written only when it differs from `ref`'s, as in the model-facing stay_text and the cards. */
-function yearPrefix(date, ref) {
-  return String(ref ?? '').slice(0, 4) === date.slice(0, 4) ? '' : `${date.slice(0, 4)}年`;
+/** The hotel's time zone (orders and requests carry it), for times at the hotel. */
+function zoneOfHotel(hotel) {
+  return resolveTimeZone(hotel?.timeZone, DEFAULT_TIME_ZONE);
 }
 
-function dateWithWeekday(date, ref) {
-  return isValidDate(date) ? `${yearPrefix(date, ref)}${formatDateCN(date)}（${weekdayCN(date)}）` : String(date ?? '');
+function nightsText(n) {
+  return `${n} night${n === 1 ? '' : 's'}`;
 }
 
-// The check-out date is read in the check-in's year: '12月30日（周三）入住，2027年1月2日（周六）离店'.
+// The year is written only when it differs from today's: 'Wed, Dec 30 – Sat, Jan 2, 2027'.
 function stayText(order, today) {
-  const hotel = order.hotel?.name || '酒店';
-  const room = order.room?.name ? ` ${order.room.name}` : '';
-  const checkIn = dateWithWeekday(order.checkIn, today);
-  const checkOut = dateWithWeekday(order.checkOut, isValidDate(order.checkIn) ? order.checkIn : today);
-  return `${hotel}${room}，${checkIn}入住，${checkOut}离店，共${order.nights}晚${order.rooms > 1 ? `${order.rooms}间` : ''}`;
+  const hotel = order.hotel?.name || 'the hotel';
+  const room = order.room?.name ? `, ${order.room.name}` : '';
+  const rooms = order.rooms > 1 ? `, ${order.rooms} rooms` : '';
+  return `${hotel}${room}, check-in ${formatDate(order.checkIn, today)}, check-out ${formatDate(order.checkOut, today)}, ${nightsText(order.nights)}${rooms}`;
 }
 
-function dateTimeText(iso, today) {
-  const text = formatDateTimeCN(iso);
-  const ms = Date.parse(iso);
-  return Number.isNaN(ms) ? text : `${yearPrefix(todayCN(new Date(ms)), today)}${text}`;
+/** An instant as text at the hotel: 'Thu, Nov 5, 3:00 PM EST' (the zone is named, since the reader may be elsewhere). */
+function dateTimeText(iso, zone, today) {
+  return formatDateTime(iso, zone, { ref: today, abbr: true });
 }
 
-/**
- * Plain-language status line shared by the display notice and the model's history message.
- * @param {'confirmed'|'paid'|'cancelled'} kind
- * @param {string} [today] China date (YYYY-MM-DD) that decides whether dates need their year
- */
-export function orderNoticeText(kind, order, today = todayCN()) {
-  const status = ORDER_STATUS_LABELS[order.status] || order.status;
-  if (kind === 'confirmed') {
-    const payBy = order.payBy ? `请在 ${dateTimeText(order.payBy, today)} 前完成模拟支付，超时自动关闭` : '请尽快完成模拟支付';
-    return `订单 ${order.id} 已提交，状态：${status}（${payBy}）。${stayText(order, today)}，总价 ¥${order.totalPrice}。`;
-  }
-  if (kind === 'paid') {
-    const method = PAYMENT_METHOD_LABELS[order.payment?.method] || '模拟支付';
-    const amount = order.payment?.amount ?? order.totalPrice;
-    const conf = order.confirmationNo ? `，酒店确认号 ${order.confirmationNo}` : '';
-    return `订单 ${order.id} 已支付成功，状态：${status}。${method}（模拟）¥${amount}${conf}。${stayText(order, today)}。`;
-  }
-  return `订单 ${order.id} 已取消，状态：${status}。${cancelMoneyText(order)}。`;
-}
-
-function cancelMoneyText(order) {
-  if (!order.payment) return '订单未支付，没有产生费用';
+function cancelMoney(order) {
+  if (!order.payment) return { line: 'no charge', model: "It wasn't paid, so there's no charge" };
   const c = order.cancellation || {};
   const penalty = Number(c.penalty) || 0;
   const refund = Number(c.refund) || 0;
   // A non-refundable rate keeps everything: there is nothing to send back.
-  if (refund <= 0) return `违约金 ¥${penalty}，不退款（模拟）`;
-  const refundText = `退款 ¥${refund}（模拟，原路退回）`;
-  return penalty > 0 ? `违约金 ¥${penalty}，${refundText}` : `免费取消，${refundText}`;
+  if (refund <= 0) return { line: 'non-refundable, no refund', model: `Cancellation fee ${formatUsd(penalty)}; no refund (test mode)` };
+  const back = `refund ${formatUsd(refund)} to the original payment method (test mode)`;
+  return penalty > 0
+    ? { line: `${formatUsd(refund)} refunded`, model: `Cancellation fee ${formatUsd(penalty)}; ${back}` }
+    : { line: `${formatUsd(refund)} refunded`, model: `Free cancellation; ${back}` };
 }
 
-/** Free text (a place, a review, a reply) inside a notice: one line, no 【】 to pass for another notice, no 「」『』 to close its quote. */
+/**
+ * The notice for a confirm / pay / cancel tap: `text` is the short line shown in the chat, `modelText` the full
+ * account the model gets after NOTICE_PREFIX.
+ * @param {'pending'|'paid'|'cancelled'} kind
+ * @param {string} [today] the user's date (YYYY-MM-DD), which decides whether dates need their year
+ */
+export function orderNotice(kind, order, today = todayIn()) {
+  const status = ORDER_STATUS_LABELS[order.status] || order.status;
+  const zone = zoneOfHotel(order.hotel);
+  if (kind === 'pending') {
+    const payBy = order.payBy ? dateTimeText(order.payBy, zone, today) : '';
+    return {
+      text: payBy ? `Booking placed: pay by ${formatClock(order.payBy, zone, { abbr: true })}` : 'Booking placed: complete the payment',
+      modelText: `Order ${order.id} was placed and is ${status.toLowerCase()} (${payBy ? `complete the test payment by ${payBy}, or it closes automatically` : 'complete the test payment soon'}). ${stayText(order, today)}, ${formatUsd(order.totalPrice)} in total.`,
+    };
+  }
+  if (kind === 'paid') {
+    const method = PAYMENT_METHOD_LABELS[order.payment?.method] || 'Test payment';
+    const amount = order.payment?.amount ?? order.totalPrice;
+    const conf = order.confirmationNo ? `; hotel confirmation number ${order.confirmationNo}` : '';
+    return {
+      text: order.confirmationNo ? `Booked! Confirmation #${order.confirmationNo}` : 'Booked!',
+      modelText: `Order ${order.id} was paid and is ${status.toLowerCase()}. ${method} (test mode), ${formatUsd(amount)}${conf}. ${stayText(order, today)}.`,
+    };
+  }
+  const money = cancelMoney(order);
+  return {
+    text: `Booking cancelled: ${money.line}`,
+    modelText: `Order ${order.id} was cancelled and is ${status.toLowerCase()}. ${money.model}.`,
+  };
+}
+
+/** The model's account of an order notice (orderNotice(...).modelText). */
+export function orderNoticeText(kind, order, today) {
+  return orderNotice(kind, order, today).modelText;
+}
+
+/** Free text (a place, a review, a reply) inside a notice: one line, no brackets to pass for another notice, no quotes to close its own. */
 function plain(v, max) {
-  const s = String(v ?? '').replace(/[\r\n\t]+/g, ' ').replace(/[【】「」『』]/g, '').trim();
+  const s = String(v ?? '').replace(/[\r\n\t]+/g, ' ').replace(/[[\]【】「」『』"“”]/g, '').trim();
   return s.length > max ? `${s.slice(0, max)}…` : s;
 }
 
-/** Free text for the model, always quoted: 「…」 reads as what someone wrote, never as the platform's own account. */
+/** Free text for the model, always quoted: “…” reads as what someone wrote, never as the platform's own account. */
 function quoted(v, max) {
-  return `「${plain(v, max)}」`;
+  return `“${plain(v, max)}”`;
 }
 
 /**
@@ -286,34 +305,36 @@ function quoted(v, max) {
  * account the model gets after NOTICE_PREFIX, `cards` the card that changed.
  * @param {'ride_confirmed'|'extended'|'review_published'} kind
  * @param {{ ride?, extension?, order?, review? }} data  public views (stays.js)
- * @param {string} [today] China date (YYYY-MM-DD) that decides whether dates need their year
+ * @param {string} [today] the user's date (YYYY-MM-DD) that decides whether dates need their year
  */
-export function stayNotice(kind, data, today = todayCN()) {
+export function stayNotice(kind, data, today = todayIn()) {
   if (kind === 'ride_confirmed') {
     const r = data.ride;
     const d = r.driver || {};
-    const pickup = todayCN(new Date(Date.parse(r.pickupAt))) === today ? formatDateTimeCN(r.pickupAt).split(' ').pop() : dateTimeText(r.pickupAt, today);
+    const zone = resolveTimeZone(r.timeZone, DEFAULT_TIME_ZONE);
+    const sameDay = dateIn(r.pickupAt, zone) === today;
+    const pickup = sameDay ? formatClock(r.pickupAt, zone) : formatDateTime(r.pickupAt, zone, { ref: today });
     return {
-      text: `已叫车：${d.name} · ${d.plate}，${pickup} 上车`,
-      modelText: `用户已确认叫车：${r.kindLabel}，${quoted(r.from, 40)} → ${quoted(r.to, 40)}，${dateTimeText(r.pickupAt, today)} 上车，${r.carType}，`
-        + `车费 ¥${r.fare} 已支付（模拟）。司机 ${d.name} ${d.plate}（${d.color}${d.car}），电话 ${d.phone}。`,
+      text: `Ride booked: ${d.name} · ${d.plate}, pickup ${pickup}`,
+      modelText: `The user confirmed the ride: ${r.kindLabel}, ${quoted(r.from, 60)} → ${quoted(r.to, 60)}, pickup ${dateTimeText(r.pickupAt, zone, today)}, ${r.carType}, `
+        + `fare ${formatUsd(r.fare)} paid (test mode). Driver ${d.name} in a ${d.color} ${d.car}, plate ${d.plate}, phone ${d.phone}.`,
       cards: [{ type: 'ride', ride: r }],
     };
   }
   if (kind === 'extended') {
     const { extension: e, order } = data;
-    const method = PAYMENT_METHOD_LABELS[e.payment?.method] || '模拟支付';
+    const method = PAYMENT_METHOD_LABELS[e.payment?.method] || 'Test payment';
     return {
-      text: `已续住${e.nights}晚，离店改到${dateWithWeekday(e.toDate, today)}`,
-      modelText: `用户已续住${e.nights}晚：${e.hotel?.name || '酒店'} ${e.room || ''}，离店日期改为 ${dateWithWeekday(e.toDate, today)}，${method}（模拟）¥${e.price}。`
-        + `订单 ${order.id} 现在共${order.nights}晚，总价 ¥${order.totalPrice}。`,
+      text: `Extended ${nightsText(e.nights)}: check-out is now ${formatDate(e.toDate, today)}`,
+      modelText: `The user extended the stay by ${nightsText(e.nights)}: ${e.hotel?.name || 'the hotel'}${e.room ? `, ${e.room}` : ''}; check-out is now ${formatDate(e.toDate, today)}; ${method} (test mode), ${formatUsd(e.price)}. `
+        + `Order ${order.id} now has ${nightsText(order.nights)}, ${formatUsd(order.totalPrice)} in total.`,
       cards: [{ type: 'extension_quote', extension: e }],
     };
   }
   const r = data.review;
   return {
-    text: `点评已发布：${r.rating}星`,
-    modelText: `用户已发布点评：${r.hotel?.name || '酒店'} ${r.rating}星${quoted(r.text, 40)}（模拟）。`,
+    text: `Review posted: ${r.rating} star${r.rating === 1 ? '' : 's'}`,
+    modelText: `The user posted a review of ${r.hotel?.name || 'the hotel'}: ${r.rating} star${r.rating === 1 ? '' : 's'}, ${quoted(r.text, 80)} (simulated).`,
     cards: [{ type: 'review_draft', review: r }],
   };
 }
@@ -322,34 +343,35 @@ export function stayNotice(kind, data, today = todayCN()) {
  * The notice for something the hotel did (a merchant.js event): `text` is the short line in the guest's chat,
  * `modelText` the account the model gets after NOTICE_PREFIX, `cards` the card that changed.
  * @param {{ kind: 'front_desk_checkin'|'early_checkin_approved'|'early_checkin_declined'|'review_replied', stay?, request?, review? }} event
- * @param {string} [today] China date (YYYY-MM-DD) that decides whether dates need their year
+ * @param {string} [today] the user's date (YYYY-MM-DD) that decides whether dates need their year
  */
-export function hotelNotice(event, today = todayCN()) {
+export function hotelNotice(event, today = todayIn()) {
   if (event.kind === 'front_desk_checkin') {
     const st = event.stay;
+    const zone = resolveTimeZone(st.timeZone, DEFAULT_TIME_ZONE);
     return {
-      text: `前台已为你办好入住：${st.roomNumber} 房`,
-      modelText: `酒店前台已为用户办好入住：${st.hotel?.name || '酒店'} ${st.roomType || ''}，${st.roomNumber} 房（${st.floor}楼），`
-        + `电子房卡有效期至 ${dateTimeText(st.keyValidUntil, today)}，Wi-Fi ${st.wifi?.ssid}，密码 ${st.wifi?.password}（模拟）。`,
+      text: `The front desk checked you in: room ${st.roomNumber}`,
+      modelText: `The front desk checked the user in: ${st.hotel?.name || 'the hotel'}${st.roomType ? `, ${st.roomType}` : ''}, room ${st.roomNumber} (floor ${st.floor}); `
+        + `the digital key works until ${dateTimeText(st.keyValidUntil, zone, today)}; Wi-Fi ${st.wifi?.ssid}, password ${st.wifi?.password} (simulated).`,
       cards: [{ type: 'checkin', stay: st }],
     };
   }
   if (event.kind === 'early_checkin_approved' || event.kind === 'early_checkin_declined') {
     const r = event.request;
-    const when = dateWithWeekday(r.date, today);
+    const when = formatDate(r.date, today);
     return {
-      // The request's note is the line for the guest: 「酒店已确认 12:00 可以入住」/「那天房间比较满，按 14:00 入住哦」.
+      // The request's note is the line for the guest: "The hotel confirmed check-in at 12:00 PM" / "The hotel is full that day …".
       text: r.note,
       modelText: event.kind === 'early_checkin_approved'
-        ? `酒店已确认用户可以提前入住：${r.hotel?.name || '酒店'}，${when} ${r.arrivalTime} 到店就能入住（模拟）。`
-        : `酒店婉拒了用户的提前入住申请：${r.hotel?.name || '酒店'} ${when}房间比较满，没法提前到 ${r.arrivalTime}，按 14:00 正常入住（模拟），早到可以先寄存行李。`,
+        ? `The hotel confirmed early check-in for the user: ${r.hotel?.name || 'the hotel'}, ${when} at ${formatTime(r.arrivalTime)} (simulated).`
+        : `The hotel declined the user's early check-in: ${r.hotel?.name || 'the hotel'} is full on ${when}, so check-in is at ${formatTime(STANDARD_CHECKIN)} as usual (simulated); the user can leave bags at the front desk.`,
       cards: [{ type: 'early_checkin', request: r }],
     };
   }
   const r = event.review;
   return {
-    text: '酒店回复了你的点评',
-    modelText: `酒店回复了用户的点评：${r.hotel?.name || '酒店'} ${r.rating}星，酒店的回复是${quoted(r.reply?.text, 60)}（模拟）。`,
+    text: 'The hotel replied to your review',
+    modelText: `The hotel replied to the user's review of ${r.hotel?.name || 'the hotel'} (${r.rating} star${r.rating === 1 ? '' : 's'}): ${quoted(r.reply?.text, 120)} (simulated).`,
     cards: [{ type: 'review_draft', review: r }],
   };
 }
@@ -357,7 +379,7 @@ export function hotelNotice(event, today = todayCN()) {
 // Stay cards that hold one request, by the field it sits in; replays show each with its status as of now.
 const STAY_CARD_FIELDS = Object.freeze({
   ride_quote: 'ride', ride: 'ride', early_checkin: 'request', service: 'ticket', dining: 'reservation', wakeup: 'call',
-  invoice: 'invoice', extension_quote: 'extension', review_draft: 'review',
+  receipt: 'receipt', extension_quote: 'extension', review_draft: 'review',
 });
 
 // Defense in depth: whatever a tool put in a card, the browser never gets a userId or a full phone.
@@ -379,43 +401,59 @@ function sanitizeCard(card) {
 function publicProfile(p) {
   const phone = typeof p?.contactPhone === 'string' ? p.contactPhone : '';
   const prefs = p?.preferences;
+  const text = (v) => (typeof v === 'string' ? v : '');
   return {
-    guestName: typeof p?.guestName === 'string' ? p.guestName : '',
+    firstName: text(p?.firstName),
+    lastName: text(p?.lastName),
+    email: text(p?.email),
     contactPhone: phone ? maskPhone(phone) : '',
     hasPhone: Boolean(phone),
-    preferences: Array.isArray(prefs) ? prefs.filter((x) => typeof x === 'string').join('、') : typeof prefs === 'string' ? prefs : '',
+    preferences: Array.isArray(prefs) ? prefs.filter((x) => typeof x === 'string').join(', ') : text(prefs),
     updatedAt: p?.updatedAt || null,
   };
 }
 
+/** A name part from the form: undefined = unchanged, '' = delete, else a usable first or last name. */
+function nameField(v) {
+  if (v === undefined) return undefined;
+  if (v === null) return '';
+  if (typeof v !== 'string') throw new HttpError(400, 'invalid_name', NAME_MESSAGE);
+  const name = cleanName(v);
+  if (name && namePartProblem(name)) throw new HttpError(400, 'invalid_name', NAME_MESSAGE);
+  return name;
+}
+
+/** PUT /api/profile: any subset of the fields; omitted = unchanged, null (or '') = delete. */
 function parseProfilePatch(body) {
   const patch = {};
-  if (body.guestName !== undefined && body.guestName !== null) {
-    if (typeof body.guestName !== 'string') throw new HttpError(400, 'invalid_guest_name', '入住人姓名格式不对');
-    const name = body.guestName.trim().replace(/\s+/g, ' ');
-    const problem = name ? guestNameProblem(name) : null;
-    if (problem === 'format') throw new HttpError(400, 'invalid_guest_name', '入住人姓名需要是 2–20 个字的真实姓名');
-    if (problem === 'placeholder') throw new HttpError(400, 'invalid_guest_name', '请填写身份证上的真实姓名，不能用「张先生」「本人」这类称呼');
-    patch.guestName = name;
-  } else if (body.guestName === null) {
-    patch.guestName = '';
+  const first = nameField(body.firstName);
+  const last = nameField(body.lastName);
+  if (first !== undefined) patch.firstName = first;
+  if (last !== undefined) patch.lastName = last;
+  if (body.email !== undefined) {
+    if (body.email === null || body.email === '') patch.email = '';
+    else {
+      const email = typeof body.email === 'string' ? normalizeEmail(body.email) : null;
+      if (!email) throw new HttpError(400, 'invalid_email', EMAIL_MESSAGE);
+      patch.email = email;
+    }
   }
-  // A masked number echoed back from the form ('138****5678') means "unchanged".
+  // A masked number echoed back from the form ('***-***-0123') means "unchanged".
   if (body.contactPhone !== undefined && !(typeof body.contactPhone === 'string' && body.contactPhone.includes('*'))) {
     if (body.contactPhone === null || body.contactPhone === '') {
       patch.contactPhone = '';
     } else {
-      const phone = normalizePhone(body.contactPhone);
-      if (!phone) throw new HttpError(400, 'invalid_phone', '请输入正确的 11 位中国大陆手机号');
+      const phone = typeof body.contactPhone === 'string' ? normalizePhone(body.contactPhone) : null;
+      if (!phone) throw new HttpError(400, 'invalid_phone', PHONE_MESSAGE);
       patch.contactPhone = phone;
     }
   }
   if (body.preferences !== undefined && body.preferences !== null) {
     const raw = Array.isArray(body.preferences)
-      ? body.preferences.filter((x) => typeof x === 'string').map((x) => x.trim()).filter(Boolean).join('、')
+      ? body.preferences.filter((x) => typeof x === 'string').map((x) => x.trim()).filter(Boolean).join(', ')
       : typeof body.preferences === 'string' ? body.preferences.trim() : null;
-    if (raw === null) throw new HttpError(400, 'invalid_preferences', '住宿偏好需要是文字');
-    if (raw.length > MAX_PREFERENCES_CHARS) throw new HttpError(400, 'invalid_preferences', `住宿偏好最多 ${MAX_PREFERENCES_CHARS} 个字`);
+    if (raw === null) throw new HttpError(400, 'invalid_preferences', 'Stay preferences need to be text');
+    if (raw.length > MAX_PREFERENCES_CHARS) throw new HttpError(400, 'invalid_preferences', `Stay preferences can be up to ${MAX_PREFERENCES_CHARS} characters`);
     patch.preferences = raw;
   } else if (body.preferences === null) {
     patch.preferences = '';
@@ -424,17 +462,16 @@ function parseProfilePatch(body) {
 }
 
 function notConfiguredText(llmConfig = {}) {
-  const provider = llmConfig.provider || 'deepseek';
-  const keyEnv = llmConfig.keyEnv || PROVIDERS?.[provider]?.keyEnv || 'LLM_API_KEY';
+  const provider = llmConfig.provider || 'the provider';
+  const keyEnv = llmConfig.keyEnv || PROVIDERS?.[llmConfig.provider]?.keyEnv || 'LLM_API_KEY';
   return [
-    '还没有配置大模型，我暂时没法帮你查酒店和下单。',
+    "I'm not connected to a language model yet, so I can't look up hotels or book anything for now.",
     '',
-    '请在服务器的 `hotel-agent/.env` 文件里填写 API Key（可以复制 `.env.example` 改名为 `.env`），例如：',
+    'Add an API key to the `.env` file on the server (copy `.env.example` to `.env`), for example:',
     `- \`LLM_PROVIDER=${provider}\``,
-    `- \`${keyEnv}=你的 API Key\``,
+    `- \`${keyEnv}=your API key\``,
     '',
-    '也支持通义千问、Kimi、智谱 GLM、豆包，改 `LLM_PROVIDER` 即可。保存后重启服务就能用了。',
-    '想先看看效果，可以运行 `npm run demo` 启动不需要 Key 的脚本演示版。',
+    'Save it and restart the server. To try it without a key, run `npm run demo` for the scripted demo.',
   ].join('\n');
 }
 
@@ -457,6 +494,8 @@ export function createApp(deps) {
 
   const limits = { ...DEFAULT_LIMITS, ...(config.limits || {}) };
   const appName = config.appName || DEFAULTS.appName;
+  // The zone of a request without a valid X-Time-Zone header (the app shells may build config without one).
+  const defaultZone = resolveTimeZone(config.timeZone, DEFAULT_TIME_ZONE);
   const profiles = deps.profiles ?? createProfileRepo(store, { clock });
   const stays = deps.stays ?? (hotels ? createStayService({ store, bookings, hotels, clock }) : null);
   const merchant = deps.merchant ?? (stays && hotels ? createMerchantService({ store, bookings, stays, hotels, clock }) : null);
@@ -478,6 +517,17 @@ export function createApp(deps) {
   const nowIso = () => clock.now().toISOString();
   // Coverage is static; the prompt lists it so the model only suggests cities that have data.
   const cities = typeof hotels?.listCities === 'function' ? hotels.listCities() : undefined;
+
+  /** The user's IANA time zone: a valid X-Time-Zone header, else the configured default (America/New_York). */
+  function requestZone(req) {
+    const raw = req?.headers?.['x-time-zone'];
+    return (typeof raw === 'string' && canonicalTimeZone(raw)) || defaultZone;
+  }
+
+  /** The user's date (YYYY-MM-DD) for a request: it decides whether dates in a notice need their year. */
+  function userToday(req) {
+    return todayIn(requestZone(req), clock.now());
+  }
 
   // Abandoned empty sessions (e.g. left by a flood of POST /api/sessions) should not outlive a restart.
   const staleBefore = nowMs() - EMPTY_SESSION_TTL_MS;
@@ -506,7 +556,7 @@ export function createApp(deps) {
     const quota = ipLimiter?.take(clientAddress(req, config.trustProxy));
     if (quota && !quota.ok) {
       // Usually many people behind one NAT, not this user's doing.
-      throw new HttpError(429, 'rate_limited', '同一网络下使用的人较多，请稍后再试', { retryAfterSec: quota.retryAfterSec });
+      throw new HttpError(429, 'rate_limited', 'A lot of people on this network are using the app right now; please try again in a moment', { retryAfterSec: quota.retryAfterSec });
     }
   }
 
@@ -573,9 +623,8 @@ export function createApp(deps) {
 
   async function displayItems(userId, session) {
     return Promise.all((session.display || []).map(async (item) => {
-      const { orderId, kind, ...rest } = item;
-      // An order notice's kind is internal (it pairs confirm with pay); a stay notice's kind is part of the API.
-      const shown = kind && !orderId ? { ...rest, kind } : rest;
+      // Every notice carries its kind (docs/US-CONTRACT.md §6); the order id only pairs a placed order with its payment.
+      const { orderId, ...shown } = item;
       if (!Array.isArray(item.cards) || !item.cards.length) return shown;
       return { ...shown, cards: await Promise.all(item.cards.map((c) => refreshCard(userId, c))) };
     }));
@@ -588,12 +637,12 @@ export function createApp(deps) {
   function applyNotice(s, notice) {
     const { kind, order, text, at } = notice;
     const item = order
-      ? { role: 'notice', text, cards: [{ type: 'order', order: toPublicOrder(order) }], at, orderId: order.id, kind }
+      ? { role: 'notice', kind, text, cards: [{ type: 'order', order: toPublicOrder(order) }], at, orderId: order.id }
       : { role: 'notice', kind, text, at, cards: (notice.cards || []).map(sanitizeCard) };
     const lastItem = s.display[s.display.length - 1];
     // confirm + pay arrive back to back from one payment sheet; replaying both would show the order twice.
-    const paidRightAfterConfirm = order && kind === 'paid' && lastItem?.role === 'notice' && lastItem.orderId === order.id && lastItem.kind === 'confirmed';
-    if (paidRightAfterConfirm) s.display[s.display.length - 1] = item;
+    const paidRightAfterPlaced = order && kind === 'paid' && lastItem?.role === 'notice' && lastItem.orderId === order.id && lastItem.kind === 'pending';
+    if (paidRightAfterPlaced) s.display[s.display.length - 1] = item;
     else s.display.push(item);
 
     const modelText = notice.modelText ?? text;
@@ -601,7 +650,7 @@ export function createApp(deps) {
     if (lastMsg?.role === 'user' && typeof lastMsg.content === 'string' && lastMsg.content.startsWith(NOTICE_PREFIX)) {
       s.messages[s.messages.length - 1] = { ...lastMsg, content: `${lastMsg.content}\n${modelText}` };
     } else {
-      s.messages.push({ role: 'user', content: `${NOTICE_PREFIX}${modelText}` });
+      s.messages.push({ role: 'user', content: `${NOTICE_PREFIX} ${modelText}` });
     }
   }
 
@@ -618,15 +667,15 @@ export function createApp(deps) {
   }
 
   /** After confirm/pay/cancel: tell the user (display) and the model (history) what happened. */
-  async function appendOrderNotice(userId, kind, order) {
+  async function appendOrderNotice(userId, kind, order, today) {
     let sessionId = order.sessionId;
     if (!sessionId && order.quoteId) sessionId = (await bookings.getQuote(userId, order.quoteId))?.sessionId;
-    deliverNotice(userId, sessionId, { kind, order, text: orderNoticeText(kind, order, todayCN(clock.now())), at: nowIso() });
+    deliverNotice(userId, sessionId, { kind, order, ...orderNotice(kind, order, today), at: nowIso() });
   }
 
   // ---- chat -----------------------------------------------------------------------------------
 
-  async function runTurn({ userId, session, message, sse, signal, turn }) {
+  async function runTurn({ userId, session, message, sse, signal, turn, timeZone }) {
     const collected = { text: '', cards: [] };
     const emit = (event, data) => {
       if (!AGENT_EVENTS.has(event)) return;
@@ -653,6 +702,7 @@ export function createApp(deps) {
       const systemPrompt = buildSystemPrompt({
         appName,
         now: clock.now(),
+        timeZone,
         profile: profile ? publicProfile(profile) : null,
         features: { webSearch: Boolean(webSearch?.enabled), demoHotels: true },
         cities,
@@ -668,19 +718,19 @@ export function createApp(deps) {
         tools,
         session: agentSession,
         userText: message,
-        ctx: { userId, sessionId: session.id, phoneVault: agentSession.phoneVault },
+        ctx: { userId, sessionId: session.id, phoneVault: agentSession.phoneVault, timeZone },
         systemPrompt,
         emit,
         signal,
         now: () => clock.now(),
         logger: (err) => logger.error(`[agent] ${err?.stack || err}`),
       });
-      if (result?.aborted) logger.info(`[chat] 本轮已中止（session ${session.id}）`);
+      if (result?.aborted) logger.info(`[chat] turn stopped (session ${session.id})`);
     } catch (err) {
-      if (signal.aborted) logger.info(`[chat] 客户端断开，已中止本轮（session ${session.id}）`);
+      if (signal.aborted) logger.info(`[chat] client went away, turn stopped (session ${session.id})`);
       else {
         failed = true;
-        logger.error(`[chat] 本轮处理失败：${err?.stack || err}`);
+        logger.error(`[chat] turn failed: ${err?.stack || err}`);
         sse.send('error', { message: MSG_INTERNAL });
       }
     }
@@ -689,7 +739,7 @@ export function createApp(deps) {
     const agentDisplay = Array.isArray(result?.display) ? result.display : null;
     const fallback = [{ role: 'assistant', text: collected.text, cards: collected.cards }];
     // So a reload shows what the live view showed.
-    if (failed) fallback.push({ role: 'notice', text: `（回复中断：${MSG_INTERNAL}）` });
+    if (failed) fallback.push({ role: 'notice', text: `(Reply interrupted: ${MSG_INTERNAL})` });
     const display = (agentDisplay || fallback)
       .filter((d) => d && (d.text || (Array.isArray(d.cards) && d.cards.length)))
       .map((d) => ({
@@ -717,28 +767,28 @@ export function createApp(deps) {
   async function handleChat(req, res, userId) {
     const body = await readJsonBody(req, limits.maxBodyBytes);
     const message = typeof body.message === 'string' ? body.message.trim() : '';
-    if (!message) throw new HttpError(400, 'invalid_message', '消息不能为空');
+    if (!message) throw new HttpError(400, 'invalid_message', 'The message is empty');
     if (message.length > limits.maxMessageChars) {
-      throw new HttpError(400, 'invalid_message', `消息太长了，请控制在 ${limits.maxMessageChars} 字以内`);
+      throw new HttpError(400, 'invalid_message', `The message is too long; keep it under ${limits.maxMessageChars} characters`);
     }
     if (activeTurns.size >= limits.maxConcurrentTurns) {
-      throw new HttpError(503, 'server_busy', '现在使用的人有点多，请稍后再试', { retryAfterSec: 5 });
+      throw new HttpError(503, 'server_busy', 'Lots of people are chatting right now; please try again in a moment', { retryAfterSec: 5 });
     }
     // Every check runs before a new session is created, so a rejected request stores nothing.
     let session = null;
     if (!(body.sessionId === undefined || body.sessionId === null || body.sessionId === '')) {
       session = ownSession(userId, body.sessionId);
-      if (!session) throw new HttpError(404, 'session_not_found', '这个对话不存在或已失效，请开始新对话');
-      if (busy.has(session.id)) throw new HttpError(409, 'busy', '上一条消息还在处理中，请稍等片刻再发送');
+      if (!session) throw new HttpError(404, 'session_not_found', "This chat doesn't exist anymore; please start a new one");
+      if (busy.has(session.id)) throw new HttpError(409, 'busy', "I'm still answering your last message; send this one in a moment");
     }
     if (turnsOf(userId) >= limits.maxTurnsPerUser) {
-      throw new HttpError(409, 'busy', '你还有别的对话正在回复，请等它说完再发送');
+      throw new HttpError(409, 'busy', "I'm still answering you in another chat; send this once that reply is done");
     }
     // Each bucket is charged only for an accepted turn: the user's quota is checked first, so a user past it
     // cannot drain the shared address bucket, and an address rejection does not use up the user's turns.
     const quota = limiter.check(userId);
     if (!quota.ok) {
-      throw new HttpError(429, 'rate_limited', '发消息太频繁了，请休息几分钟再试', { retryAfterSec: quota.retryAfterSec });
+      throw new HttpError(429, 'rate_limited', "That's a lot of messages in a short time; please take a break for a few minutes", { retryAfterSec: quota.retryAfterSec });
     }
     throttleWrites(req);
     limiter.take(userId);
@@ -766,7 +816,7 @@ export function createApp(deps) {
           s.display.push({ role: 'assistant', text, cards: [], at: nowIso() });
         });
       } else {
-        await runTurn({ userId, session, message, sse, signal: ac.signal, turn });
+        await runTurn({ userId, session, message, sse, signal: ac.signal, turn, timeZone: requestZone(req) });
       }
     } finally {
       finished = true;
@@ -779,7 +829,7 @@ export function createApp(deps) {
             for (const n of turn.notices) applyNotice(s, n);
           });
         } catch (err) {
-          logger.error(`[chat] 通知保存失败：${err?.stack || err}`);
+          logger.error(`[chat] could not store a notice: ${err?.stack || err}`);
         }
       }
       sse.send('done', {});
@@ -794,35 +844,35 @@ export function createApp(deps) {
     try {
       await store.flush?.();
     } catch (err) {
-      logger.error(`[store] 保存失败，稍后重试：${err?.message || err}`);
+      logger.error(`[store] save failed, will retry: ${err?.message || err}`);
     }
   }
 
-  async function orderAction(userId, kind, run, before) {
+  async function orderAction(req, userId, kind, run, before) {
     const prevStatus = await before();
     const order = await run();
-    if (order && order.status !== prevStatus) await appendOrderNotice(userId, kind, order);
-    // The user is about to see 已提交 / 支付成功 / 已取消; don't leave that inside the store's write delay.
+    if (order && order.status !== prevStatus) await appendOrderNotice(userId, kind, order, userToday(req));
+    // The user is about to see "placed", "booked" or "cancelled"; don't leave that inside the store's write delay.
     await flushStore();
     return { order: toPublicOrder(order) };
   }
 
   function requireStays() {
-    if (!stays) throw new HttpError(404, 'not_found', '接口不存在');
+    if (!stays) throw new HttpError(404, 'not_found', 'No such API');
     return stays;
   }
 
   /**
-   * A user's tap on a stay card (确认叫车 / 确认续住 / 发布): `run` returns { ride } / { extension, order } /
-   * { review }; the first change of status also leaves a notice in the session the card came from.
+   * A user's tap on a stay card (Confirm ride / Confirm extension / Post review): `run` returns { ride } /
+   * { extension, order } / { review }; the first change of status also leaves a notice in the session the card came from.
    */
-  async function stayAction(userId, id, kind, run) {
+  async function stayAction(req, userId, id, kind, run) {
     const s = requireStays();
     const before = (await s.getRequest(userId, id))?.status ?? null;
     const out = await run(s);
     const subject = out.ride || out.extension || out.review;
     if (subject && subject.status !== before) {
-      const notice = stayNotice(kind, out, todayCN(clock.now()));
+      const notice = stayNotice(kind, out, userToday(req));
       deliverNotice(userId, await s.sessionOf(userId, id), { kind, ...notice, at: nowIso() });
     }
     await flushStore();
@@ -830,14 +880,16 @@ export function createApp(deps) {
   }
 
   function requireMerchant() {
-    if (!merchant) throw new HttpError(404, 'not_found', '接口不存在');
+    if (!merchant) throw new HttpError(404, 'not_found', 'No such API');
     return merchant;
   }
 
-  /** The hotel did something a 小宿 guest should hear about (merchant.js event): a notice in that guest's chat. */
+  /** The hotel did something a NanaHotel guest should hear about (merchant.js event): a notice in that guest's chat. */
   function deliverHotelEvent(event) {
     if (!event?.userId || !event.sessionId) return;
-    deliverNotice(event.userId, event.sessionId, { kind: event.kind, ...hotelNotice(event, todayCN(clock.now())), at: nowIso() });
+    // The console has no user zone; the guest's stay is at this hotel, so its date decides the year.
+    const zone = resolveTimeZone(event.stay?.timeZone || event.request?.timeZone, defaultZone);
+    deliverNotice(event.userId, event.sessionId, { kind: event.kind, ...hotelNotice(event, todayIn(zone, clock.now())), at: nowIso() });
   }
 
   /** A console action: the hotel's change is stored, the guest it touches told, and the store flushed. */
@@ -890,6 +942,7 @@ export function createApp(deps) {
       llm: { provider: config.llm?.provider || null, model: config.llm?.model || null, configured: llmReady() },
       hotels: 'sim',
       webSearch: Boolean(webSearch?.enabled),
+      defaultTimeZone: defaultZone,
     }), { auth: false }],
 
     ['POST', /^\/api\/sessions$/, async ({ req, res, userId }) => {
@@ -901,7 +954,7 @@ export function createApp(deps) {
 
     ['GET', /^\/api\/sessions\/([^/]+)$/, async ({ res, userId, params }) => {
       const session = ownSession(userId, params[0]);
-      if (!session) throw new HttpError(404, 'session_not_found', '这个对话不存在或已失效');
+      if (!session) throw new HttpError(404, 'session_not_found', "This chat doesn't exist anymore");
       sendJson(res, 200, { sessionId: session.id, items: await displayItems(userId, session) });
     }],
 
@@ -910,7 +963,7 @@ export function createApp(deps) {
     ['POST', /^\/api\/quotes\/([^/]+)\/confirm$/, async ({ req, res, userId, params }) => {
       await readJsonBody(req, limits.maxBodyBytes);
       const [quoteId] = params;
-      const out = await orderAction(userId, 'confirmed',
+      const out = await orderAction(req, userId, 'pending',
         () => bookings.confirmQuote({ userId, quoteId }),
         async () => {
           const q = await bookings.getQuote(userId, quoteId);
@@ -924,7 +977,7 @@ export function createApp(deps) {
     ['POST', /^\/api\/orders\/([^/]+)\/pay$/, async ({ req, res, userId, params }) => {
       const body = await readJsonBody(req, limits.maxBodyBytes);
       const [orderId] = params;
-      const out = await orderAction(userId, 'paid',
+      const out = await orderAction(req, userId, 'paid',
         () => bookings.payOrder({ userId, orderId, method: body.method }),
         async () => (await bookings.getOrder(userId, orderId))?.status ?? null);
       sendJson(res, 200, out);
@@ -934,7 +987,7 @@ export function createApp(deps) {
       const body = await readJsonBody(req, limits.maxBodyBytes);
       const [orderId] = params;
       const reason = typeof body.reason === 'string' ? body.reason.trim().slice(0, 200) : '';
-      const out = await orderAction(userId, 'cancelled',
+      const out = await orderAction(req, userId, 'cancelled',
         () => bookings.cancelOrder({ userId, orderId, reason }),
         async () => (await bookings.getOrder(userId, orderId))?.status ?? null);
       sendJson(res, 200, out);
@@ -961,21 +1014,21 @@ export function createApp(deps) {
     ['POST', /^\/api\/rides\/([^/]+)\/confirm$/, async ({ req, res, userId, params }) => {
       await readJsonBody(req, limits.maxBodyBytes);
       const [rideId] = params;
-      const { ride } = await stayAction(userId, rideId, 'ride_confirmed', async (s) => ({ ride: await s.confirmRide({ userId, rideId }) }));
+      const { ride } = await stayAction(req, userId, rideId, 'ride_confirmed', async (s) => ({ ride: await s.confirmRide({ userId, rideId }) }));
       sendJson(res, 200, { ride });
     }],
 
     ['POST', /^\/api\/extensions\/([^/]+)\/confirm$/, async ({ req, res, userId, params }) => {
       const body = await readJsonBody(req, limits.maxBodyBytes);
       const [extensionId] = params;
-      const { extension, order } = await stayAction(userId, extensionId, 'extended', (s) => s.confirmExtension({ userId, extensionId, method: body.method }));
+      const { extension, order } = await stayAction(req, userId, extensionId, 'extended', (s) => s.confirmExtension({ userId, extensionId, method: body.method }));
       sendJson(res, 200, { extension, order: toPublicOrder(order) });
     }],
 
     ['POST', /^\/api\/reviews\/([^/]+)\/publish$/, async ({ req, res, userId, params }) => {
       await readJsonBody(req, limits.maxBodyBytes);
       const [reviewId] = params;
-      const { review } = await stayAction(userId, reviewId, 'review_published', async (s) => ({ review: await s.publishReview({ userId, reviewId }) }));
+      const { review } = await stayAction(req, userId, reviewId, 'review_published', async (s) => ({ review: await s.publishReview({ userId, reviewId }) }));
       sendJson(res, 200, { review });
     }],
 
@@ -985,10 +1038,13 @@ export function createApp(deps) {
 
     ['PUT', /^\/api\/profile$/, async ({ req, res, userId }) => {
       const patch = parseProfilePatch(await readJsonBody(req, limits.maxBodyBytes));
-      throttleWrites(req);
       // Merge here so omitted fields (e.g. a blank phone input) keep their saved values.
       const current = (await profiles.get(userId)) || {};
-      const saved = await profiles.save(userId, { ...current, ...patch });
+      const merged = { ...current, ...patch };
+      // A name is a first and a last name, or none at all.
+      if (Boolean(merged.firstName) !== Boolean(merged.lastName)) throw new HttpError(400, 'invalid_name', NAME_MESSAGE);
+      throttleWrites(req);
+      const saved = await profiles.save(userId, merged);
       sendJson(res, 200, { profile: publicProfile(saved ?? (await profiles.get(userId))) });
     }],
   ];
@@ -996,18 +1052,18 @@ export function createApp(deps) {
   function identify(req) {
     const raw = req.headers['x-user-id'];
     if (typeof raw !== 'string' || !isUuid(raw.trim())) {
-      throw new HttpError(401, 'unauthorized', '缺少或无效的用户标识，请刷新页面后重试');
+      throw new HttpError(401, 'unauthorized', 'Your user id is missing or invalid; please reload the page and try again');
     }
     return raw.trim().toLowerCase();
   }
 
   async function handleApi(req, res, rawPath) {
     const matches = routes.filter(([, re]) => re.test(rawPath));
-    if (!matches.length) throw new HttpError(404, 'not_found', '接口不存在');
+    if (!matches.length) throw new HttpError(404, 'not_found', 'No such API');
     const route = matches.find(([method]) => method === req.method);
     if (!route) {
       const allow = [...new Set(matches.map(([m]) => m))].join(', ');
-      throw new HttpError(405, 'method_not_allowed', '不支持这个请求方法', { allow });
+      throw new HttpError(405, 'method_not_allowed', "That method isn't supported here", { allow });
     }
     const [, re, fn, opts = {}] = route;
     const userId = opts.auth === false ? null : identify(req);
@@ -1024,7 +1080,7 @@ export function createApp(deps) {
       } catch {
         id = '';
       }
-      if (!ID_RE.test(id)) throw new HttpError(404, 'not_found', '内容不存在或已失效');
+      if (!ID_RE.test(id)) throw new HttpError(404, 'not_found', "That doesn't exist or has expired");
       return id;
     });
     await fn({ req, res, userId, params, query });
@@ -1041,7 +1097,7 @@ export function createApp(deps) {
       logger.info(`[http] ${req.method} ${shown} ${res.statusCode}${res.writableFinished ? '' : ' (aborted)'} ${ms}ms`);
     });
     try {
-      if (!rawPath.startsWith('/')) throw new HttpError(400, 'bad_request', '请求地址无效');
+      if (!rawPath.startsWith('/')) throw new HttpError(400, 'bad_request', 'Invalid request path');
       if (rawPath === '/api' || rawPath.startsWith('/api/')) {
         await handleApi(req, res, rawPath);
         return;
@@ -1054,7 +1110,7 @@ export function createApp(deps) {
         return;
       }
       if (await serveStatic(req, res, rawPath)) return;
-      const body = '404 页面不存在';
+      const body = '404 Not found';
       res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8', 'Content-Length': Buffer.byteLength(body), 'Cache-Control': 'no-store' });
       res.end(req.method === 'HEAD' ? undefined : body);
     } catch (err) {
@@ -1163,18 +1219,18 @@ async function main() {
   }
   const running = await startServer({ config });
   const { llm } = config;
-  console.info(`[server] ${config.appName} 已启动：${running.url}`);
-  console.info(`[server] 大模型：${llm.label || llm.provider} / ${llm.model}${llm.configured ? '' : '（未配置 API Key，对话会提示如何配置）'}`);
+  console.info(`[server] ${config.appName} is running at ${running.url}`);
+  console.info(`[server] LLM: ${llm.label || llm.provider} / ${llm.model}${llm.configured ? '' : ' (no API key: the chat explains how to add one)'}`);
   for (const w of llm.warnings || []) console.warn(`[config] ${w}`);
-  console.info(`[server] 联网搜索：${config.webSearch.enabled ? '已开启（博查）' : '未开启'} · 数据目录：${config.dataDir}`);
+  console.info(`[server] Web search: ${config.webSearch.enabled ? 'on (Bocha)' : 'off'} · default time zone: ${config.timeZone || DEFAULT_TIME_ZONE} · data: ${config.dataDir}`);
 
   let exiting = false;
   const shutdown = (signal) => {
     if (exiting) return;
     exiting = true;
-    console.info(`[server] 收到 ${signal}，正在保存数据并退出…`);
+    console.info(`[server] got ${signal}, saving data and shutting down…`);
     running.close().then(() => process.exit(0), (err) => {
-      console.error(`[server] 退出时出错：${err?.stack || err}`);
+      console.error(`[server] error while shutting down: ${err?.stack || err}`);
       process.exit(1);
     });
   };
@@ -1184,7 +1240,7 @@ async function main() {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch((err) => {
-    console.error(`[server] 启动失败：${err?.stack || err}`);
+    console.error(`[server] failed to start: ${err?.stack || err}`);
     process.exit(1);
   });
 }
