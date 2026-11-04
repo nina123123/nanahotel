@@ -25,3 +25,20 @@ jobs:
           EMAIL_FROM: 'NanaHotel <onboarding@resend.dev>'
           SMOKE_LITEAPI_PREBOOK: '1'
           SMOKE_LITEAPI_BOOK: '1'
+  payment-form:
+    # LiteAPI's card form end to end in a headless browser (sandbox, Stripe test card; the booking is cancelled).
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Install Playwright and Chromium
+        run: |
+          npm install --no-save --no-package-lock playwright@1.63.0
+          npx playwright install --with-deps chromium
+      - run: node scripts/probe-payment.mjs
+        env:
+          LITEAPI_API_KEY: ${{ secrets.LITEAPI_API_KEY }}
+          LITEAPI_PAYMENT_KEY: ${{ secrets.LITEAPI_PAYMENT_KEY }}
