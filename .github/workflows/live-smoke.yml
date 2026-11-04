@@ -1,0 +1,27 @@
+name: Live smoke test
+# Checks every live connector against the real services with the repository's secrets
+# (sandbox keys: no real bookings, no real charges). Prints PASS / FAIL / SKIP per check; never prints keys.
+on:
+  workflow_dispatch:
+  push:
+    branches: [live-smoke]
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node scripts/smoke-live.mjs
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          LITEAPI_API_KEY: ${{ secrets.LITEAPI_API_KEY }}
+          LITEAPI_PAYMENT_KEY: ${{ secrets.LITEAPI_PAYMENT_KEY }}
+          GOOGLE_PLACES_API_KEY: ${{ secrets.GOOGLE_PLACES_API_KEY || secrets.GOOGLE_MAPS_API_KEY }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          EMAIL_FROM: 'NanaHotel <onboarding@resend.dev>'
+          SMOKE_LITEAPI_PREBOOK: '1'
+          SMOKE_LITEAPI_BOOK: '1'
