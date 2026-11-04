@@ -176,6 +176,21 @@ const DEFS = {
     },
   },
 
+  // ---- live hotels only: a ride with Uber or Lyft ----
+  get_ride_links: {
+    description: 'Uber and Lyft buttons with the trip filled in, for a ride to or from the hotel, the airport or anywhere. The user books and pays in the Uber or Lyft app: you don\'t book rides, don\'t know fares or drivers, and never say a ride is booked. Leave out from for "pick me up where I am".',
+    parameters: {
+      type: 'object',
+      properties: {
+        to: { type: 'string', description: 'Drop-off: a place or address, e.g. the hotel\'s name and address from the booking' },
+        from: { type: 'string', description: 'Pickup: a place or address, e.g. "JFK Terminal 4"; leave out for the user\'s current location' },
+        city: { type: 'string', description: 'The city the ride is in, e.g. "New York"' },
+        kind: { type: 'string', enum: ['airport_pickup', 'to_hotel', 'from_hotel', 'ride'], description: 'What kind of ride (default ride)' },
+      },
+      required: ['to'],
+    },
+  },
+
   // ---- after booking: the stay (leave out order_id = the current booking) ----
   plan_itinerary: {
     description: 'Lay out one day as a plan card (e.g. arrival day: land, check in, lunch, sights), 2–8 items in time order. Use places from search_places or what the user said; never invent opening hours, tickets or prices. For "plan my day" or "what should we do that day"; date defaults to the booking\'s check-in day while it is ahead, else today.',
@@ -969,7 +984,12 @@ export function validateProfilePatch({ firstName, lastName, email, contactPhone,
  * @param {{ hotels?, places?, bookings?, stays?, webSearch?: { enabled: boolean, search: Function }, profiles?: { get(userId), save(userId, patch) },
  *           clock?: { now: () => Date }, logger?: (err: unknown) => void }} deps
  */
-export function createTools({ hotels, places, bookings, stays, webSearch, profiles, clock = { now: () => new Date() }, logger = (err) => console.error('[tools]', err) } = {}) {
+export function createTools({ hotels, places, bookings, stays, webSearch, profiles, rides = null, clock = { now: () => new Date() }, logger = (err) => console.error('[tools]', err) } = {}) {
+  // Live hotels (LiteAPI): real prices and a real card form, so the demo's wording changes.
+  const live = Boolean(bookings?.live || hotels?.live);
+  const L = (text) => (live
+    ? String(text).replace(/ \(simulated\)/g, '').replace(/, simulated\)/g, ')').replace(/(complete|finish) the test payment/g, 'pay in the secure card form')
+    : text);
   /** The user's zone, today and earliest check-in (yesterday before 6 AM), and now, from one clock reading. */
   const when = (ctx) => {
     const now = clock.now();
@@ -1053,7 +1073,7 @@ export function createTools({ hotels, places, bookings, stays, webSearch, profil
         total_found: result.totalFound,
         hotels: result.hotels.slice(0, MAX_MODEL_HOTELS).map((h) => compactHotel(h, result.landmark, { withKeywords })),
         ...(notes.length ? { notes } : {}),
-        price_note: 'price_from is the lowest price per room per night in USD with taxes and fees (simulated). When it is null, sold_out means sold out and fits:false means the party doesn\'t fit in the rooms asked for (not sold out: add a room or pick a suite)',
+        price_note: L('price_from is the lowest price per room per night in USD with taxes and fees (simulated). When it is null, sold_out means sold out and fits:false means the party doesn\'t fit in the rooms asked for (not sold out: add a room or pick a suite)'),
         reply_hint: 'The user sees the hotel cards (photos, prices, ratings, distances, in the same order as hotels): one or two sentences, recommend one by its number with one reason (like "I\'d go with #1: closest to Times Square and rated 4.6"), don\'t list the cards again, and end with a quick reply like Reply "Book #1". "#N" or "N" from the user is the Nth hotel on the card.',
       };
       const card = { type: 'hotels', query: result.query, landmark: result.landmark, hotels: result.hotels, notes, demo: result.demo !== false };
@@ -1095,7 +1115,7 @@ export function createTools({ hotels, places, bookings, stays, webSearch, profil
           max_guests: rt.maxOccupancy,
           rates: rt.rates.map((r) => compactRate(r, { nights: offer.nights, rooms: offer.rooms, maxGuests: rt.maxOccupancy, nowMs, zone })),
         })),
-        price_note: 'total_price is for all nights and rooms, avg_nightly per room per night (USD with taxes and fees, simulated); free_cancel says whether booking now can still be cancelled for free',
+        price_note: L('total_price is for all nights and rooms, avg_nightly per room per night (USD with taxes and fees, simulated); free_cancel says whether booking now can still be cancelled for free'),
         reply_hint: 'The user sees the room cards (in the same order as room_types): one or two sentences, recommend one rate with a reason (like "I\'d take #1: breakfast included and free cancellation, $1,136 for 2 nights"), don\'t list the cards again, ask "Want me to book it?" and offer Say "Yes". On "Yes" call prepare_booking with the rate_id you recommended; "#N" means the Nth room type on the card (use its best rate).',
       };
       const notes = [];
@@ -1241,9 +1261,41 @@ export function createTools({ hotels, places, bookings, stays, webSearch, profil
         cancel_policy: quote.rate?.cancelPolicy?.text || cancelInfo(quote.rate?.cancelPolicy, w.now.getTime(), zone).text,
         free_cancel: cancelInfo(quote.rate?.cancelPolicy, w.now.getTime(), zone).free,
         expires_at: atText(quote.expiresAt, w),
-        instruction: `The confirmation card is with the user, but nothing is booked yet: the user has to tap "Confirm booking ${formatUsd(quote.totalPrice)}" and finish the test payment (the quote holds for 15 minutes). You can't confirm or pay for the user; until a system notice says so, never say "booked", "reserved" or "you're all set". Send one line, like: "Here's your booking summary. Check it over, then tap Confirm booking."`,
+        instruction: L(`The confirmation card is with the user, but nothing is booked yet: the user has to tap "Confirm booking ${formatUsd(quote.totalPrice)}" and finish the test payment (the quote holds for 15 minutes). You can't confirm or pay for the user; until a system notice says so, never say "booked", "reserved" or "you're all set". Send one line, like: "Here's your booking summary. Check it over, then tap Confirm booking."`),
       };
-      return { content, card: { type: 'booking_quote', quote: publicQuote(quote), demo: true } };
+      return { content, card: { type: 'booking_quote', quote: publicQuote(quote), demo: !live } };
+    },
+
+    async get_ride_links(args) {
+      const to = str(args, 'to', { required: true, max: 160 });
+      const from = str(args, 'from', { max: 160 });
+      const city = str(args, 'city', { max: 60 }) || '';
+      const kind = ['airport_pickup', 'to_hotel', 'from_hotel', 'ride'].includes(args.kind) ? args.kind : 'ride';
+      const find = async (text) => {
+        if (!text) return null;
+        try {
+          return await rides.geocoder.geocode(text, { city });
+        } catch (err) {
+          logger(err);
+          return null;
+        }
+      };
+      const [pickup, dropoff] = await Promise.all([find(from), find(to)]);
+      if (!dropoff) return { content: { error: `Couldn't find "${to}" on the map; ask the user for the address` } };
+      if (from && !pickup) return { content: { error: `Couldn't find "${from}" on the map; ask the user for the pickup address, or leave it out for their current location` } };
+      const point = (p, text) => ({ lat: p.lat, lng: p.lng, name: (p.name || text).slice(0, 80), address: p.address || '' });
+      const links = rides.links({ pickup: pickup ? point(pickup, from) : null, dropoff: point(dropoff, to) });
+      if (!links) return { content: { error: 'Couldn\'t make the ride links for that trip' } };
+      const labels = { airport_pickup: 'Airport pickup', to_hotel: 'To the hotel', from_hotel: 'From the hotel', ride: 'Ride' };
+      const card = { type: 'ride_links', rideKind: kind, kindLabel: labels[kind], from: pickup ? point(pickup, from).name : '', to: point(dropoff, to).name, links: { uber: links.uber, lyft: { label: links.lyft.label, url: links.lyft.url } } };
+      return {
+        content: {
+          from: card.from || 'the user\'s current location',
+          to: card.to,
+          instruction: 'The card has "Open in Uber" and "Open in Lyft" buttons with the trip filled in; the user books and pays there. One sentence, without a fare or a driver (you don\'t know them) and without saying a ride is booked.',
+        },
+        card,
+      };
     },
 
     async list_orders(args, ctx) {
@@ -1605,6 +1657,7 @@ export function createTools({ hotels, places, bookings, stays, webSearch, profil
     list_orders: () => Boolean(bookings),
     prepare_cancellation: () => Boolean(bookings),
     save_profile: () => Boolean(profiles),
+    get_ride_links: () => Boolean(rides?.links && rides?.geocoder),
     ...Object.fromEntries(STAY_TOOLS.map((name) => [name, () => Boolean(stays)])),
   };
 
@@ -1614,7 +1667,7 @@ export function createTools({ hotels, places, bookings, stays, webSearch, profil
   function definitions() {
     return Object.keys(DEFS)
       .filter((name) => available[name]())
-      .map((name) => ({ type: 'function', function: { name, description: DEFS[name].description, parameters: structuredClone(DEFS[name].parameters) } }));
+      .map((name) => ({ type: 'function', function: { name, description: L(DEFS[name].description), parameters: structuredClone(DEFS[name].parameters) } }));
   }
 
   /** @returns {Promise<{ content: object, card?: object }>} never rejects */
@@ -1684,6 +1737,8 @@ export function createTools({ hotels, places, bookings, stays, webSearch, profil
         return 'Planning your day…';
       case 'quote_ride':
         return a.kind === 'airport_pickup' ? 'Pricing your airport pickup…' : 'Pricing your ride…';
+      case 'get_ride_links':
+        return 'Getting your ride ready in Uber and Lyft…';
       case 'request_early_checkin':
         return 'Asking the hotel about early check-in…';
       case 'check_in':

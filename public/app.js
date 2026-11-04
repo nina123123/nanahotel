@@ -14,12 +14,15 @@ import { loadRivePet, mountRivePet, rivePetReady } from './pet-rive.js';
 import { icon } from './icons.js';
 import { createCards, STATUS_LABELS } from './cards.js';
 import {
-  clockTime, dayOf, dayTime, formatDate, formatMoney, formatPhoneInput, formatRange, localYmd, normalizePhoneInput,
+  clockTime, dayOf, dayTime, formatDate, formatMoney, formatMoneyExact, formatPhoneInput, formatRange, localYmd, normalizePhoneInput,
   partyPhrase, plural, US_PHONE_RE, userTimeZone,
 } from './format.js';
 
 const KEY_USER = 'nanahotel.userId';
 const KEY_SESSION = 'nanahotel.sessionId';
+// The order being paid in LiteAPI's card form, kept across the trip to the payment page and back.
+const KEY_PAYING = 'nanahotel.paying';
+const PAYMENT_SCRIPT_RE = /^https:\/\/payment-wrapper\.liteapi\.travel\//;
 const NEAR_BOTTOM_PX = 120;
 const MAX_MESSAGE_CHARS = 2000;
 // The assistant; the app's name (NanaHotel) comes from the server.
@@ -422,6 +425,8 @@ const state = {
   stays: [],
   photos: null,
   merchant: false,
+  // Live hotels (from /api/health): { hotels: 'liteapi', sandbox, … }, or null for the demo.
+  live: null,
 };
 
 let cards = null;
@@ -1057,6 +1062,13 @@ function renderQuoteState(el, q, failure = null) {
   setPeekMood(el, failure ? 'oops' : q.status === 'confirmed' ? 'happy' : expired ? 'sleepy' : 'idle');
   if (failure) {
     box.append(h('p', { class: 'confirm-note is-warn', text: failure.message }), chatButton('Get a new quote', requoteMessage(q), { cls: 'btn btn-secondary', action: 'requote' }));
+  } else if (q.status === 'confirmed' && q.live && q.orderStatus === 'pending_payment') {
+    // Live hotels: the price is held, the card form isn't done yet.
+    const btn = h('button', { type: 'button', class: 'btn btn-primary', 'data-action': 'confirm-pay' }, `Finish payment ${formatMoneyExact(q.totalPrice)}`);
+    btn.addEventListener('click', () => onConfirm(el, quoteOf.get(el) || q));
+    box.append(h('p', { class: 'confirm-note', text: 'Waiting for payment' }), btn);
+  } else if (q.status === 'confirmed' && q.orderStatus === 'closed') {
+    box.append(h('p', { class: 'confirm-note', text: 'This booking timed out before it was paid' }), chatButton('Get a new quote', requoteMessage(q), { cls: 'btn btn-secondary', action: 'requote' }));
   } else if (q.status === 'confirmed') {
     box.append(h('p', { class: 'confirm-note' }, icon('paw'), h('span', { text: 'Booked' })));
   } else if (q.status === 'superseded') {
@@ -1075,7 +1087,7 @@ function renderQuoteState(el, q, failure = null) {
 }
 
 async function onConfirm(el, quote) {
-  const result = await openPaymentSheet(quote);
+  const result = await (quote.live ? openLiveCheckout(quote) : openPaymentSheet(quote));
   if (!result) return;
   if (result.error) {
     renderQuoteState(el, { ...quote, status: result.error.code === 'superseded' ? 'superseded' : quote.status }, result.error);
@@ -1087,6 +1099,201 @@ async function onConfirm(el, quote) {
     renderQuoteState(el, { ...quote, status: 'confirmed', orderId: result.order.id });
     refreshPlans();
     await syncNotices({ kind: 'paid', cards: [{ type: 'order', order: result.order }] });
+  } else if (result.order && quote.live) {
+    // The sheet was closed with the price held: the card offers to finish paying.
+    renderQuoteState(el, { ...quote, status: 'confirmed', orderId: result.order.id, orderStatus: result.order.status });
+    await syncNotices();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Live checkout: LiteAPI's card form (live hotels only)
+// ---------------------------------------------------------------------------
+
+let paymentScript = null;
+
+/** LiteAPI's payment script, loaded once (only from LiteAPI's own address). */
+function loadPaymentScript(src) {
+  if (!PAYMENT_SCRIPT_RE.test(String(src || ''))) return Promise.reject(new ApiError(0, 'payment_unavailable', "The card form couldn't load. Try again soon."));
+  paymentScript ??= new Promise((resolve, reject) => {
+    const el = document.createElement('script');
+    el.src = src;
+    el.async = true;
+    el.onload = () => (typeof window.LiteAPIPayment === 'function' ? resolve() : reject(new ApiError(0, 'payment_unavailable', "The card form couldn't load. Try again soon.")));
+    el.onerror = () => {
+      paymentScript = null;
+      el.remove();
+      reject(new ApiError(0, 'network', "The card form couldn't load. Check your connection and try again."));
+    };
+    document.head.append(el);
+  });
+  return paymentScript;
+}
+
+function waitFor(test, ms) {
+  return new Promise((resolve) => {
+    const t0 = Date.now();
+    const tick = () => {
+      const v = test();
+      if (v || Date.now() - t0 > ms) resolve(v || null);
+      else setTimeout(tick, 200);
+    };
+    tick();
+  });
+}
+
+/**
+ * Live hotels: "Confirm booking" holds the price with the hotel supplier, then LiteAPI's card form (Stripe) takes the
+ * card in this sheet. Paying sends the whole page through the card's checks and back to this page with
+ * ?paid=<order>, where completeLivePayment books it. Resolves like openPaymentSheet if the sheet closes first:
+ * null, { order, paid } or { order?, error, requote }.
+ */
+function openLiveCheckout(quote) {
+  const hotel = quote.hotel || {};
+  const sandbox = Boolean(quote.live?.sandbox ?? state.live?.sandbox);
+  return new Promise((resolve) => {
+    let outcome = null;
+    const ctl = openModal({ title: 'Checkout' });
+    const formId = `nana-payment-${ctl.seq}`;
+    const amountEl = h('p', { class: 'pay-amount', text: formatMoneyExact(quote.totalPrice) });
+    const statusEl = h('p', { class: 'pay-status', role: 'status' });
+    const form = h('div', { class: 'live-pay', id: formId });
+    const errorEl = h('p', { class: 'form-error', role: 'alert', hidden: true });
+    const again = h('button', { type: 'button', class: 'btn btn-secondary', hidden: true }, 'Try again');
+    ctl.body.append(
+      h('div', { class: 'pay-head' },
+        h('p', { class: 'pay-merchant', text: `${state.appName}${sandbox ? ' · Test mode' : ''}` }),
+        amountEl,
+        h('p', { class: 'pay-desc', text: [hotel.name, `Check-in ${formatDate(quote.checkIn)}`, plural(quote.nights || 1, 'night')].filter(Boolean).join(' · ') })),
+      statusEl,
+      form,
+      errorEl,
+      again,
+      h('p', { class: 'pay-note', text: sandbox
+        ? 'Test mode: pay with card 4242 4242 4242 4242, any future date and any CVC. Nothing is charged.'
+        : 'Your card goes straight to our payment partner (LiteAPI by Nuitée, on Stripe); NanaHotel never sees it.' }));
+
+    const working = (text) => {
+      statusEl.hidden = false;
+      statusEl.replaceChildren(spinner(), h('span', { text }));
+    };
+    const fail = (err) => {
+      statusEl.hidden = true;
+      form.replaceChildren();
+      errorEl.textContent = err?.message || "Couldn't open the card form. Try again soon.";
+      errorEl.hidden = false;
+      if (REQUOTE_CODES.has(err?.code) || ['order_closed', 'order_cancelled', 'payment_unavailable'].includes(err?.code)) {
+        outcome = { ...(outcome?.order ? { order: outcome.order } : {}), error: { code: err.code, message: err.message } };
+        again.textContent = 'Get a new quote';
+        again.onclick = () => {
+          outcome = { ...outcome, requote: true };
+          ctl.close();
+        };
+      } else {
+        again.textContent = 'Try again';
+        again.onclick = () => start();
+      }
+      again.hidden = false;
+    };
+
+    async function start() {
+      again.hidden = true;
+      errorEl.hidden = true;
+      working('Holding your room and price…');
+      try {
+        const order = (await api('POST', `/api/quotes/${enc(quote.id)}/confirm`, {})).order;
+        if (!order) throw new ApiError(0, 'bad_response', "Couldn't place the booking. Try again soon.");
+        outcome = { order, paid: order.status === 'confirmed' };
+        if (order.status === 'confirmed') {
+          ctl.close();
+          return;
+        }
+        if (order.status !== 'pending_payment') {
+          throw new ApiError(0, order.status === 'closed' ? 'order_closed' : order.status, order.status === 'closed' ? 'This booking timed out and was closed. Get a new quote.' : 'This booking changed. Get a new quote.');
+        }
+        amountEl.textContent = formatMoneyExact(order.totalPrice);
+        const session = await api('GET', `/api/orders/${enc(order.id)}/payment`);
+        working('Opening the secure card form…');
+        await loadPaymentScript(session.scriptUrl);
+        storage.set(KEY_PAYING, JSON.stringify({ orderId: order.id, sessionId: state.sessionId, at: Date.now() }));
+        const back = new URL(location.href);
+        back.search = '';
+        back.hash = '';
+        back.searchParams.set('paid', order.id);
+        form.replaceChildren();
+        const payment = new window.LiteAPIPayment({
+          // LiteAPI's environment name (seen live: a publishable key here is refused).
+          publicKey: session.environment,
+          secretKey: session.secretKey,
+          targetElement: `#${formId}`,
+          returnUrl: back.href,
+          submitButton: { text: `Pay ${formatMoneyExact(order.totalPrice)}` },
+          appearance: { theme: 'flat' },
+          options: { business: { name: state.appName } },
+        });
+        await payment.handlePayment();
+        // handlePayment keeps its own errors to itself: no card fields after a while means it couldn't start.
+        if (!(await waitFor(() => form.querySelector('iframe'), 20000))) {
+          throw new ApiError(0, 'network', "The card form didn't open. Check your connection and try again.");
+        }
+        statusEl.replaceChildren(h('span', { text: order.priceDropped ? `Good news: the price dropped to ${formatMoneyExact(order.totalPrice)}.` : 'Enter your card to finish booking.' }));
+      } catch (err) {
+        storage.remove(KEY_PAYING);
+        fail(err);
+      }
+    }
+
+    start();
+    ctl.closed.then(() => resolve(outcome));
+  });
+}
+
+/** Back from the card form (?paid=<order>&redirect_status=…): the address bar is cleaned at once. */
+function takePaymentReturn() {
+  let params;
+  try {
+    params = new URLSearchParams(location.search);
+  } catch {
+    return null;
+  }
+  const orderId = params.get('paid');
+  if (!orderId) return null;
+  // Stripe adds its client secret to the address; it must not stay in the history.
+  history.replaceState(history.state, '', location.pathname + location.hash);
+  let saved = null;
+  try {
+    saved = JSON.parse(storage.get(KEY_PAYING) || 'null');
+  } catch {
+    saved = null;
+  }
+  storage.remove(KEY_PAYING);
+  if (!/^[A-Za-z0-9_-]{1,80}$/.test(orderId)) return null;
+  const sessionId = saved?.orderId === orderId && /^[A-Za-z0-9_-]{1,80}$/.test(saved.sessionId || '') ? saved.sessionId : null;
+  return { orderId, status: params.get('redirect_status') || '', sessionId };
+}
+
+/** Books the order the guest just paid for (the server uses the payment it holds, never one from here). */
+async function completeLivePayment(ret) {
+  if (ret.status && ret.status !== 'succeeded') {
+    toast(ret.status === 'processing'
+      ? 'Your bank is still processing the payment. Check My trips in a minute.'
+      : "The payment didn't go through, so nothing was booked. Tap Finish payment to try again.");
+    return;
+  }
+  petStatus('Confirming your booking with the hotel…');
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      await api('POST', `/api/orders/${enc(ret.orderId)}/pay`, { method: 'liteapi' });
+      return;
+    } catch (err) {
+      // Another tab (or a reload) is already booking it: wait for that answer instead of booking twice.
+      if (err.code === 'payment_processing' && attempt < 3) {
+        await new Promise((r) => { setTimeout(r, 4000); });
+        continue;
+      }
+      toast(err.message || "Couldn't confirm the booking yet. Check My trips in a minute.");
+      return;
+    }
   }
 }
 
@@ -2190,6 +2397,11 @@ function renderWelcome() {
 /** The one line above the conversation: the AI-content label, plus demo mode or a missing-key warning. */
 function renderThreadNote() {
   const note = els.threadNote;
+  if (state.live) {
+    note.replaceChildren(h('span', { text: 'AI-generated · Real hotels and prices' }));
+    if (state.live.sandbox) note.append(h('span', { class: 'thread-note-line', 'data-mode': 'test', text: 'Test mode: bookings are tests and no card is charged' }));
+    return;
+  }
   note.replaceChildren(h('span', { text: 'AI-generated · Hotels, prices and payments are simulated' }));
   if (globalThis.nanahotelApp?.mode === 'demo') {
     note.append(h('span', { class: 'thread-note-line', 'data-mode': 'demo', text: 'Demo mode: the replies are scripted' }));
@@ -2210,6 +2422,10 @@ async function loadHealth() {
   try {
     const data = await api('GET', '/api/health');
     if (data.appName) setAppName(data.appName);
+    if (data.live && typeof data.live === 'object') {
+      state.live = data.live;
+      renderThreadNote();
+    }
     if (data.llm && data.llm.configured === false) {
       state.llmConfigured = false;
       renderThreadNote();
@@ -2358,6 +2574,8 @@ function boot() {
   state.userId = loadUserId();
   const saved = storage.get(KEY_SESSION);
   state.sessionId = saved && /^[A-Za-z0-9_-]{1,80}$/.test(saved) ? saved : null;
+  const paying = takePaymentReturn();
+  if (paying?.sessionId) state.sessionId = paying.sessionId;
   document.getElementById('btn-menu').addEventListener('click', openMenu);
   bindPet();
   bindChrome();
@@ -2371,8 +2589,10 @@ function boot() {
   // The hotel's console is offered in the menu only when this server has it (docs/MERCHANT.md).
   api('GET', '/api/merchant/hotels').then(() => { state.merchant = true; }, () => {});
   // The home screen speaks to where the trip is, so it waits (briefly) for My trips.
-  const plans = refreshPlans();
-  if (state.sessionId) loadHistory();
+  // Back from the card form: book first, so the chat shows the booking when it loads.
+  const booked = paying ? completeLivePayment(paying) : Promise.resolve();
+  const plans = booked.then(() => refreshPlans());
+  if (state.sessionId) booked.finally(() => loadHistory());
   else {
     Promise.race([plans, new Promise((resolve) => { setTimeout(resolve, 600); })]).then(() => {
       if (!els.messages.childElementCount) renderWelcome();

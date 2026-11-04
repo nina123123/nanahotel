@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveLlmConfig } from './llm/providers.js';
 import { canonicalTimeZone, DEFAULT_TIME_ZONE } from './util/dates.js';
+import { readLiveConfig } from './live/config.js';
 
 // The only module that reads process.env; everything else receives this config object.
 
@@ -25,6 +26,8 @@ export const DEFAULT_LIMITS = Object.freeze({
   maxMessageChars: 2000,
   // Per user: enough for a real booking conversation, low enough to cap LLM spend from one browser.
   chatTurnsPerWindow: 30,
+  // Server-wide AI turns per day (UTC); 0 = no cap. A public server should set AI_TURNS_PER_DAY.
+  aiTurnsPerDay: 0,
   rateWindowMs: 10 * 60 * 1000,
   // X-User-Id is client-chosen, so writes (new sessions, chat turns, profile saves) are also capped per
   // client address. Behind a reverse proxy set TRUST_PROXY=1, or every user shares the proxy's bucket. 0 = off.
@@ -136,15 +139,24 @@ export function loadConfig({ env = process.env, envFile, rootDir = ROOT_DIR } = 
   const timeZone = vars.DEFAULT_TIME_ZONE ? canonicalTimeZone(vars.DEFAULT_TIME_ZONE) : DEFAULTS.timeZone;
   if (!timeZone) throw new Error(`The setting DEFAULT_TIME_ZONE is invalid: "${vars.DEFAULT_TIME_ZONE}"; it should be an IANA time zone like America/New_York`);
   const bochaKey = vars.BOCHA_API_KEY || '';
+  const host = vars.HOST || DEFAULTS.host;
+  const merchantPassword = vars.MERCHANT_PASSWORD || '';
+  // On a public address the hotel console needs MERCHANT_PASSWORD; on this computer only it stays open.
+  const loopback = /^(127\.0\.0\.1|localhost|::1)$/i.test(host);
   return {
     appName,
     port: intIn(vars, 'PORT', 0, 65535, DEFAULTS.port),
-    host: vars.HOST || DEFAULTS.host,
+    host,
     rootDir,
     publicDir: path.join(rootDir, 'public'),
     dataDir: path.resolve(rootDir, vars.DATA_DIR || DEFAULTS.dataDir),
     timeZone,
     llm: resolveLlmConfig(vars),
+    // Live services (LiteAPI, Google Places, Resend, ride links), each on when its key is set: docs/LIVE.md.
+    live: readLiveConfig(vars),
+    merchantPassword,
+    merchantAccess: merchantPassword ? 'password' : loopback ? 'open' : 'off',
+    publicUrl: (vars.PUBLIC_URL || vars.RENDER_EXTERNAL_URL || '').replace(/\/+$/, ''),
     webSearch: { provider: 'bocha', apiKey: bochaKey, enabled: Boolean(bochaKey) },
     // Only behind a reverse proxy that sets X-Forwarded-For; otherwise clients could pick their own address.
     trustProxy: TRUE_RE.test(vars.TRUST_PROXY || ''),
@@ -152,6 +164,7 @@ export function loadConfig({ env = process.env, envFile, rootDir = ROOT_DIR } = 
       ...DEFAULT_LIMITS,
       chatTurnsPerWindow: intIn(vars, 'CHAT_TURNS_PER_WINDOW', 1, 100000, DEFAULT_LIMITS.chatTurnsPerWindow),
       writesPerIpPerWindow: intIn(vars, 'WRITES_PER_IP_PER_WINDOW', 0, 100000, DEFAULT_LIMITS.writesPerIpPerWindow),
+      aiTurnsPerDay: intIn(vars, 'AI_TURNS_PER_DAY', 0, 1000000, DEFAULT_LIMITS.aiTurnsPerDay),
     },
   };
 }

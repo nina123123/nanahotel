@@ -134,6 +134,13 @@ export function formatMoney(n) {
   return Math.abs(cents) >= 100 ? usdWhole.format(Math.round(n)) : usdCents.format(cents);
 }
 
+/** What a card is charged, to the cent: $1,681.82 (whole amounts stay whole: $468). */
+export function formatMoneyExact(n) {
+  if (typeof n !== 'number' || !Number.isFinite(n)) return '—';
+  const cents = Math.round(n * 100) / 100;
+  return Number.isInteger(cents) ? usdWhole.format(cents) : usdCents.format(cents);
+}
+
 /** Meters → '800 ft' under 1,000 feet, then '0.3 mi' (whole miles from 10). */
 export function formatDistance(meters) {
   const m = Number(meters);

@@ -53,8 +53,16 @@ class RemoteClient(private val context: Context, private val server: Uri) : WebV
     }
 
     companion object {
-        /** The card form: LiteAPI's payment wrapper and Stripe (its fields, and redirects such as 3-D Secure). */
-        val PAYMENT_HOSTS = listOf("liteapi.travel", "stripe.com", "stripe.network")
+        /**
+         * The card form: LiteAPI's payment wrapper and Stripe (its fields, and redirects such as 3-D Secure), plus the
+         * pay-later and wallet options it offers (Klarna, Affirm, Afterpay, Cash App Pay, Amazon Pay), which send the
+         * guest to their own pages and back.
+         */
+        val PAYMENT_HOSTS = listOf(
+            "liteapi.travel", "stripe.com", "stripe.network", "stripecdn.com", "hcaptcha.com",
+            "klarna.com", "affirm.com", "afterpay.com", "cash.app", "squareup.com",
+            "amazon.com", "amazonpay.com", "payments-amazon.com",
+        )
 
         private fun offlinePage(server: String): String {
             val target = server.replace("\\", "").replace("'", "%27").replace("<", "%3C")

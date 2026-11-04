@@ -1,0 +1,44 @@
+name: Live end-to-end (sandbox)
+# The real app against the real services in LiteAPI's sandbox: search, rooms, quote, LiteAPI's card form with
+# Stripe's test card, the booking, and its cancellation. Nothing is charged. Screenshots go to the probe-shots branch.
+on:
+  workflow_dispatch:
+  push:
+    branches: [live-e2e]
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Install Playwright and Chromium
+        run: |
+          npm install --no-save --no-package-lock playwright@1.63.0
+          npx playwright install --with-deps chromium
+      - name: Book and cancel a sandbox stay in the browser
+        run: node test/e2e/live-e2e.mjs
+        env:
+          LITEAPI_API_KEY: ${{ secrets.LITEAPI_API_KEY }}
+          GOOGLE_PLACES_API_KEY: ${{ secrets.GOOGLE_PLACES_API_KEY || secrets.GOOGLE_MAPS_API_KEY }}
+          SCREENSHOT_DIR: probe-shots/live-e2e
+      - name: Keep the screenshots (branch probe-shots)
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [ -d probe-shots ] || exit 0
+          cd probe-shots
+          git init -q -b probe-shots
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if git fetch -q --depth 1 origin probe-shots; then git reset -q --soft FETCH_HEAD; fi
+          git add -A
+          git commit -qm "Live end-to-end screenshots, run ${GITHUB_RUN_NUMBER}"
+          git push -q origin probe-shots

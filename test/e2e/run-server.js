@@ -16,6 +16,8 @@ const config = {
   dataDir: null,
   llm: { provider: 'scripted', label: 'Scripted demo', model: 'demo-script', configured: true, keyEnv: '' },
   webSearch: { provider: 'bocha', apiKey: '', enabled: false },
+  // Always the demo, even with live keys in the environment or .env.
+  live: null,
 };
 
 const running = await startServer({

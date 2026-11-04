@@ -25,6 +25,9 @@ import { buildSystemPrompt } from './agent/prompt.js';
 import { MAX_PREFERENCES_CHARS } from './agent/text.js';
 import { runAgentTurn } from './agent/agent.js';
 import { createTools, createProfileRepo } from './agent/tools.js';
+import { createLiveServices, describeLiveConfig } from './live/index.js';
+import { createLiveHotelService } from './services/hotels/live-service.js';
+import { createLiveBookingService } from './services/live-bookings.js';
 
 export const CSP = [
   "default-src 'self'", "img-src 'self' data:", "style-src 'self' 'unsafe-inline'", "connect-src 'self'",
@@ -33,12 +36,27 @@ export const CSP = [
   // Not covered by default-src: an injected <base> or <form action> would otherwise still work.
   "object-src 'none'", "base-uri 'none'", "form-action 'self'", "frame-ancestors 'none'",
 ].join('; ');
+
+/**
+ * With live hotels: also the hotels' photos (any https host) and LiteAPI's card form, which runs on Stripe
+ * (its scripts and frames, plus the hCaptcha check Stripe adds). Seen live in LiteAPI's sandbox.
+ */
+export const LIVE_CSP = [
+  "default-src 'self'", "img-src 'self' data: https:", "style-src 'self' 'unsafe-inline'",
+  "connect-src 'self' https://payment-wrapper.liteapi.travel https://api.stripe.com https://*.stripe.com https://m.stripe.network https://hcaptcha.com https://*.hcaptcha.com",
+  "script-src 'self' 'wasm-unsafe-eval' https://payment-wrapper.liteapi.travel https://js.stripe.com https://*.js.stripe.com https://hcaptcha.com https://*.hcaptcha.com",
+  "frame-src https://js.stripe.com https://*.js.stripe.com https://hooks.stripe.com https://b.stripecdn.com https://m.stripe.network https://hcaptcha.com https://*.hcaptcha.com",
+  "object-src 'none'", "base-uri 'none'", "form-action 'self' https://hooks.stripe.com", "frame-ancestors 'none'",
+].join('; ');
 const SECURITY_HEADERS = Object.freeze({
   'Content-Security-Policy': CSP,
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'no-referrer',
   'X-Frame-Options': 'DENY',
 });
+
+const CONSOLE_COOKIE = 'nanahotel_console';
+const CONSOLE_SESSION_MS = 12 * 60 * 60 * 1000;
 
 /** Every notice in the model's history starts with this (then a space and the account). */
 export const NOTICE_PREFIX = '[System notice — not from the user]';
@@ -85,7 +103,9 @@ function sendError(res, err, logger) {
     if (!res.writableEnded) res.end();
     return;
   }
-  if (err instanceof HttpError || isClientError(err)) {
+  // A typed error from a service (BookingError, HotelError…): its status and message; a hotel supplier that
+  // isn't answering is a 503 with a message the guest can read.
+  if (err instanceof HttpError || isClientError(err) || (err && typeof err.code === 'string' && [502, 503, 504].includes(err.status))) {
     const error = { code: err.code, message: err.message };
     if (err.details && typeof err.details === 'object') error.details = err.details;
     const headers = {};
@@ -488,7 +508,7 @@ function notConfiguredText(llmConfig = {}) {
 export function createApp(deps) {
   const {
     config, llm = null, hotels, places, bookings, webSearch = { enabled: false }, store,
-    clock = systemClock, logger = console,
+    clock = systemClock, logger = console, live = null, rides = null,
   } = deps;
   if (!config || !store || !bookings) throw new Error('createApp: config, store and bookings are required');
 
@@ -497,16 +517,27 @@ export function createApp(deps) {
   // The zone of a request without a valid X-Time-Zone header (the app shells may build config without one).
   const defaultZone = resolveTimeZone(config.timeZone, DEFAULT_TIME_ZONE);
   const profiles = deps.profiles ?? createProfileRepo(store, { clock });
-  const stays = deps.stays ?? (hotels ? createStayService({ store, bookings, hotels, clock }) : null);
-  const merchant = deps.merchant ?? (stays && hotels ? createMerchantService({ store, bookings, stays, hotels, clock }) : null);
+  // `stays: null` / `merchant: null` switch them off (live hotels: nobody can send towels to a real hotel).
+  const stays = Object.hasOwn(deps, 'stays') ? deps.stays : (hotels ? createStayService({ store, bookings, hotels, clock }) : null);
+  const merchant = Object.hasOwn(deps, 'merchant') ? deps.merchant : (stays && hotels ? createMerchantService({ store, bookings, stays, hotels, clock }) : null);
   const tools = deps.tools ?? createTools({
-    hotels, places, bookings, stays, webSearch, profiles, clock,
+    hotels, places, bookings, stays, webSearch, profiles, clock, rides,
     logger: (err) => logger.error(`[tools] ${err?.stack || err}`),
   });
+  const securityHeaders = live ? { ...SECURITY_HEADERS, 'Content-Security-Policy': LIVE_CSP } : SECURITY_HEADERS;
+  // The hotel's console: open (this computer only, or tests), behind a password, or off (a public server
+  // without MERCHANT_PASSWORD). Sign-ins last until the server restarts.
+  const merchantPassword = typeof config.merchantPassword === 'string' ? config.merchantPassword : '';
+  const merchantAccess = config.merchantAccess || (merchantPassword ? 'password' : 'open');
+  const consoleTokens = new Map();
+  // Nana's turns today, server-wide (AI_TURNS_PER_DAY; 0 = no cap): one more brake on the AI bill.
+  const aiDay = { date: '', turns: 0 };
   const sessions = store.collection('sessions');
   const serveStatic = createStaticHandler({ root: config.publicDir || path.join(ROOT_DIR, 'public') });
   const nowMs = () => clock.now().getTime();
   const limiter = createRateLimiter({ max: limits.chatTurnsPerWindow, windowMs: limits.rateWindowMs, now: nowMs });
+  // Console password tries per client address.
+  const loginLimiter = createRateLimiter({ max: 10, windowMs: limits.rateWindowMs, now: nowMs });
   const ipLimiter = limits.writesPerIpPerWindow > 0
     ? createRateLimiter({ max: limits.writesPerIpPerWindow, windowMs: limits.rateWindowMs, now: nowMs })
     : null;
@@ -516,7 +547,7 @@ export function createApp(deps) {
   const llmReady = () => Boolean(llm && typeof llm.chat === 'function') && config.llm?.configured !== false;
   const nowIso = () => clock.now().toISOString();
   // Coverage is static; the prompt lists it so the model only suggests cities that have data.
-  const cities = typeof hotels?.listCities === 'function' ? hotels.listCities() : undefined;
+  const cities = !live && typeof hotels?.listCities === 'function' ? hotels.listCities() : undefined;
 
   /** The user's IANA time zone: a valid X-Time-Zone header, else the configured default (America/New_York). */
   function requestZone(req) {
@@ -589,7 +620,10 @@ export function createApp(deps) {
       switch (card?.type) {
         case 'booking_quote': {
           const q = card.quote?.id ? await bookings.getQuote(userId, card.quote.id) : null;
-          return q ? { ...card, quote: toPublicQuote(q) } : card;
+          if (!q) return card;
+          // A confirmed quote may still wait for payment (the live card form), or have timed out unpaid.
+          const order = q.orderId ? await bookings.getOrder(userId, q.orderId) : null;
+          return { ...card, quote: { ...toPublicQuote(q), ...(order ? { orderStatus: order.status } : {}) } };
         }
         case 'order': {
           const o = card.order?.id ? await bookings.getOrder(userId, card.order.id) : null;
@@ -704,7 +738,14 @@ export function createApp(deps) {
         now: clock.now(),
         timeZone,
         profile: profile ? publicProfile(profile) : null,
-        features: { webSearch: Boolean(webSearch?.enabled), demoHotels: true },
+        features: {
+          webSearch: Boolean(webSearch?.enabled),
+          demoHotels: !live,
+          liveHotels: live ? { sandbox: Boolean(live.sandbox) } : null,
+          stays: Boolean(stays),
+          places: Boolean(places),
+          rides: Boolean(rides),
+        },
         cities,
       });
       // Re-read: an order notice may have landed while the prompt was being built.
@@ -790,8 +831,15 @@ export function createApp(deps) {
     if (!quota.ok) {
       throw new HttpError(429, 'rate_limited', "That's a lot of messages in a short time; please take a break for a few minutes", { retryAfterSec: quota.retryAfterSec });
     }
+    const cap = limits.aiTurnsPerDay || 0;
+    if (cap > 0 && llmReady()) {
+      const today = new Date(nowMs()).toISOString().slice(0, 10);
+      if (aiDay.date !== today) Object.assign(aiDay, { date: today, turns: 0 });
+      if (aiDay.turns >= cap) throw new HttpError(429, 'daily_limit', "Nana has talked a lot today and is resting. Please come back tomorrow.");
+    }
     throttleWrites(req);
     limiter.take(userId);
+    if (cap > 0) aiDay.turns += 1;
     session ??= createSession(userId);
 
     const sse = createSseWriter(res);
@@ -880,8 +928,43 @@ export function createApp(deps) {
   }
 
   function requireMerchant() {
-    if (!merchant) throw new HttpError(404, 'not_found', 'No such API');
+    if (!merchant || merchantAccess === 'off') throw new HttpError(404, 'not_found', 'No such API');
     return merchant;
+  }
+
+  function cookieOf(req, name) {
+    for (const part of String(req.headers?.cookie || '').split(';')) {
+      const i = part.indexOf('=');
+      if (i > 0 && part.slice(0, i).trim() === name) return part.slice(i + 1).trim();
+    }
+    return '';
+  }
+
+  /** Same-length strings compared in constant time (no early exit on the first difference). */
+  function sameSecret(a, b) {
+    const x = String(a);
+    const y = String(b);
+    let diff = x.length ^ y.length;
+    for (let i = 0; i < Math.max(x.length, y.length); i++) diff |= (x.charCodeAt(i) || 0) ^ (y.charCodeAt(i) || 0);
+    return diff === 0;
+  }
+
+  function consoleSignedIn(req) {
+    if (merchantAccess !== 'password') return true;
+    const token = cookieOf(req, CONSOLE_COOKIE);
+    const t = token && consoleTokens.get(token);
+    if (!t) return false;
+    if (nowMs() > t) {
+      consoleTokens.delete(token);
+      return false;
+    }
+    return true;
+  }
+
+  /** The console's routes: 404 when off, 401 (sign in) when the password is set and missing. */
+  function guardConsole(req) {
+    requireMerchant();
+    if (!consoleSignedIn(req)) throw new HttpError(401, 'login_required', 'Sign in to the hotel console');
   }
 
   /** The hotel did something a NanaHotel guest should hear about (merchant.js event): a notice in that guest's chat. */
@@ -932,17 +1015,46 @@ export function createApp(deps) {
     ['POST', /^\/api\/merchant\/([^/]+)\/promotions\/([^/]+)$/, async ({ req, res, params: [hotelId, id] }) => {
       await merchantWrite(req, res, (m, body) => m.setPromotion(hotelId, id, body));
     }],
-  ].map(([method, re, fn]) => [method, re, fn, { auth: false }]);
+  ].map(([method, re, fn]) => [method, re, async (ctx) => {
+    guardConsole(ctx.req);
+    await fn(ctx);
+  }, { auth: false }]);
 
   const routes = [
     ...merchantRoutes,
+    ['POST', /^\/api\/merchant-login$/, async ({ req, res }) => {
+      const body = await readJsonBody(req, limits.maxBodyBytes);
+      requireMerchant();
+      throttleWrites(req);
+      if (merchantAccess === 'password') {
+        const quota = loginLimiter.take(clientAddress(req, config.trustProxy));
+        if (!quota.ok) throw new HttpError(429, 'rate_limited', 'Too many tries; wait a few minutes and try again', { retryAfterSec: quota.retryAfterSec });
+        if (typeof body.password !== 'string' || !merchantPassword || !sameSecret(body.password, merchantPassword)) {
+          throw new HttpError(401, 'wrong_password', "That password isn't right");
+        }
+        const token = `${newId('C')}${newId()}`;
+        if (consoleTokens.size > 500) consoleTokens.clear();
+        consoleTokens.set(token, nowMs() + CONSOLE_SESSION_MS);
+        res.setHeader('Set-Cookie', `${CONSOLE_COOKIE}=${token}; Path=/api/merchant; HttpOnly; SameSite=Strict; Max-Age=${CONSOLE_SESSION_MS / 1000}${req.headers['x-forwarded-proto'] === 'https' || req.socket?.encrypted ? '; Secure' : ''}`);
+      }
+      sendJson(res, 200, { ok: true });
+    }, { auth: false }],
     ['GET', /^\/api\/health$/, async (ctx) => sendJson(ctx.res, 200, {
       ok: true,
       appName,
       llm: { provider: config.llm?.provider || null, model: config.llm?.model || null, configured: llmReady() },
-      hotels: 'sim',
+      hotels: live ? 'liteapi' : 'sim',
       webSearch: Boolean(webSearch?.enabled),
       defaultTimeZone: defaultZone,
+      live: live ? {
+        hotels: 'liteapi',
+        sandbox: Boolean(live.sandbox),
+        payments: 'liteapi',
+        email: Boolean(live.email),
+        places: Boolean(live.places),
+        stays: Boolean(stays),
+      } : null,
+      console: merchant ? merchantAccess : 'off',
     }), { auth: false }],
 
     ['POST', /^\/api\/sessions$/, async ({ req, res, userId }) => {
@@ -991,6 +1103,13 @@ export function createApp(deps) {
         () => bookings.cancelOrder({ userId, orderId, reason }),
         async () => (await bookings.getOrder(userId, orderId))?.status ?? null);
       sendJson(res, 200, out);
+    }],
+
+    // LiteAPI's card form for one order (live hotels): its client secret goes to the order's owner only.
+    ['GET', /^\/api\/orders\/([^/]+)\/payment$/, async ({ res, userId, params }) => {
+      if (typeof bookings.paymentSession !== 'function') throw new HttpError(404, 'not_found', 'No such API');
+      const session = await bookings.paymentSession(userId, params[0]);
+      sendJson(res, 200, session);
     }],
 
     ['GET', /^\/api\/orders\/([^/]+)\/cancel-preview$/, async ({ res, userId, params }) => {
@@ -1088,7 +1207,7 @@ export function createApp(deps) {
 
   async function handler(req, res) {
     const started = process.hrtime.bigint();
-    for (const [k, v] of Object.entries(SECURITY_HEADERS)) res.setHeader(k, v);
+    for (const [k, v] of Object.entries(securityHeaders)) res.setHeader(k, v);
     const rawPath = String(req.url || '/').split('?')[0];
     res.once('close', () => {
       const ms = Number((process.hrtime.bigint() - started) / 1000000n);
@@ -1146,9 +1265,14 @@ export function createApp(deps) {
 }
 
 /**
- * Real dependencies: JSON store under DATA_DIR (`dataDir: null` = in memory), simulated hotels (priced with the
- * hotels' promotions), bookings, stays and the hotel's console, optional web search and the LLM client. Pass
- * `llm` / `webSearch` to use those instead of building them.
+ * Real dependencies: JSON store under DATA_DIR (`dataDir: null` = in memory), the LLM client, optional web search,
+ * and either
+ *   - the demo: simulated hotels (priced with the hotels' promotions), bookings, the stay and the hotel's console; or
+ *   - live hotels, when config.live has a LiteAPI key (src/live/, docs/LIVE.md): LiteAPI search, price lock, card
+ *     form, booking and cancellation, Google Places for "near …", Resend for confirmations and Uber/Lyft links. The
+ *     simulated stay (towels, room keys, the front desk) is off, because a real hotel never hears of it; the hotel
+ *     console stays a demo over the simulated hotels.
+ * Pass `llm` / `webSearch` to use those instead of building them.
  */
 export async function buildDeps(config, { fetch = globalThis.fetch, clock = systemClock, logger = console, llm, webSearch } = {}) {
   const store = createJsonStore({ dir: config.dataDir ?? null, onError: (err) => logger.error(`[store] ${err.message}`) });
@@ -1156,24 +1280,35 @@ export async function buildDeps(config, { fetch = globalThis.fetch, clock = syst
   const supplier = createSimSupplier();
   // The hotels' own promotions discount the nights they cover wherever a price comes from (merchant.js).
   const promotions = createPromotionBook({ store, clock });
-  const hotels = createHotelService({ supplier, clock, promotions });
-  const places = createPlacesService({ supplier, clock, pricing: withPromotions(promotions) });
-  const bookings = createBookingService({ store, hotels, clock });
-  const stays = createStayService({ store, bookings, hotels, clock });
-  const merchant = createMerchantService({ store, bookings, stays, hotels, clock, promotions });
-  return {
+  const simHotels = createHotelService({ supplier, clock, promotions });
+  const simBookings = createBookingService({ store, hotels: simHotels, clock });
+  const simStays = createStayService({ store, bookings: simBookings, hotels: simHotels, clock });
+  const merchant = createMerchantService({ store, bookings: simBookings, stays: simStays, hotels: simHotels, clock, promotions });
+  const common = {
     config,
     store,
-    hotels,
-    places,
-    bookings,
-    stays,
     merchant,
     webSearch: webSearch ?? createWebSearch({ provider: config.webSearch?.provider || 'bocha', apiKey: config.webSearch?.apiKey, fetch }),
     llm: llm !== undefined ? llm : config.llm?.configured ? createLlmClient({ ...config.llm, fetch }) : null,
     clock,
     logger,
   };
+  if (config.live?.hotels?.enabled) {
+    const services = createLiveServices(config.live, { fetch, clock, logger, simSupplier: supplier, appName: config.appName });
+    const hotels = createLiveHotelService({ supplier: services.hotels, clock, logger });
+    const bookings = createLiveBookingService({ store, hotels, supplier: services.hotels, mailer: services.email, clock, logger });
+    return {
+      ...common,
+      hotels,
+      places: null,
+      bookings,
+      stays: null,
+      rides: { links: services.rides.links, geocoder: services.places },
+      live: { sandbox: Boolean(services.hotels.sandbox), email: Boolean(services.email.enabled), places: Boolean(config.live.places?.enabled) },
+    };
+  }
+  const places = createPlacesService({ supplier, clock, pricing: withPromotions(promotions) });
+  return { ...common, hotels: simHotels, places, bookings: simBookings, stays: simStays };
 }
 
 function displayUrl(host, port) {
@@ -1223,6 +1358,10 @@ async function main() {
   console.info(`[server] LLM: ${llm.label || llm.provider} / ${llm.model}${llm.configured ? '' : ' (no API key: the chat explains how to add one)'}`);
   for (const w of llm.warnings || []) console.warn(`[config] ${w}`);
   console.info(`[server] Web search: ${config.webSearch.enabled ? 'on (Bocha)' : 'off'} · default time zone: ${config.timeZone || DEFAULT_TIME_ZONE} · data: ${config.dataDir}`);
+  for (const line of describeLiveConfig(config.live)) console.info(`[live] ${line}`);
+  for (const w of config.live?.warnings || []) console.warn(`[live] ${w}`);
+  console.info(`[server] Hotel console: ${config.merchantAccess === 'password' ? 'at /merchant, behind MERCHANT_PASSWORD' : config.merchantAccess === 'open' ? 'at /merchant (this computer only)' : 'off (set MERCHANT_PASSWORD to use it on a public address)'}`);
+  if (config.limits?.aiTurnsPerDay) console.info(`[server] AI turns per day: at most ${config.limits.aiTurnsPerDay}`);
 
   let exiting = false;
   const shutdown = (signal) => {

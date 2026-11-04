@@ -1268,6 +1268,36 @@ a { color: var(--accent-ink); }
 .pay-option input { width: 20px; height: 20px; margin: 0; accent-color: var(--accent); }
 .pay-note { margin: 14px 0; text-align: center; font-size: 12.5px; color: var(--text-3); }
 
+/* Live hotels: LiteAPI's card form (Stripe fields in their own frames) inside the checkout sheet. */
+.pay-status { display: flex; align-items: center; justify-content: center; gap: 8px; margin: 0 0 12px; font-size: 14px; color: var(--text-2); }
+.pay-status[hidden] { display: none; }
+.live-pay { min-height: 0; padding: 12px; border-radius: 18px; background: #fff; color: #1a1a1a; }
+.live-pay:empty { display: none; }
+.live-pay form { display: grid; gap: 12px; margin: 0; }
+.live-pay .lp-submit-button-wrapper { margin-top: 4px; }
+.live-pay .lp-submit-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 48px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 999px;
+  background: linear-gradient(180deg, var(--bubble-out-top), var(--accent));
+  color: var(--on-accent);
+  font: inherit;
+  font-size: 16px;
+  font-weight: 750;
+  box-shadow: 0 8px 18px rgba(245, 162, 23, 0.25);
+  cursor: pointer;
+}
+.live-pay .lp-submit-button:disabled { opacity: 0.6; cursor: default; }
+.live-pay #st-error-message:not(:empty) { margin-top: 4px; font-size: 13.5px; color: #b3261e; }
+
+/* Live rides: open Uber or Lyft with the trip filled in. */
+.ride-links .btn { text-decoration: none; }
+
 /* The digital key (simulated): hold the phone to the lock. */
 .keycard {
   display: grid;

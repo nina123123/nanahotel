@@ -915,6 +915,10 @@ async function boot() {
       raf = requestAnimationFrame(() => { for (const redraw of charts) redraw(); });
     }).observe(els.main);
   }
+  await openConsole();
+}
+
+async function openConsole() {
   try {
     const data = await api('GET', '/api/merchant/hotels');
     state.hotels = Array.isArray(data.hotels) ? data.hotels : [];
@@ -922,8 +926,37 @@ async function boot() {
     selectHotel(state.hotels.some((x) => x.id === saved) ? saved : data.current || state.hotels[0]?.id);
   } catch (err) {
     els.hotelName.textContent = CONSOLE_NAME;
-    els.main.replaceChildren(h('div', { class: 'error-panel', role: 'alert', text: err.message }));
+    if (err.code === 'login_required') renderSignIn();
+    else els.main.replaceChildren(h('div', { class: 'error-panel', role: 'alert', text: err.message }));
   }
+}
+
+/** On a public server the console is behind MERCHANT_PASSWORD: one password field, then the console. */
+function renderSignIn() {
+  const input = h('input', { type: 'password', class: 'm-input', name: 'password', autocomplete: 'current-password', required: true, 'aria-label': 'Console password', placeholder: 'Password' });
+  const error = h('p', { class: 'm-signin-error', role: 'alert', hidden: true });
+  const submit = h('button', { type: 'submit', class: 'm-btn m-btn-gold m-btn-block' }, 'Sign in');
+  const form = h('form', { class: 'm-signin', 'data-view': 'signin' },
+    h('h2', { class: 'm-signin-title', text: `Sign in to ${CONSOLE_NAME}` }),
+    h('p', { class: 'm-signin-note', text: 'Ask whoever runs this NanaHotel server for the console password (MERCHANT_PASSWORD).' }),
+    input, error, submit);
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    submit.disabled = true;
+    submit.replaceChildren(spinner(), 'Sign in');
+    try {
+      await api('POST', '/api/merchant-login', { password: input.value });
+      await openConsole();
+    } catch (err) {
+      error.textContent = err.message || "Couldn't sign in. Try again soon.";
+      error.hidden = false;
+      submit.disabled = false;
+      submit.replaceChildren('Sign in');
+      input.select();
+    }
+  });
+  els.main.replaceChildren(form);
+  input.focus();
 }
 
 if (typeof document !== 'undefined' && document.getElementById('m-app')) boot();

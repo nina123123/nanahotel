@@ -21,10 +21,10 @@ export class HotelError extends Error {
 
 const SORTS = new Set(['recommended', 'price_asc', 'price_desc', 'rating', 'distance']);
 const SORT_LABELS = { recommended: 'our picks', price_asc: 'price, low to high', price_desc: 'price, high to low', rating: 'rating', distance: 'distance' };
-const M_PER_MILE = 1609.344;
+export const M_PER_MILE = 1609.344;
 const DEFAULT_RADIUS_MILES = 2;
 const MAX_RADIUS_MILES = 12;
-const MAX_RADIUS_M = Math.round(MAX_RADIUS_MILES * M_PER_MILE);
+export const MAX_RADIUS_M = Math.round(MAX_RADIUS_MILES * M_PER_MILE);
 const MAX_CHILDREN = 6;
 
 function present(v) {
@@ -48,7 +48,7 @@ function text(v, max = 60) {
 }
 
 /** 3219 m → '2 miles', 800 m → '0.5 miles'. */
-function miles(m) {
+export function miles(m) {
   const mi = Math.round((m / M_PER_MILE) * 10) / 10;
   return `${Number.isInteger(mi) ? mi : mi.toFixed(1)} mile${mi === 1 ? '' : 's'}`;
 }
@@ -153,6 +153,98 @@ export function withPromotions(promotions, pricing = simPricing) {
  *   night everywhere a price comes from here: search results' lowest price (+ `promo` on the hotel), room rates
  *   (+ `promo` on each discounted rate) and priceCheck, so quotes, orders and extensions charge what the cards showed.
  */
+// ---- Search helpers (pure; shared with the live hotel service, live-service.js) ----
+
+/** Children count as occupants (beds) but do not change the price. */
+export function partyOf(adults, rooms, children) {
+  const r = Math.round(clamp(rooms, 1, 5, 1));
+  const a = Math.round(clamp(adults, 1, 20, 2));
+  const c = Math.round(clamp(children, 0, MAX_CHILDREN, 0));
+  return { rooms: r, adults: a, children: c };
+}
+
+/** Breakfast is a rate property: a hotel matches when it has a bookable breakfast rate for this stay. */
+export function sellsBreakfast(offer) {
+  return offer.roomTypes.some((rt) => rt.rates.some((r) => r.available && r.breakfast > 0));
+}
+
+/** Says which preference words nothing matched, so the model does not present them as satisfied. */
+export function keywordNotes(tokens, pool, sort) {
+  if (!tokens.length || !pool.length) return [];
+  const hit = new Set(pool.flatMap((h) => h.matchedKeywords));
+  const matched = tokens.filter((t) => hit.has(t));
+  const missing = tokens.filter((t) => !hit.has(t));
+  if (!matched.length) return [`Nothing matches "${tokens.join(' ')}", so these are sorted by ${SORT_LABELS[sort] || SORT_LABELS.recommended}`];
+  if (missing.length) return [`Nothing matches "${missing.join(' ')}"; hotels with "${matched.join(' ')}" come first`];
+  if (tokens.length > 1 && !pool.some((h) => h.matchedKeywords.length === tokens.length)) {
+    return [`No hotel has all of "${tokens.join(' ')}"; the ones with the most come first`];
+  }
+  return [];
+}
+
+export function applyBudget(priced, priceMin, priceMax, notes) {
+  if (priceMin === null && priceMax === null) return { pool: priced, forceSort: null };
+  const avail = priced.filter((h) => h.lowestPrice !== null);
+  if (!avail.length) return { pool: priced, forceSort: null };
+  const within = (h, lo, hi) => (lo === null || h.lowestPrice >= lo) && (hi === null || h.lowestPrice <= hi);
+  let fit = avail.filter((h) => within(h, priceMin, priceMax));
+  if (fit.length) return { pool: fit, forceSort: null };
+  if (priceMax !== null) {
+    for (const f of [1.1, 1.2, 1.3]) {
+      const hi = Math.ceil((priceMax * f) / 10) * 10;
+      fit = avail.filter((h) => within(h, priceMin, hi));
+      if (fit.length) {
+        notes.push(`Nothing under ${money(priceMax)} a night, so I went up to ${money(hi)}`);
+        return { pool: fit, forceSort: null };
+      }
+    }
+  }
+  if (priceMin !== null) {
+    fit = avail.filter((h) => within(h, null, priceMax));
+    if (fit.length) {
+      notes.push(`Nothing from ${money(priceMin)} up, so here are other price points`);
+      return { pool: fit, forceSort: null };
+    }
+  }
+  const cheapest = Math.min(...avail.map((h) => h.lowestPrice));
+  notes.push(`Nothing close to ${money(priceMax)} a night: the cheapest is ${money(cheapest)}, so these are sorted from low to high`);
+  return { pool: avail, forceSort: 'price_asc' };
+}
+
+export function rankHotels(list, sort, landmark, radiusM) {
+  const soldOutLast = (a, b) => (a.lowestPrice === null) - (b.lowestPrice === null);
+  // Hotels matching more of the user's preference words come first, whatever the sort.
+  const moreMatches = (a, b) => (b.matchedKeywords?.length || 0) - (a.matchedKeywords?.length || 0);
+  const byId = (a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  const cmp = {
+    price_asc: (a, b) => soldOutLast(a, b) || moreMatches(a, b) || a.lowestPrice - b.lowestPrice || byId(a, b),
+    price_desc: (a, b) => soldOutLast(a, b) || moreMatches(a, b) || b.lowestPrice - a.lowestPrice || byId(a, b),
+    rating: (a, b) => soldOutLast(a, b) || moreMatches(a, b) || (b.rating ?? 0) - (a.rating ?? 0) || b.reviewCount - a.reviewCount || byId(a, b),
+    distance: (a, b) => soldOutLast(a, b) || moreMatches(a, b) || (a.distanceM ?? Infinity) - (b.distanceM ?? Infinity) || byId(a, b),
+  };
+  if (cmp[sort]) return [...list].sort(cmp[sort]);
+  // recommended: rating quality + closeness + value for money (+ a little popularity).
+  const med = median(list.filter((h) => h.lowestPrice !== null).map((h) => h.lowestPrice));
+  const score = (h) => {
+    if (h.lowestPrice === null) return -1;
+    const rating = Math.min(1, Math.max(0, ((h.rating ?? 4.2) - 3.6) / 1.3));
+    const value = Math.min(1, Math.max(0, 0.5 + 0.5 * Math.log2(med / h.lowestPrice)));
+    const pop = Math.min(1, Math.log10((h.reviewCount || 0) + 1) / 4);
+    if (!landmark) return 0.5 * rating + 0.38 * value + 0.12 * pop;
+    const dist = Math.min(1, Math.max(0, 1 - (h.distanceM ?? radiusM) / Math.max(radiusM, 1000)));
+    return 0.38 * rating + 0.32 * dist + 0.22 * value + 0.08 * pop;
+  };
+  const scored = list.map((h) => ({ h, s: score(h) }));
+  scored.sort((a, b) => soldOutLast(a.h, b.h) || moreMatches(a.h, b.h) || b.s - a.s || byId(a.h, b.h));
+  return scored.map((x) => x.h);
+}
+
+export function radiusMilesOf(params) {
+  if (present(params.radiusMiles)) return Math.round(clamp(params.radiusMiles, 0.3, MAX_RADIUS_MILES, DEFAULT_RADIUS_MILES) * 10) / 10;
+  if (present(params.radiusKm)) return Math.round((clamp(params.radiusKm, 0.5, 20, 3.2) / 1.609344) * 10) / 10;
+  return DEFAULT_RADIUS_MILES;
+}
+
 export function createHotelService({ supplier, clock = { now: () => new Date() }, pricing = simPricing, promotions = null } = {}) {
   if (!supplier) throw new Error('createHotelService: supplier is required');
   const offerFor = (hotel, opts) => applyPromotions(pricing.buildRoomOffer(hotel, opts), promosOf(promotions, hotel.id));
@@ -189,13 +281,6 @@ export function createHotelService({ supplier, clock = { now: () => new Date() }
     return { ...stay, today: todayIn(hotelZone, now), earliest: earliestCheckIn(now, hotelZone) };
   }
 
-  /** Children count as occupants (beds) but do not change the price. */
-  function party(adults, rooms, children) {
-    const r = Math.round(clamp(rooms, 1, 5, 1));
-    const a = Math.round(clamp(adults, 1, 20, 2));
-    const c = Math.round(clamp(children, 0, MAX_CHILDREN, 0));
-    return { rooms: r, adults: a, children: c };
-  }
 
   function resolveNear(city, near, tokens, notes) {
     if (near) {
@@ -267,87 +352,10 @@ export function createHotelService({ supplier, clock = { now: () => new Date() }
     return { found: [], notes: ['No hotels found nearby'], radiusM };
   }
 
-  /** Breakfast is a rate property: a hotel matches when it has a bookable breakfast rate for this stay. */
-  function sellsBreakfast(offer) {
-    return offer.roomTypes.some((rt) => rt.rates.some((r) => r.available && r.breakfast > 0));
-  }
 
-  /** Says which preference words nothing matched, so the model does not present them as satisfied. */
-  function keywordNotes(tokens, pool, sort) {
-    if (!tokens.length || !pool.length) return [];
-    const hit = new Set(pool.flatMap((h) => h.matchedKeywords));
-    const matched = tokens.filter((t) => hit.has(t));
-    const missing = tokens.filter((t) => !hit.has(t));
-    if (!matched.length) return [`Nothing matches "${tokens.join(' ')}", so these are sorted by ${SORT_LABELS[sort] || SORT_LABELS.recommended}`];
-    if (missing.length) return [`Nothing matches "${missing.join(' ')}"; hotels with "${matched.join(' ')}" come first`];
-    if (tokens.length > 1 && !pool.some((h) => h.matchedKeywords.length === tokens.length)) {
-      return [`No hotel has all of "${tokens.join(' ')}"; the ones with the most come first`];
-    }
-    return [];
-  }
 
-  function applyBudget(priced, priceMin, priceMax, notes) {
-    if (priceMin === null && priceMax === null) return { pool: priced, forceSort: null };
-    const avail = priced.filter((h) => h.lowestPrice !== null);
-    if (!avail.length) return { pool: priced, forceSort: null };
-    const within = (h, lo, hi) => (lo === null || h.lowestPrice >= lo) && (hi === null || h.lowestPrice <= hi);
-    let fit = avail.filter((h) => within(h, priceMin, priceMax));
-    if (fit.length) return { pool: fit, forceSort: null };
-    if (priceMax !== null) {
-      for (const f of [1.1, 1.2, 1.3]) {
-        const hi = Math.ceil((priceMax * f) / 10) * 10;
-        fit = avail.filter((h) => within(h, priceMin, hi));
-        if (fit.length) {
-          notes.push(`Nothing under ${money(priceMax)} a night, so I went up to ${money(hi)}`);
-          return { pool: fit, forceSort: null };
-        }
-      }
-    }
-    if (priceMin !== null) {
-      fit = avail.filter((h) => within(h, null, priceMax));
-      if (fit.length) {
-        notes.push(`Nothing from ${money(priceMin)} up, so here are other price points`);
-        return { pool: fit, forceSort: null };
-      }
-    }
-    const cheapest = Math.min(...avail.map((h) => h.lowestPrice));
-    notes.push(`Nothing close to ${money(priceMax)} a night: the cheapest is ${money(cheapest)}, so these are sorted from low to high`);
-    return { pool: avail, forceSort: 'price_asc' };
-  }
 
-  function rank(list, sort, landmark, radiusM) {
-    const soldOutLast = (a, b) => (a.lowestPrice === null) - (b.lowestPrice === null);
-    // Hotels matching more of the user's preference words come first, whatever the sort.
-    const moreMatches = (a, b) => (b.matchedKeywords?.length || 0) - (a.matchedKeywords?.length || 0);
-    const byId = (a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
-    const cmp = {
-      price_asc: (a, b) => soldOutLast(a, b) || moreMatches(a, b) || a.lowestPrice - b.lowestPrice || byId(a, b),
-      price_desc: (a, b) => soldOutLast(a, b) || moreMatches(a, b) || b.lowestPrice - a.lowestPrice || byId(a, b),
-      rating: (a, b) => soldOutLast(a, b) || moreMatches(a, b) || (b.rating ?? 0) - (a.rating ?? 0) || b.reviewCount - a.reviewCount || byId(a, b),
-      distance: (a, b) => soldOutLast(a, b) || moreMatches(a, b) || (a.distanceM ?? Infinity) - (b.distanceM ?? Infinity) || byId(a, b),
-    };
-    if (cmp[sort]) return [...list].sort(cmp[sort]);
-    // recommended: rating quality + closeness + value for money (+ a little popularity).
-    const med = median(list.filter((h) => h.lowestPrice !== null).map((h) => h.lowestPrice));
-    const score = (h) => {
-      if (h.lowestPrice === null) return -1;
-      const rating = Math.min(1, Math.max(0, ((h.rating ?? 4.2) - 3.6) / 1.3));
-      const value = Math.min(1, Math.max(0, 0.5 + 0.5 * Math.log2(med / h.lowestPrice)));
-      const pop = Math.min(1, Math.log10((h.reviewCount || 0) + 1) / 4);
-      if (!landmark) return 0.5 * rating + 0.38 * value + 0.12 * pop;
-      const dist = Math.min(1, Math.max(0, 1 - (h.distanceM ?? radiusM) / Math.max(radiusM, 1000)));
-      return 0.38 * rating + 0.32 * dist + 0.22 * value + 0.08 * pop;
-    };
-    const scored = list.map((h) => ({ h, s: score(h) }));
-    scored.sort((a, b) => soldOutLast(a.h, b.h) || moreMatches(a.h, b.h) || b.s - a.s || byId(a.h, b.h));
-    return scored.map((x) => x.h);
-  }
 
-  function radiusMilesOf(params) {
-    if (present(params.radiusMiles)) return Math.round(clamp(params.radiusMiles, 0.3, MAX_RADIUS_MILES, DEFAULT_RADIUS_MILES) * 10) / 10;
-    if (present(params.radiusKm)) return Math.round((clamp(params.radiusKm, 0.5, 20, 3.2) / 1.609344) * 10) / 10;
-    return DEFAULT_RADIUS_MILES;
-  }
 
   /**
    * @param {object} params  HotelSearch (see docs/SPEC.md); `timeZone` is the user's zone (for "tonight")
@@ -358,7 +366,7 @@ export function createHotelService({ supplier, clock = { now: () => new Date() }
     const city = requireCity(params.city);
     const zone = resolveTimeZone(city.zone);
     const stay = stayOrThrow(params.checkIn, params.checkOut, HotelError, { zone, userZone: params.timeZone });
-    const { adults, rooms, children } = party(params.adults, params.rooms, params.children);
+    const { adults, rooms, children } = partyOf(params.adults, params.rooms, params.children);
     const occupants = adults + children;
     const radiusMiles = radiusMilesOf(params);
     const limit = Math.round(clamp(params.limit, 1, 10, 6));
@@ -415,7 +423,7 @@ export function createHotelService({ supplier, clock = { now: () => new Date() }
     const budget = applyBudget(priced, priceMin, priceMax, notes);
     if (budget.forceSort) sort = budget.forceSort;
     notes.push(...keywordNotes(tokens, budget.pool, sort));
-    const hotels = rank(budget.pool, sort, landmark, relaxed.radiusM).slice(0, limit);
+    const hotels = rankHotels(budget.pool, sort, landmark, relaxed.radiusM).slice(0, limit);
 
     return {
       query: {
@@ -457,7 +465,7 @@ export function createHotelService({ supplier, clock = { now: () => new Date() }
     const hotel = getHotel(hotelId);
     if (!hotel) throw new HotelError('hotel_not_found', "Couldn't find that hotel; the id may be wrong. Please search again");
     const stay = stayOrThrow(checkIn, checkOut, HotelError, { zone: zoneOfHotel(hotel), userZone: timeZone });
-    const p = party(adults, rooms, children);
+    const p = partyOf(adults, rooms, children);
     const offer = offerFor(hotel, { checkIn: stay.checkIn, checkOut: stay.checkOut, ...p, city: cityOfHotel(hotel), now: clock.now() });
     return { hotel, offer, datesAssumed: stay.datesAssumed };
   }

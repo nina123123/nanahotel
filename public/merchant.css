@@ -501,3 +501,9 @@ a { color: var(--gold-ink); }
   .skeleton, .modal[open] .sheet, .toast, .m-btn .spinner { animation: none; }
   .m-btn, .switch, .switch::after { transition: none; }
 }
+
+/* Sign-in (a public server with MERCHANT_PASSWORD). */
+.m-signin { display: grid; gap: 12px; max-width: 360px; margin: 48px auto; padding: 24px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--surface); }
+.m-signin-title { margin: 0; font-size: 20px; }
+.m-signin-note { margin: 0; font-size: 14px; color: var(--text-2, var(--text)); }
+.m-signin-error { margin: 0; font-size: 14px; color: var(--danger); }

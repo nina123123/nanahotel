@@ -225,6 +225,7 @@ test('health needs no identity and reports the LLM / hotel / web search / time z
   assert.equal(res.status, 200);
   assert.deepEqual(res.json, {
     ok: true, appName: 'NanaHotel', llm: { provider: 'anthropic', model: 'fake-model', configured: true }, hotels: 'sim', webSearch: false, defaultTimeZone: 'America/New_York',
+    live: null, console: 'open',
   });
   assert.ok(!res.text.includes('apiKey'));
 });
