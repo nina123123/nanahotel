@@ -17,6 +17,7 @@ import { createBookingService, BookingError } from './bookings.js';
 import { penaltyAt } from '../live/liteapi.js';
 import { formatUsd } from '../util/money.js';
 import { cleanName } from '../util/names.js';
+import { formatDateTime, resolveTimeZone } from '../util/dates.js';
 
 // LiteAPI's price lock lasts longer than this; the guest gets 30 minutes to pay in the card form.
 const LIVE_PAY_TTL_MS = 30 * 60 * 1000;
@@ -48,6 +49,19 @@ function intOrNull(v) {
 function parseGuests(guests) {
   const list = Array.isArray(guests) ? guests : typeof guests === 'string' ? guests.split(/[,;\n]+|\s+and\s+|\s*&\s*/) : [];
   return list.map((g) => cleanName(g)).filter(Boolean);
+}
+
+/**
+ * LiteAPI's cancellation wording, with its deadline in the hotel's own time zone ("Sun, Nov 29, 3:00 PM EST")
+ * instead of the zone LiteAPI reports it in.
+ */
+function policyInZone(policy, zone, total) {
+  if (!policy || typeof policy !== 'object') return policy;
+  if (policy.type === 'none') return { ...policy, text: "Non-refundable: there's no refund if you cancel." };
+  if (!policy.freeUntil) return policy;
+  const firstFee = (policy.penalties || []).find((p) => p.amount > 0)?.amount;
+  const fee = Number.isFinite(firstFee) ? (Number.isFinite(total) && firstFee >= total - 0.009 ? 'the full price' : formatUsd(firstFee)) : 'a fee';
+  return { ...policy, text: `Free cancellation until ${formatDateTime(policy.freeUntil, resolveTimeZone(zone), { abbr: true })}. After that, cancelling costs ${fee}.` };
 }
 
 /** A LiveServiceError from the supplier as a BookingError the page and the model understand. */
@@ -131,6 +145,7 @@ export function createLiveBookingService({ store, hotels, supplier, mailer = nul
       hotel: { ...quote.hotel, ...(photo ? { photos: [photo] } : {}), ...(value?.hotel?.checkInTime ? { checkInTime: value.hotel.checkInTime, checkOutTime: value.hotel.checkOutTime } : {}) },
       rate: {
         ...quote.rate,
+        cancelPolicy: policyInZone(quote.rate.cancelPolicy, quote.hotel.timeZone, quote.totalPrice),
         ...(rate?.boardType ? { boardType: rate.boardType } : {}),
         refundable: rate ? rate.refundable !== false : quote.rate.cancelPolicy?.type !== 'none',
         ...(rate?.payAtProperty ? { payAtProperty: { ...rate.payAtProperty } } : {}),
@@ -189,7 +204,7 @@ export function createLiveBookingService({ store, hotels, supplier, mailer = nul
       ...order,
       totalPrice: locked,
       ...(locked < quote.totalPrice - 0.009 ? { priceDropped: { from: quote.totalPrice } } : {}),
-      rate: { ...order.rate, ...(pb.cancelPolicy ? { cancelPolicy: { ...pb.cancelPolicy } } : {}) },
+      rate: { ...order.rate, ...(pb.cancelPolicy ? { cancelPolicy: policyInZone(pb.cancelPolicy, order.hotel?.timeZone, locked) } : {}) },
       payBy: iso(Math.max(Date.parse(order.payBy), t + LIVE_PAY_TTL_MS)),
       live: { provider: supplier.source || 'liteapi', sandbox: Boolean(pb.sandbox ?? supplier.sandbox), environment: pb.payment.environment, bookingId: null },
     };

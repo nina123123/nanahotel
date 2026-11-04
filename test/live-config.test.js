@@ -65,8 +65,9 @@ describe('readLiveConfig', () => {
   test('the card form key (LITEAPI_PAYMENT_KEY): publishable keys only, matching the LiteAPI environment', () => {
     const missing = readLiveConfig({ LITEAPI_API_KEY: 'sand_abc_123' });
     assert.equal(missing.payments.publishableKey, null);
-    assert.match(missing.warnings.join('\n'), /LITEAPI_PAYMENT_KEY is not set: the card form cannot load/);
-    assert.match(describeLiveConfig(missing).join('\n'), /card form off until LITEAPI_PAYMENT_KEY is set/);
+    // The card form works without it (LiteAPI's script takes the environment name), so no warning.
+    assert.doesNotMatch(missing.warnings.join('\n'), /LITEAPI_PAYMENT_KEY/);
+    assert.doesNotMatch(describeLiveConfig(missing).join('\n'), /card form off/);
     // A secret pasted by mistake must never reach a browser.
     for (const secret of ['sk_live_51Secret', 'rk_test_51Restricted', 'sand_abc_123', 'prod_xyz_789']) {
       const c = readLiveConfig({ LITEAPI_API_KEY: 'sand_abc_123', LITEAPI_PAYMENT_KEY: secret });

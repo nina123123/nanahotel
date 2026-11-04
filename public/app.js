@@ -40,6 +40,9 @@ const TRIP_SUGGESTIONS = {
   staying: [{ emoji: '🧺', text: 'Two more towels please' }, { emoji: '⏰', text: 'Wake me up at 7am' }, { emoji: '🍳', text: 'Book breakfast for tomorrow' }],
   left: [{ emoji: '🧾', text: 'Email me a receipt' }, { emoji: '⭐', text: 'Write a review' }, { emoji: '👑', text: 'My points' }],
 };
+// With live hotels Nana can't reach the hotel itself (no towels or room keys): what it can still do.
+const LIVE_TRIP_SUGGESTIONS = [{ emoji: '🚕', text: 'Get me a ride to the hotel' }, { emoji: '🗽', text: 'What should I see near the hotel?' }, { emoji: '🧳', text: 'What time is check-in?' }];
+const LIVE_VOICE_SAYS = ['Get me a ride to the hotel', 'What time is check-in?', 'What should I see near the hotel?', 'Cancel that booking'];
 // What you could "say" (speech recognition is simulated), by where the trip is.
 const VOICE_SAYS = {
   start: SUGGESTIONS.map((s) => s.text),
@@ -2023,7 +2026,8 @@ function tripPhase() {
 /** What you could say now: the answers the last reply offered, then what fits where the trip is. */
 function voiceSays() {
   const says = [...els.messages.querySelectorAll('.quick [data-action="quick-reply"]')].map((b) => b.textContent);
-  says.push(...VOICE_SAYS[tripPhase()]);
+  const phase = tripPhase();
+  says.push(...(state.live && phase !== 'start' ? LIVE_VOICE_SAYS : VOICE_SAYS[phase]));
   return [...new Set(says)].slice(0, 5);
 }
 
@@ -2384,7 +2388,7 @@ function renderWelcome() {
       big, h('span', { class: 'pet-pop', 'aria-hidden': 'true', hidden: true })),
     h('div', { class: 'welcome-say' }, title.el, sub.el),
     h('button', { type: 'button', class: 'hero-call', 'data-action': 'start-call', onclick: startCall }, icon('phone'), `Call ${PET_NAME}`),
-    h('div', { class: 'chips' }, (TRIP_SUGGESTIONS[phase] || SUGGESTIONS).map((s) => chatButton(
+    h('div', { class: 'chips' }, ((state.live && TRIP_SUGGESTIONS[phase] ? LIVE_TRIP_SUGGESTIONS : TRIP_SUGGESTIONS[phase]) || SUGGESTIONS).map((s) => chatButton(
       [h('span', { class: 'chip-emoji', 'aria-hidden': 'true', text: s.emoji }), h('span', { text: s.text })],
       s.text, { action: 'suggestion' }))));
   els.messages.prepend(el);

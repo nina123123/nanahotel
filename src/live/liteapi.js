@@ -70,7 +70,9 @@ export const LITEAPI = Object.freeze({
   sandboxKeyPrefixes: Object.freeze(['sand_', 'sandbox_']),
   sandboxTestCard: '4242 4242 4242 4242',
   paymentSdk: Object.freeze({
-    // VERIFY: the payment SDK script the front end loads (see docs/LIVE.md, "The payment form").
+    // Confirmed live in the sandbox (Nov 2026): the page loads this script and mounts
+    // new LiteAPIPayment({ publicKey: 'sandbox' | 'live', secretKey, targetElement, returnUrl, submitButton }); paying
+    // sends the browser to returnUrl with payment_intent, payment_intent_client_secret and redirect_status=succeeded.
     scriptUrl: 'https://payment-wrapper.liteapi.travel/dist/liteAPIPayment.js?v=a1',
     // Confirmed (owner's dashboard, "Payment SDK keys"): the form also needs a Stripe *publishable* key, one for
     // sandbox and one for production, read from LITEAPI_PAYMENT_KEY; it is safe to send to the browser.

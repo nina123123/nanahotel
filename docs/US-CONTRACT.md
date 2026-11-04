@@ -75,8 +75,14 @@ The model-facing copy starts with `[System notice — not from the user]`.
 ## 8. Payments in demo mode
 
 The simulated checkout offers `card` ("Credit or debit card") and `apple_pay` ("Apple Pay"):
-`POST /api/orders/:id/pay { method: 'card' | 'apple_pay' }`. It says "Test mode — you won't be charged". (Live mode uses
-the hotel supplier's payment form; that is wired up after the three streams land.)
+`POST /api/orders/:id/pay { method: 'card' | 'apple_pay' }`. It says "Test mode — you won't be charged".
+
+With live hotels (LiteAPI), Confirm booking locks the price (`POST /api/quotes/:id/confirm` → an order
+`pending_payment` with `live: { provider, sandbox, environment, bookingId }`), the sheet gets the card form's session
+from `GET /api/orders/:id/payment` (owner only: `{ environment, secretKey, scriptUrl, amount, currency, payBy,
+sandbox, testCard }`), LiteAPI's form returns to `/?paid=<order>`, and `POST /api/orders/:id/pay { method: 'liteapi' }`
+books. A quote card whose order still waits for payment carries `orderStatus: 'pending_payment'` and offers
+"Finish payment". docs/LIVE.md has the details.
 
 ## 9. The stay in the US
 

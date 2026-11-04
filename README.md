@@ -1,4 +1,4 @@
-# NanaHotel: an AI hotel concierge (demo)
+# NanaHotel: an AI hotel concierge
 
 NanaHotel is a chat assistant that gets a hotel stay done the way a phone call to a good concierge would: find a
 hotel, book it, and then handle everything before arrival, during the stay and after check-out, all in one
@@ -220,7 +220,12 @@ npm test                                                         # all unit and 
 npm run test:app                                                 # the phone app build: demo flow, local storage
 npm run demo & BASE_URL=http://localhost:8787 npm run test:e2e   # browser end-to-end: call, cards, booking, the stay
 BASE_URL=http://localhost:8787 npm run test:merchant             # traveler and console together: desk check-in, requests, replies, deals
+LITEAPI_API_KEY=sand_… node test/e2e/live-e2e.mjs                 # the real LiteAPI sandbox in a browser: card form, booking, cancel
 ```
+
+`test/live-flow.test.js` runs the live path (search, price lock, card form session, booking, cancellation, the
+console sign-in) against a fake LiteAPI, offline. GitHub Actions runs the unit tests and the three browser
+walk-throughs on every push (`.github/workflows/ci.yml`).
 
 The unit tests run on a fixed clock (Wed, Nov 4, 2026) against the simulated supplier, so they are deterministic.
 They cover the time-zone rules (a traveler in Los Angeles at 11 PM asking for "tonight"; `X-Time-Zone` checks),
@@ -228,14 +233,35 @@ US phone, email and name validation, all-in pricing, the booking and stay journe
 
 ## Going live
 
-The demo turns into a real service one connector at a time, each switched on by its key: the AI model, real US
-hotels with live prices and payment (LiteAPI), places (Google Places) and email (Resend) for confirmations and
-receipts. Every connector starts in test mode. **See [`docs/LIVE.md`](docs/LIVE.md)** for the keys, where to put
-them (never in the code or a chat) and how to check each one.
+Every real service switches on by its key, and everything starts in test mode. Full steps:
+**[`docs/LIVE.md`](docs/LIVE.md)**.
 
-Before real travelers use it you will also want a privacy policy and consent for guest names, emails, phone numbers
-and trip details; a real sign-in (the demo tells users apart by a random id the browser makes); and a database
-instead of the JSON files in `data/`.
+| Key | What it switches on |
+| --- | --- |
+| `ANTHROPIC_API_KEY` (or `OPENAI_API_KEY`) | Nana's AI (Claude by default) |
+| `LITEAPI_API_KEY` | Real US hotels, live prices, price lock, LiteAPI's card form, booking and cancellation (a `sand_` key is the sandbox: test bookings, card 4242 4242 4242 4242) |
+| `GOOGLE_PLACES_API_KEY` / `GOOGLE_MAPS_API_KEY` | "Near Times Square" and other places, through Google Places API (New) |
+| `RESEND_API_KEY` (+ `EMAIL_FROM`) | Booking confirmation emails |
+| none | Uber / Lyft buttons with the trip filled in |
+
+With live hotels the simulated stay (room keys, towels, the front desk) is off, since a real hotel never hears of it.
+Nana sends guests to the front desk for those and offers ride buttons instead. The demo keeps the full journey.
+
+**Hosting**: `render.yaml` sets up the server on Render in the US with a disk for the data; see
+[docs/LIVE.md §3c](docs/LIVE.md#3c-hosting-it-render-us). On a public address the hotel console needs
+`MERCHANT_PASSWORD`, and `AI_TURNS_PER_DAY` caps the AI bill.
+
+**Phones**: iPhone users add the hosted site to the Home Screen. The Android app (built by `.github/workflows/android.yml`
+and published under Releases) shows the hosted server when the repository variable `NANAHOTEL_SERVER_URL` is set,
+and is the offline demo otherwise. No API key is ever built into the app.
+
+**Checks against the real services**: the *Live smoke test* workflow (every connector, weekly) and *Live end-to-end
+(sandbox)* (search → card form → booking → cancellation in a browser) use the repository's secrets.
+
+Before real travelers use it you will also want a privacy policy and terms, consent for guest names, emails, phone
+numbers and trip details, a real sign-in (the app tells users apart by a random id the browser makes), a database
+instead of the JSON files in `data/`, and, to sell travel to residents of California, Florida, Washington and
+Hawaii, their seller-of-travel registration.
 
 ## Known limits
 

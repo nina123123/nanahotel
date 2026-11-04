@@ -172,7 +172,11 @@ test('quote → Confirm booking (price lock) → card form session → pay → b
   assert.equal(api.calls.filter((c) => c.path === '/v3.0/rates/book').length, 1);
   assert.equal((await call(base, 'GET', `/api/orders/${order.id}/payment`)).status, 409);
 
-  // The quote card on replay knows its order is paid.
+  // My trips lists it (no simulated stay with live hotels).
+  const trips = await call(base, 'GET', '/api/stays');
+  assert.equal(trips.status, 200, trips.text);
+  assert.deepEqual(trips.json.stays.map((x) => [x.order.id, x.stay, x.requests.length]), [[order.id, null, 0]]);
+
   const preview = await call(base, 'GET', `/api/orders/${order.id}/cancel-preview`);
   assert.equal(preview.status, 200, preview.text);
   assert.equal(preview.json.cancellable, true);

@@ -234,10 +234,6 @@ async function smokeHotels(live) {
     return { detail: `${how}: prebookId received, $${p.price} ${p.currency}${p.priceChanged ? ` (was $${p.expectedPrice})` : ''}, payment session ready, ${p.cancelPolicy?.type === 'free' ? 'free cancellation' : 'non-refundable'}${earlier}`, value: got };
   });
   if (!pb) return undefined;
-  await check(`${label}: card form key (LITEAPI_PAYMENT_KEY)`, async () => {
-    if (!live.payments.publishableKey) throw new Error('not set (or refused, see the notes above): the card form cannot load, so guests cannot pay');
-    return `publishable key set for the ${live.payments.environment} form`;
-  });
 
   if (!(sandbox && (truthy(env.SMOKE_LITEAPI_BOOK) || args.includes('--book')))) {
     return report('SKIP', `${label}: book / read back / cancel`, sandbox ? 'set SMOKE_LITEAPI_BOOK=1 to make and cancel a sandbox booking' : 'never with a production key');

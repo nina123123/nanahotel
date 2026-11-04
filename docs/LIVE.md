@@ -8,7 +8,7 @@ production keys.
 | Service | What it does in NanaHotel | Key to set | Without it |
 | --- | --- | --- | --- |
 | AI model (Anthropic Claude, or OpenAI) | Nana's brain: understands chats, calls the tools | `ANTHROPIC_API_KEY` (or `OPENAI_API_KEY`) | Nana explains how to set it up; `npm run demo` runs scripted answers |
-| Hotels + payments (LiteAPI by Nuitée) | Real US hotels, live prices in USD, price lock, the card form, booking, cancellation | `LITEAPI_API_KEY` + `LITEAPI_PAYMENT_KEY` | Simulated hotels and a "Test mode" checkout |
+| Hotels + payments (LiteAPI by Nuitée) | Real US hotels, live prices in USD, price lock, the card form, booking, cancellation | `LITEAPI_API_KEY` | Simulated hotels and a "Test mode" checkout |
 | Places (Google Places API) | Finds "near Times Square" and other places on the map | `GOOGLE_PLACES_API_KEY` | Built-in demo landmarks |
 | Email (Resend) | Booking confirmations and receipts | `RESEND_API_KEY` + `EMAIL_FROM` | No email (the receipt card still shows) |
 | Rides (Uber, Lyft) | "Open in Uber" / "Open in Lyft" buttons with pickup and drop-off filled in | none | Always on; guests book and pay in Uber or Lyft |
@@ -54,12 +54,15 @@ Names are exact (upper case, underscores). Empty means "not set".
 | `LLM_EFFORT` | AI | `medium` | Optional: `low` (faster, cheaper), `medium` (default for Claude), `high` (more careful, slower) |
 | `ANTHROPIC_FALLBACKS` | AI | `off` | Optional. See "Refusal fallback" below; leave empty to keep it on |
 | `LITEAPI_API_KEY` | Hotels, payments | `sand_…` | The **private** key. One starting with `sand_` is the **sandbox** (test); any other key is **production** |
-| `LITEAPI_PAYMENT_KEY` | Payments (card form) | `pk_test_…` | The **publishable** key from the dashboard's "Payment SDK keys" (sandbox and production each have one). Safe to show in a browser, but keep it in the environment too so you can swap it. Must match the private key: sandbox with sandbox, production with production |
+| `LITEAPI_PAYMENT_KEY` | (optional) | `pk_test_…` | **Not needed**: LiteAPI's card form brings its own Stripe key (checked in the sandbox). Kept for a later Stripe setup of your own; a secret key here is refused |
 | `GOOGLE_PLACES_API_KEY` | Places | `AIza…` | Google Cloud → APIs & Services → Credentials |
 | `RESEND_API_KEY` | Email | `re_…` | Resend → API Keys ("Sending access" is enough) |
 | `EMAIL_FROM` | Email | `NanaHotel <bookings@yourdomain.com>` | Must be on a domain you verified in Resend |
 | `EMAIL_REPLY_TO` | Email | `help@yourdomain.com` | Optional: where guests' replies go |
 | `UBER_CLIENT_ID`, `LYFT_PARTNER_ID` | Rides | | Optional, only if Uber/Lyft gave you a partner id (credits referrals). Not secret |
+| `MERCHANT_PASSWORD` | Hotel console | a long random phrase | The console at `/merchant` is open on your own computer only; on a public address it is **off** unless this is set, and then it asks for it |
+| `AI_TURNS_PER_DAY` | Cost brake | `400` | At most this many replies from Nana per day for the whole server; then Nana says she is resting until tomorrow. Empty = no cap |
+| `PUBLIC_URL` | Server | `https://nanahotel.onrender.com` | The server's own address (Render sets `RENDER_EXTERNAL_URL`, which is used when this is empty) |
 
 Only for the smoke test (section 5): `SMOKE_EMAIL_TO` (send one test email there), `SMOKE_LITEAPI_BOOK=1`
 (sandbox only: make, read back and cancel one test booking), `SMOKE_LITEAPI_PREBOOK=1` (with a production
@@ -90,11 +93,8 @@ it off. If Anthropic does not accept the option for your account, NanaHotel noti
 
 ### Hotels and payments — LiteAPI
 
-1. Sign up at **liteapi.travel**. In the dashboard (Nuitée Connect) copy two **sandbox** keys:
-   - the **private API key** (it starts with `sand_`) → `LITEAPI_API_KEY`;
-   - under **Payment SDK keys**, the sandbox **publishable key** for the card form → `LITEAPI_PAYMENT_KEY`.
-   NanaHotel refuses to use a `LITEAPI_PAYMENT_KEY` that looks like a secret key (it would be sent to guests'
-   browsers) and says so when it starts.
+1. Sign up at **liteapi.travel**. In the dashboard (Nuitée Connect) copy the **sandbox private API key** (it
+   starts with `sand_`) → `LITEAPI_API_KEY`. That is all the card form needs too.
 2. In sandbox, hotels and prices are real-looking but **nothing is booked and nobody is charged**. In the card
    form use the test card **4242 4242 4242 4242**, any future expiry date and any 3-digit CVC.
 3. Book a test stay in the app end to end: search → rooms → Confirm booking → pay with the test card → you get
@@ -103,10 +103,9 @@ it off. If Anthropic does not accept the option for your account, NanaHotel noti
    **API Playground**: it sends real requests with your key, so it is the quickest way to see whether a problem
    is in LiteAPI or in NanaHotel.
 5. **Going to production:** finish LiteAPI's account verification and agreement in their dashboard, set your
-   markup/commission there if you want one, then replace **both** keys with their production versions (the
-   production private key and the production Payment SDK publishable key). From that moment bookings are real and
-   guests' cards are charged. The startup line changes to `Hotels: LiteAPI LIVE (real bookings, guests are
-   charged)`. If the two keys don't match (one sandbox, one production) NanaHotel warns at startup.
+   markup/commission there if you want one, then replace the key with the production private key. From that
+   moment bookings are real and guests' cards are charged. The startup line changes to `Hotels: LiteAPI LIVE
+   (real bookings, guests are charged)`, and the page drops its "Test mode" line.
 
 ### Places — Google Places API (New)
 
@@ -140,6 +139,39 @@ The guest books and pays there; NanaHotel never sees the fare or their payment.
 
 You do not need Stripe now: LiteAPI's payment form takes the guest's card for the hotel. If you later sell things
 of your own (paid extras, a membership), Stripe is the usual way to take those payments.
+
+## 3b. What changes when hotels are live
+
+- **Real hotels in any US city**, with LiteAPI's photos, room types, prices in USD (to the cent at checkout) and
+  their own cancellation terms, shown in the hotel's time zone.
+- **Checkout** is LiteAPI's card form inside the app (sandbox: card 4242 4242 4242 4242). The page says "Real hotels
+  and prices" and, in the sandbox, "Test mode: bookings are tests and no card is charged".
+- **The simulated stay is off**: no room keys, towels, wake-up calls, breakfast tables or front-desk check-in,
+  because a real hotel never hears of them. Nana sends guests to the hotel's front desk for those, and offers
+  **Uber / Lyft buttons** with the trip filled in (`get_ride_links`).
+- **My trips** lists the confirmed bookings. Cancelling goes through LiteAPI and says what it costs first.
+- **Emails**: with Resend set up, the booking confirmation goes to the guest's email after paying.
+- **The hotel console** (`/merchant`) stays a demo over the simulated hotels, behind `MERCHANT_PASSWORD` on a
+  public server.
+
+## 3c. Hosting it (Render, US)
+
+`render.yaml` describes the whole service: a Node web service in Virginia on the Starter plan with a 1 GB disk at
+`/var/data` for the data (about $7–10 a month). Render only deploys `main`.
+
+1. Sign in at **render.com** with GitHub and allow Render to see the `nanahotel` repository.
+2. **New → Blueprint**, pick `nanahotel`, and click **Apply**. Render asks for each key: paste the same values as
+   the GitHub secrets (`ANTHROPIC_API_KEY`, `LITEAPI_API_KEY`, `GOOGLE_MAPS_API_KEY`, `RESEND_API_KEY`; leave
+   `EMAIL_FROM` and `LITEAPI_PAYMENT_KEY` empty for now). `MERCHANT_PASSWORD` is made for you; you find it under
+   the service's **Environment** page.
+3. When the deploy is green, open the address Render shows (like `https://nanahotel.onrender.com`). The log has one
+   line per service (`[live] Hotels: LiteAPI sandbox …`).
+4. Every push to `main` deploys again. `AI_TURNS_PER_DAY` (400 in the blueprint) caps Nana's replies per day.
+
+**Phones.** iPhone: open the address in Safari → Share → **Add to Home Screen**. Android: in GitHub go to
+**Settings → Secrets and variables → Actions → Variables** and add `NANAHOTEL_SERVER_URL` with that address; the next
+Android build (any push to `main`, or **Run workflow** on "Android APK") shows the hosted server. The APK holds no
+key. Without the variable it is the offline demo.
 
 ## 4. Costs to watch
 
@@ -188,37 +220,14 @@ It never prints keys, never books with a production key, and exits with an error
 **On your computer:** with the keys in `.env`, run `node --env-file=.env scripts/smoke-live.mjs` (Node 20.6 or
 newer). Add `--only=hotels,email` to check some services only.
 
-**In GitHub Actions:** add the keys as repository secrets (section 1), and optional settings such as
-`EMAIL_FROM`, `SMOKE_EMAIL_TO` and `SMOKE_LITEAPI_BOOK` as repository *variables*, then add this file as
-`.github/workflows/live-smoke.yml`. Run it from the **Actions** tab ("Run workflow"); it also runs every Monday.
+**In GitHub Actions:** the keys are repository secrets (section 1). Two workflows use them:
 
-```yaml
-name: Live smoke test
-on:
-  workflow_dispatch:
-  schedule:
-    - cron: '17 15 * * 1'
-jobs:
-  smoke:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - run: node scripts/smoke-live.mjs
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          LITEAPI_API_KEY: ${{ secrets.LITEAPI_API_KEY }}
-          LITEAPI_PAYMENT_KEY: ${{ secrets.LITEAPI_PAYMENT_KEY }}
-          GOOGLE_PLACES_API_KEY: ${{ secrets.GOOGLE_PLACES_API_KEY }}
-          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
-          EMAIL_FROM: ${{ vars.EMAIL_FROM }}
-          SMOKE_EMAIL_TO: ${{ vars.SMOKE_EMAIL_TO }}
-          SMOKE_LITEAPI_BOOK: ${{ vars.SMOKE_LITEAPI_BOOK }}
-```
+- **Live smoke test** (`.github/workflows/live-smoke.yml`): every connector, one PASS / FAIL / SKIP line each. It
+  runs every Monday and from the **Actions** tab (**Run workflow**). Optional repository *variables*: `EMAIL_FROM`,
+  `SMOKE_EMAIL_TO` (send one test email there).
+- **Live end-to-end (sandbox)** (`.github/workflows/live-e2e.yml`): the real app in a browser, with LiteAPI's
+  sandbox: search near Times Square → rooms → quote → Confirm booking → the card form with the test card → booked
+  → cancelled again. Run it from the Actions tab; its screenshots land on the `probe-shots` branch.
 
 If a check fails right after going to production, put the sandbox key back while you look into it: the app keeps
 working in test mode.
@@ -231,7 +240,7 @@ working in test mode.
 | "The AI service account is out of credit" | No credits / spend limit reached | Anthropic Console → Billing |
 | "The AI model in the server settings wasn't found" | Typo in `ANTHROPIC_MODEL` / `OPENAI_MODEL` | Remove the variable to use the default |
 | Smoke test: Hotels `[auth 401]` | Wrong `LITEAPI_API_KEY` | Copy the private key again from the LiteAPI dashboard; try the same search in its API Playground |
-| The card form doesn't appear / "card form off" at startup | `LITEAPI_PAYMENT_KEY` missing, refused (looked like a secret), or from the other environment | Copy the publishable key from "Payment SDK keys" for the same environment as the private key |
+| The card form doesn't appear | A browser extension or network blocking Stripe, or LiteAPI's payment service is down | Try another browser; run the Live end-to-end workflow; check LiteAPI's status |
 | Guests see "That room just sold out" | Hotel rooms really sell out between search and booking | Normal; Nana offers another option |
 | Smoke test: Places `[auth]` | "Places API (New)" not enabled, no billing account, or the key is restricted to another API | Section 3, Places, steps 1–3 |
 | Smoke test: Email "not verified" | DNS records missing or still propagating | Resend → Domains; it can take up to a day |
@@ -274,38 +283,38 @@ more and locks the same room, board and refundability (else the closest rate) on
   oldPrice, newPrice, currency, roomName, rateName }` — what the requote card needs. Nothing left at all:
   `sold_out`.
 
-### The payment form (front end) — VERIFY
+### The payment form (checked live in LiteAPI's sandbox, Nov 2026)
 
-Assumption to check against LiteAPI's "Payment SDK" docs before shipping:
+`scripts/probe-payment.mjs` (branch `live-smoke`) and `test/e2e/live-e2e.mjs` ran this against the real sandbox:
 
-1. The server calls `supplier.prebook({ hotelId, rateId, checkIn, checkOut, adults, children, rooms })` when the
-   guest taps **Confirm booking**. The result has the locked `price` and `payment: { secretKey, transactionId,
-   publishableKey, environment, scriptUrl }`: `secretKey` is per prebook (send it only to that guest's page,
-   never log it); `publishableKey` is the account's Payment SDK key (`LITEAPI_PAYMENT_KEY`, also in
-   `readLiveConfig(env).payments.publishableKey`; confirmed in the owner's dashboard as "Stripe publishable keys for
-   frontend payment forms"); `environment` is `"sandbox"` or `"live"`, chosen by the private key.
-2. The page loads `https://payment-wrapper.liteapi.travel/dist/liteAPIPayment.js?v=a1` and mounts the form
-   (VERIFY the option names; LiteAPI's older examples pass the environment name as `publicKey`):
+1. **Confirm booking** → `POST /api/quotes/:id/confirm` → `supplier.prebook(...)` locks the price
+   (`usePaymentSdk: true`) and returns `prebookId`, `transactionId` and `secretKey` (a Stripe PaymentIntent client
+   secret). They are stored in the `payment_sessions` collection, never on the order. A locked price above the quote
+   (or other terms) is refused as `price_changed` and Nana quotes again; a lower one is kept.
+2. The sheet calls `GET /api/orders/:id/payment` (the order's owner only, only while it waits for payment), loads
+   `https://payment-wrapper.liteapi.travel/dist/liteAPIPayment.js?v=a1` and mounts:
 
    ```js
-   const payment = new LiteAPIPayment({
-     publicKey: order.payment.publishableKey,     // pk_test_… / pk_live_… (Payment SDK key)
-     secretKey: order.payment.secretKey,          // from prebook; per order, never logged
-     targetElement: '#nana-payment',              // an empty <div id="nana-payment">
-     appearance: { theme: 'flat' },
-     options: { business: { name: 'NanaHotel' } },
+   new LiteAPIPayment({
+     publicKey: session.environment,   // 'sandbox' or 'live': the environment NAME (a pk_… key here gets a 400)
+     secretKey: session.secretKey,
+     targetElement: '#nana-payment-…',
      returnUrl: `${location.origin}/?paid=${order.id}`,
-   });
-   payment.handlePayment();
+     submitButton: { text: 'Pay $1,729.42' },
+   }).handlePayment();
    ```
 
-3. After the card step LiteAPI sends the browser to `returnUrl`; the page then calls
-   `POST /api/orders/:id/pay { method: 'liteapi' }` and the server books with the **stored** `transactionId`
-   (never one sent by the browser).
-4. Sandbox test card: 4242 4242 4242 4242. The form is built on Stripe Elements, so the page's
-   Content-Security-Policy must allow `https://payment-wrapper.liteapi.travel` and Stripe
-   (`https://js.stripe.com` scripts and frames, `https://api.stripe.com` connections, `https://hooks.stripe.com`
-   frames), and `img-src` must allow LiteAPI's photo CDN (or `https:`).
+   The script asks LiteAPI's `/config` for its provider (Stripe), loads `liteAPIPaymentStripe.js` and Stripe.js, and
+   renders Stripe's Payment Element: Amazon Pay and Klarna buttons, then card, Afterpay, Cash App Pay and Affirm.
+3. Paying sends the browser to `returnUrl` with `payment_intent`, `payment_intent_client_secret` and
+   `redirect_status=succeeded`. The page removes them from the address bar at once and calls
+   `POST /api/orders/:id/pay { method: 'liteapi' }`; the server books with the **stored** `transactionId`
+   (`payment: { method: 'TRANSACTION_ID', transactionId }`), never one sent by the browser. Booking is never retried
+   on its own; a second call while one is running answers `payment_processing`.
+4. The live Content-Security-Policy (`LIVE_CSP` in `src/server.js`) allows exactly what the form loaded in the
+   sandbox: `payment-wrapper.liteapi.travel`, Stripe (`js.stripe.com`, `*.stripe.com`, `b.stripecdn.com`,
+   `m.stripe.network`, `hooks.stripe.com`) and hCaptcha. Hotel photos come from LiteAPI's CDN (`img-src https:`).
+   The live end-to-end run reports anything the policy blocks.
 
 ### Assumptions to VERIFY (third-party APIs)
 

@@ -75,9 +75,9 @@ export function readLiveConfig(env = {}) {
       if (liteKey && !sandbox && payKey.startsWith(prefixes.sandbox)) warnings.push('LITEAPI_API_KEY is a production key but LITEAPI_PAYMENT_KEY is a test payment key; use the production Payment SDK key');
     }
     if (!liteKey) warnings.push('LITEAPI_PAYMENT_KEY is set but LITEAPI_API_KEY is not; the card form is only used with live hotels');
-  } else if (liteKey) {
-    warnings.push('LITEAPI_PAYMENT_KEY is not set: the card form cannot load, so guests cannot pay for live bookings');
   }
+  // Not needed for the card form: LiteAPI's payment script takes the environment name and fetches its own Stripe
+  // key (seen live in the sandbox; a publishable key in its place is refused). Kept for a future Stripe setup.
   const payments = liteKey
     ? {
       provider: 'liteapi',
@@ -146,7 +146,7 @@ export function describeLiveConfig(cfg) {
   lines.push(c.llm?.configured
     ? `AI model: ${c.llm.label} (${c.llm.model}${c.llm.effort ? `, effort ${c.llm.effort}` : ''})`
     : `AI model: not set up (set ${c.llm?.keyEnv || 'ANTHROPIC_API_KEY'}; the scripted demo needs no key)`);
-  const cardForm = c.payments?.publishableKey ? '' : '; card form off until LITEAPI_PAYMENT_KEY is set';
+  const cardForm = '';
   if (!c.hotels?.enabled) lines.push('Hotels: demo (simulated hotels and payments); set LITEAPI_API_KEY to go live');
   else if (c.hotels.sandbox) lines.push(`Hotels: LiteAPI sandbox (test bookings, nothing is charged; test card ${LITEAPI.sandboxTestCard}${cardForm})`);
   else lines.push(`Hotels: LiteAPI LIVE (real bookings, guests are charged${cardForm})`);

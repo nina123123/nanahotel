@@ -1126,6 +1126,14 @@ export function createApp(deps) {
     }],
 
     ['GET', /^\/api\/stays$/, async ({ res, userId }) => {
+      if (!stays) {
+        // Live hotels (no simulated stay): My trips lists the confirmed bookings that aren't over yet.
+        const today = todayIn(defaultZone, clock.now());
+        const orders = (await bookings.listOrders(userId)).filter((o) => o.status === 'confirmed' && o.checkOut >= today);
+        orders.sort((a, b) => (a.checkIn < b.checkIn ? -1 : a.checkIn > b.checkIn ? 1 : 0));
+        sendJson(res, 200, { stays: orders.slice(0, 5).map((o) => ({ order: toPublicOrder(o), stay: null, requests: [] })) });
+        return;
+      }
       const list = await requireStays().listStays(userId);
       sendJson(res, 200, { stays: list.map((x) => ({ ...x, order: toPublicOrder(x.order) })) });
     }],

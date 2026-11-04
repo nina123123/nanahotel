@@ -128,7 +128,7 @@ try {
   });
 
   await step('Traveler details saved', async () => {
-    const r = await apiCall('PUT', '/api/profile', { firstName: 'Probe', lastName: 'Tester', email: 'smoke-test@example.com', contactPhone: '(212) 555-0142' });
+    const r = await apiCall('PUT', '/api/profile', { firstName: 'Sam', lastName: 'Rivera', email: 'smoke-test@example.com', contactPhone: '(212) 555-0142' });
     if (r.status !== 200) throw new Error(`PUT /api/profile → ${r.status} ${JSON.stringify(r.json)}`);
   });
 
