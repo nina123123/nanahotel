@@ -1,0 +1,20 @@
+{
+  "name": "hotel-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "小宿 · AI 订房管家（演示版）：对话式酒店搜索与模拟预订",
+  "type": "module",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test test/*.test.js",
+    "test:e2e": "node test/e2e/smoke.mjs",
+    "demo": "node test/e2e/run-server.js",
+    "test:app": "node test/e2e/app-smoke.mjs",
+    "test:merchant": "node test/e2e/merchant-smoke.mjs"
+  }
+}

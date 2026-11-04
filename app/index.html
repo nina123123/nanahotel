@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#fbf5ea" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#13110e" media="(prefers-color-scheme: dark)">
+  <meta name="format-detection" content="telephone=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="小宿">
+  <title>小宿 · AI 订房管家</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="../public/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon-180.png">
+  <link rel="stylesheet" href="../public/style.css">
+  <!-- The server modules import node:* built-ins; in the phone apps these resolve to small browser stand-ins. -->
+  <script type="importmap">
+  {
+    "imports": {
+      "node:crypto": "./shims/node-crypto.js",
+      "node:fs": "./shims/node-fs.js",
+      "node:fs/promises": "./shims/node-fs-promises.js",
+      "node:http": "./shims/node-http.js",
+      "node:path": "./shims/node-path.js",
+      "node:url": "./shims/node-url.js"
+    }
+  }
+  </script>
+  <script type="module" src="./boot.js"></script>
+  <style>
+    .boot { min-height: 100dvh; display: grid; place-content: center; justify-items: center; gap: 14px; padding: 24px; text-align: center; }
+    .boot img { width: 64px; height: 64px; }
+    .boot p { margin: 0; color: var(--text-2, #5d6367); }
+  </style>
+</head>
+<body>
+  <div class="boot" id="boot">
+    <img src="../public/icon.svg" alt="">
+    <p id="boot-text">小宿正在启动…</p>
+  </div>
+  <noscript><p class="noscript">需要启用 JavaScript 才能使用小宿。</p></noscript>
+</body>
+</html>

@@ -1,0 +1,7 @@
+.gradle/
+build/
+local.properties
+*.iml
+.idea/
+# Copied from hotel-agent/{app,public,src} at build time
+app/src/main/assets/

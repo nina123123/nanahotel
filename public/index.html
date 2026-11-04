@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#fbf5ea" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#13110e" media="(prefers-color-scheme: dark)">
+  <meta name="description" content="小宿：头顶橘子的卡皮巴拉订房管家。打个电话就能订酒店，到店、住店、离店也都帮你办（演示版，酒店、服务与支付均为模拟）。">
+  <meta name="format-detection" content="telephone=no">
+  <title>小宿</title>
+  <link rel="icon" href="public/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="public/icon.svg">
+  <link rel="stylesheet" href="public/style.css">
+  <script type="module" src="public/app.js"></script>
+</head>
+<body>
+  <div class="app" id="app" data-call="idle">
+    <header class="topbar">
+      <div class="topbar-id">
+        <button type="button" class="pet-btn" id="pet-header" data-pet-poke aria-label="摸摸小宿"></button>
+        <div class="topbar-text">
+          <h1 class="topbar-title" id="app-name">小宿</h1>
+          <p class="topbar-status" id="pet-status">情绪稳定中</p>
+        </div>
+      </div>
+      <button type="button" class="icon-btn" id="btn-menu" aria-label="更多">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5.5" cy="12" r="1.8" fill="currentColor"/><circle cx="12" cy="12" r="1.8" fill="currentColor"/><circle cx="18.5" cy="12" r="1.8" fill="currentColor"/></svg>
+      </button>
+    </header>
+
+    <nav class="plans" id="plans" aria-label="我的安排" hidden></nav>
+
+    <main class="log" id="log" aria-label="对话">
+      <div class="thread-note" id="thread-note">内容由 AI 生成 · 酒店、价格与支付均为模拟</div>
+      <div class="messages" id="messages" role="log" aria-live="polite" aria-relevant="additions"></div>
+    </main>
+
+    <footer class="dock" id="dock">
+      <section class="voice" id="voice" aria-label="说话" hidden>
+        <div class="voice-head">
+          <span class="wave is-on" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+          <span id="voice-title">在听你说…</span>
+        </div>
+        <p class="voice-hint">语音识别还是模拟的：点一句就当你说了，也可以直接打字。</p>
+        <p class="voice-heard" id="voice-heard" aria-live="polite"></p>
+        <div class="voice-says" id="voice-says" role="group" aria-label="你可以说"></div>
+      </section>
+      <div class="call-line" id="call-line">
+        <span class="wave" id="call-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+        <span id="call-text">通话中</span>
+        <span class="call-time" id="call-time">00:00</span>
+      </div>
+      <form class="composer" id="composer" autocomplete="off">
+        <button type="button" class="round-btn mic-btn" id="btn-mic" aria-label="说话" aria-pressed="false">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7"/></svg>
+        </button>
+        <div class="composer-box">
+          <label class="sr-only" for="input">输入消息</label>
+          <textarea id="input" rows="1" maxlength="2000" enterkeyhint="send" placeholder="跟小宿说…"></textarea>
+          <button type="submit" class="send-btn" id="send" aria-label="发送" disabled>
+            <svg class="icon icon-send" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 18.5V5.5M6 11.5l6-6 6 6"/></svg>
+            <svg class="icon icon-stop" viewBox="0 0 24 24" aria-hidden="true"><rect x="7.5" y="7.5" width="9" height="9" rx="2" fill="currentColor"/></svg>
+          </button>
+        </div>
+        <button type="button" class="round-btn call-btn" id="btn-call" aria-label="打给小宿">
+          <svg class="icon icon-phone" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.6 3.5h2.6l1.4 4-1.9 1.3a11.5 11.5 0 0 0 6.5 6.5l1.3-1.9 4 1.4v2.6a2 2 0 0 1-2.2 2A16.5 16.5 0 0 1 4.6 5.7a2 2 0 0 1 2-2.2Z"/></svg>
+          <svg class="icon icon-hangup" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.4 14.6c4.7-4.3 12.5-4.3 17.2 0 .7.6.7 1.6.1 2.3l-1.4 1.5c-.5.5-1.3.6-1.9.2l-2.2-1.4c-.5-.3-.7-.9-.6-1.4l.3-1.6a10.6 10.6 0 0 0-6 0l.3 1.6c.1.5-.1 1.1-.6 1.4l-2.2 1.4c-.6.4-1.4.3-1.9-.2l-1.4-1.5c-.6-.7-.6-1.7.3-2.3Z"/></svg>
+        </button>
+      </form>
+    </footer>
+  </div>
+
+  <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+  <noscript><p class="noscript">需要启用 JavaScript 才能使用小宿。</p></noscript>
+</body>
+</html>

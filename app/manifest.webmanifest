@@ -1,0 +1,16 @@
+{
+  "name": "小宿 · AI 订房管家",
+  "short_name": "小宿",
+  "description": "说出行程，帮你找酒店、比房型、一键预订（演示版，酒店与支付均为模拟）。",
+  "lang": "zh-CN",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#fbf5ea",
+  "theme_color": "#fbf5ea",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "../public/icon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}
