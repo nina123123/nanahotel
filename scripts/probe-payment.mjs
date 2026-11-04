@@ -7,6 +7,7 @@
  * Prints no keys or client secrets. Needs LITEAPI_API_KEY (sandbox) and LITEAPI_PAYMENT_KEY, plus Playwright.
  */
 import http from 'node:http';
+import fs from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { readLiveConfig } from '../src/live/config.js';
 import { createLiteApiSupplier, LITEAPI } from '../src/live/liteapi.js';
@@ -209,9 +210,8 @@ async function attempt(variant) {
     return false;
   }
   await page.waitForTimeout(1500);
-  const jpg = (await page.screenshot({ type: 'jpeg', quality: 45, fullPage: true })).toString('base64');
-  console.log(`SCREENSHOT ${jpg.length}`);
-  for (let i = 0; i < jpg.length; i += 4000) console.log(`IMG ${String(i / 4000).padStart(3, '0')} ${jpg.slice(i, i + 4000)}`);
+  await fs.mkdir('probe-shots', { recursive: true });
+  await page.screenshot({ path: 'probe-shots/card-form.png', fullPage: true });
   const buttons = page.locator('button, input[type=submit]');
   const count = await buttons.count();
   let clicked = null;
