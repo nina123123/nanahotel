@@ -141,6 +141,16 @@ async function attempt(variant) {
       failed.push(`${r.status()} ${r.request().method()} ${u.origin}${u.pathname}`);
     }
   });
+  page.on('response', async (r) => {
+    if (!r.url().startsWith('https://payment-wrapper.liteapi.travel/config')) return;
+    try {
+      const body = await r.json();
+      const shape = (v, depth = 0) => (v && typeof v === 'object' && depth < 3 ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, shape(x, depth + 1)])) : typeof v === 'string' && /^https?:/.test(v) ? v : typeof v);
+      log(`/config answer: ${JSON.stringify(shape(body))}`);
+    } catch (e) {
+      log(`/config answer unreadable: ${e.message}`);
+    }
+  });
   await page.goto(`http://127.0.0.1:${port}/?variant=${variant}`);
   await page.waitForTimeout(9000);
   const probe = await page.evaluate(() => window.__probe);
@@ -158,6 +168,7 @@ async function attempt(variant) {
   log(`buttons: ${JSON.stringify(await page.locator('button, input[type=submit]').evaluateAll((els) => els.map((e) => ({ text: (e.innerText || e.value || '').trim().slice(0, 40), id: e.id, cls: String(e.className).slice(0, 60), disabled: e.disabled }))))}`);
   log(`target html (tags only): ${(await page.locator('#nana-payment').evaluate((el) => el.innerHTML)).replace(/"[^"]{40,}"/g, '"…"').slice(0, 1500)}`);
 
+  log(`requests: ${[...hosts.entries()].map(([k, n]) => `${k}${n > 1 ? ` ×${n}` : ''}`).slice(0, 80).join(' | ')}`);
   const stripeFrames = page.frames().filter((f) => /stripe\.com/.test(f.url()));
   if (!stripeFrames.length) {
     log(`no Stripe frame. console: ${consoleLines.slice(0, 25).join(' || ')}`);
@@ -198,6 +209,9 @@ async function attempt(variant) {
     return false;
   }
   await page.waitForTimeout(1500);
+  const jpg = (await page.screenshot({ type: 'jpeg', quality: 45, fullPage: true })).toString('base64');
+  console.log(`SCREENSHOT ${jpg.length}`);
+  for (let i = 0; i < jpg.length; i += 4000) console.log(`IMG ${String(i / 4000).padStart(3, '0')} ${jpg.slice(i, i + 4000)}`);
   const buttons = page.locator('button, input[type=submit]');
   const count = await buttons.count();
   let clicked = null;
@@ -225,8 +239,7 @@ async function attempt(variant) {
   return backed;
 }
 
-let paid = await attempt('pk');
-if (!paid) paid = await attempt('env');
+let paid = await attempt('env');
 await browser.close();
 server.close();
 
