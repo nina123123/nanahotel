@@ -11,6 +11,8 @@
  *
  * Exit code 0 when nothing failed (skips are fine), 1 otherwise. In GitHub Actions: see docs/LIVE.md.
  */
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createLlmClient } from '../src/llm/client.js';
 import { resolveLlmConfig, PROVIDERS } from '../src/llm/providers.js';
 import { ANTHROPIC } from '../src/llm/anthropic.js';
@@ -138,6 +140,56 @@ async function smokeLlm(provider) {
 // Hotels (LiteAPI)
 // ---------------------------------------------------------------------------
 
+/**
+ * Up to `max` bookable rates to try a prebook on, from priced search results: refundable first, then cheapest,
+ * one per hotel before a second rate of the same hotel (a hotel-wide problem should not use up every attempt).
+ */
+export function prebookCandidates(hotels, max = 3) {
+  const all = [];
+  for (const hotel of hotels || []) {
+    for (const roomType of hotel?.offer?.roomTypes || []) {
+      for (const rate of roomType.rates || []) if (rate.available) all.push({ hotel, roomType, rate });
+    }
+  }
+  all.sort((a, b) => (b.rate.refundable === true) - (a.rate.refundable === true) || a.rate.totalPrice - b.rate.totalPrice);
+  const seen = new Set();
+  const firsts = [];
+  const seconds = [];
+  for (const c of all) {
+    if (seen.has(c.hotel.id)) seconds.push(c);
+    else {
+      seen.add(c.hotel.id);
+      firsts.push(c);
+    }
+  }
+  return [...firsts, ...seconds].slice(0, max);
+}
+
+function failureText(f, i) {
+  const e = f.error;
+  const code = e?.code ? `[${e.code}${e.status ? ` ${e.status}` : ''}] ` : '';
+  return `#${i + 1} "${f.candidate.hotel.name}" (${f.candidate.rate.name}): ${code}${e?.message || e}`;
+}
+
+/**
+ * Prebooks the candidates in turn until one works (the supplier itself re-searches once on a price change).
+ * @returns {Promise<{ result: object, attempt: number, candidate: object, failures: Array<{ candidate, error }> }>}
+ *   throws an Error listing every attempt when none worked.
+ */
+export async function prebookFirstWorking(supplier, candidates, stay, opts = {}) {
+  const failures = [];
+  for (const [i, candidate] of candidates.entries()) {
+    try {
+      const result = await supplier.prebook({ hotelId: candidate.hotel.id, rateId: candidate.rate.rateId, ...stay, ...opts });
+      return { result, attempt: i + 1, candidate, failures };
+    } catch (err) {
+      if (err?.name === 'AbortError') throw err;
+      failures.push({ candidate, error: err });
+    }
+  }
+  throw new Error(candidates.length ? `all ${candidates.length} attempts failed: ${failures.map(failureText).join('; ')}` : 'no bookable rate to try');
+}
+
 async function smokeHotels(live) {
   if (!live.hotels.enabled) return report('SKIP', 'Hotels (LiteAPI)', 'LITEAPI_API_KEY is not set');
   const sandbox = live.hotels.sandbox;
@@ -172,11 +224,14 @@ async function smokeHotels(live) {
   if (!offer) return undefined;
 
   if (!sandbox && !truthy(env.SMOKE_LITEAPI_PREBOOK)) return report('SKIP', `${label}: prebook`, 'production key: set SMOKE_LITEAPI_PREBOOK=1 to try a price lock (nothing is charged)');
-  const rate = offer.offer.roomTypes.flatMap((rt) => rt.rates).sort((a, b) => b.refundable - a.refundable || a.totalPrice - b.totalPrice)[0];
-  const pb = await check(`${label}: prebook with the payment form session`, async () => {
-    const p = await supplier.prebook({ hotelId: offer.hotel.id, rateId: rate.rateId, ...stay });
-    if (!p.payment) throw new Error(`prebook ${p.prebookId ? 'worked' : 'failed'} but returned no payment session (secretKey/transactionId) — check usePaymentSdk`);
-    return { detail: `prebookId received, $${p.price} ${p.currency}${p.priceChanged ? ` (was $${p.expectedPrice})` : ''}, payment session ready, ${p.cancelPolicy?.type === 'free' ? 'free cancellation' : 'non-refundable'}`, value: p };
+  const candidates = prebookCandidates(priced, 3);
+  const pb = await check(`${label}: prebook with the payment form session (up to ${candidates.length} rates)`, async () => {
+    const got = await prebookFirstWorking(supplier, candidates, stay);
+    const p = got.result;
+    if (!p.payment) throw new Error('prebook worked but returned no payment session (secretKey/transactionId) — check usePaymentSdk');
+    const how = `attempt ${got.attempt} of ${candidates.length} worked: "${got.candidate.hotel.name}", ${p.rateName || got.candidate.rate.name}${p.retried ? ' (after one re-search for a new price)' : ''}`;
+    const earlier = got.failures.length ? `; before that ${got.failures.map(failureText).join('; ')}` : '';
+    return { detail: `${how}: prebookId received, $${p.price} ${p.currency}${p.priceChanged ? ` (was $${p.expectedPrice})` : ''}, payment session ready, ${p.cancelPolicy?.type === 'free' ? 'free cancellation' : 'non-refundable'}${earlier}`, value: got };
   });
   if (!pb) return undefined;
   await check(`${label}: card form key (LITEAPI_PAYMENT_KEY)`, async () => {
@@ -188,7 +243,7 @@ async function smokeHotels(live) {
     return report('SKIP', `${label}: book / read back / cancel`, sandbox ? 'set SMOKE_LITEAPI_BOOK=1 to make and cancel a sandbox booking' : 'never with a production key');
   }
   const booking = await check(`${label}: sandbox booking (account card, no payment form)`, async () => {
-    const p = await supplier.prebook({ hotelId: offer.hotel.id, rateId: rate.rateId, ...stay, usePaymentSdk: false });
+    const p = await supplier.prebook({ hotelId: pb.candidate.hotel.id, rateId: pb.result.rateId, ...stay, usePaymentSdk: false });
     const b = await supplier.book({ prebookId: p.prebookId, paymentMethod: 'ACC_CREDIT_CARD', holder: { firstName: 'Smoke', lastName: 'Test', email: env.SMOKE_EMAIL_TO || 'smoke-test@example.com' }, guests: ['Smoke Test'], clientReference: `SMOKE${Date.now()}` });
     return { detail: `booking ${b.bookingId} ${b.status}${b.hotelConfirmationCode ? `, hotel confirmation ${b.hotelConfirmationCode}` : ''}`, value: b };
   });
@@ -295,7 +350,10 @@ async function main() {
   process.exitCode = failed ? 1 : 0;
 }
 
-main().catch((err) => {
-  console.log(`FAIL  smoke test crashed: ${safe(err?.stack || err)}`);
-  process.exitCode = 1;
-});
+// Runs only as a script; tests import the helpers above.
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((err) => {
+    console.log(`FAIL  smoke test crashed: ${safe(err?.stack || err)}`);
+    process.exitCode = 1;
+  });
+}

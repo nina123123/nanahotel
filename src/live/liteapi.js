@@ -440,6 +440,27 @@ export function findRate(offer, rateId) {
 }
 
 /**
+ * After a re-search: the same rate if it is still offered, else the closest one — same room, then same board, then
+ * same refundability, then the nearest price. null when nothing is bookable.
+ * @param {object} offer  RoomOffer
+ * @param {{ rateId: string, roomId?: string, boardType?: string, refundable?: boolean, total?: number }} want
+ * @returns {{ roomType: object, rate: object, exact: boolean } | null}
+ */
+export function closestRate(offer, want = {}) {
+  let best = null;
+  for (const rt of offer?.roomTypes || []) {
+    for (const r of rt.rates) {
+      if (!r.available) continue;
+      const exact = r.rateId === want.rateId;
+      const score = (exact ? 8 : 0) + (rt.roomId === want.roomId ? 4 : 0) + (r.boardType === want.boardType ? 2 : 0) + (r.refundable === want.refundable ? 1 : 0);
+      const diff = Number.isFinite(want.total) ? Math.abs(r.totalPrice - want.total) : r.totalPrice;
+      if (!best || score > best.score || (score === best.score && diff < best.diff)) best = { score, diff, roomType: rt, rate: r, exact };
+    }
+  }
+  return best ? { roomType: best.roomType, rate: best.rate, exact: best.exact } : null;
+}
+
+/**
  * One hotel's entry of a /hotels/rates answer → { offer: RoomOffer, refs: Map(rateId → { offerId, total }) }.
  * Each LiteAPI roomType is one bookable offer; offers of the same room become rates of one room type. rateId is a
  * short hash of what the guest picks (room, board, cancellation terms), so it survives a re-search of the same stay
@@ -500,9 +521,13 @@ export function mapLiteApiRates(entry, { hotelId, checkIn, checkOut, adults = 2,
   }
   for (const g of groups.values()) {
     const kept = [...g.rates.values()].sort((a, b) => a.rate.totalPrice - b.rate.totalPrice).slice(0, MAX_RATES_PER_ROOM);
-    for (const { rate, offerId } of kept) refs.set(rate.rateId, { offerId, total: rate.totalPrice });
+    const roomId = `R${shortHash(g.roomKey).slice(0, 8)}`;
+    // What the guest picked travels with the offer id, so a re-search can find the same room/board/terms again.
+    for (const { rate, offerId } of kept) {
+      refs.set(rate.rateId, { offerId, total: rate.totalPrice, roomId, boardType: rate.boardType, refundable: rate.refundable, roomName: g.name, rateName: rate.name });
+    }
     offer.roomTypes.push({
-      roomId: `R${shortHash(g.roomKey).slice(0, 8)}`,
+      roomId,
       name: g.name,
       bed: '',
       areaSqm: null,
@@ -600,7 +625,8 @@ function personOf(g) {
 
 const SOLD_OUT_RE = /no availability|not available|sold ?out|no longer available|no rooms? available|offer (has )?expired|offer.{0,20}not (found|valid)/i;
 const NOT_FOUND_RE = /not found|does not exist|unknown (hotel|booking)|invalid (hotel|booking) ?id/i;
-const PRICE_RE = /price (has )?changed|price change/i;
+// Seen live (sandbox prebook): HTTP 409, code 2001, "provider price exceeds locked selling price, please search again".
+const PRICE_RE = /price (has )?changed|price change|price exceeds|exceeds (the )?locked|locked selling price|search again/i;
 const EXPIRED_RE = /prebook.{0,40}(expired|not found|invalid)|session expired/i;
 const PAYMENT_RE = /payment|card|declined|transaction|insufficient funds|3ds|authori[sz]ation/i;
 const NOT_CANCELLABLE_RE = /not cancell?able|cannot be cancell?ed|can't be cancell?ed|already cancell?ed|non-?refundable/i;
@@ -617,9 +643,11 @@ function errorInfo(body) {
 export function classifyLiteApiError(status, body, headers) {
   const info = errorInfo(body);
   let code = status && status !== 200 ? codeForStatus(status) : 'bad_request';
-  if (code === 'bad_request' || code === 'not_found') {
-    if (info.code === '2001' || SOLD_OUT_RE.test(info.message)) code = 'sold_out';
-    else if (PRICE_RE.test(info.message)) code = 'price_changed';
+  // The message decides for 400/404/409/422 and errors inside a 200 body: LiteAPI uses code 2001 both for
+  // "no availability" and for "price exceeds locked selling price, please search again" (a 409).
+  if (code === 'bad_request' || code === 'not_found' || status === 409) {
+    if (PRICE_RE.test(info.message)) code = 'price_changed';
+    else if (info.code === '2001' || SOLD_OUT_RE.test(info.message)) code = 'sold_out';
     else if (NOT_FOUND_RE.test(info.message)) code = 'not_found';
   }
   return new LiveServiceError('liteapi', code, {
@@ -627,6 +655,29 @@ export function classifyLiteApiError(status, body, headers) {
     providerCode: info.code,
     retryAfterMs: parseRetryAfterMs(headers),
     message: `LiteAPI ${status || ''} ${info.code} ${info.message}`.replace(/\s+/g, ' ').trim(),
+  });
+}
+
+/** The requote error after a failed re-lock: the fresh price (and rate) the guest should confirm. */
+function priceChangedError({ hotelId, requestedRateId, pick, oldPrice, cause }) {
+  const newPrice = pick.rate.totalPrice;
+  return new LiveServiceError('liteapi', 'price_changed', {
+    status: cause?.status || 0,
+    providerCode: cause?.providerCode || '',
+    message: `LiteAPI ${hotelId}: price changed from ${oldPrice} to ${newPrice} USD (${cause?.message || 'no detail'})`,
+    userMessage: `The price just changed to ${formatUsd(newPrice)} for your stay. Please check it before you book.`,
+    details: {
+      hotelId,
+      requestedRateId,
+      rateId: pick.rate.rateId,
+      rateChanged: pick.rate.rateId !== requestedRateId,
+      oldPrice,
+      newPrice,
+      currency: 'USD',
+      roomName: pick.roomType.name,
+      rateName: pick.rate.name,
+    },
+    cause,
   });
 }
 
@@ -859,21 +910,31 @@ export function createLiteApiSupplier({
   /**
    * Price lock + payment session for one rate of a stay. The rate is found again by its short rateId (from the
    * cache, else a fresh rates search). Nothing is charged.
-   * @returns {Promise<{ prebookId, hotelId, rateId, price, currency, expectedPrice, priceChanged, cancellationChanged,
-   *   boardChanged, cancelPolicy, termsAndConditions, payment: { provider, transactionId, secretKey, publishableKey, environment, scriptUrl }|null, sandbox }>}
+   *
+   * When LiteAPI answers "price exceeds locked selling price, please search again" (409/2001), or a remembered
+   * offer has expired, the hotel is searched once more and the same room, board and refundability — else the
+   * closest rate — is locked once more (never more than once). If that fails too, a `price_changed`
+   * LiveServiceError carries the fresh price in `details` ({ oldPrice, newPrice, rateId, rateChanged, roomName,
+   * rateName }) for the requote card. A lock that succeeded on another rate says so with `rateChanged` (and
+   * `boardChanged` / `cancellationChanged`): show the guest the new terms before taking payment.
+   * @returns {Promise<{ prebookId, hotelId, rateId, requestedRateId, rateChanged, retried, roomName, rateName, price,
+   *   currency, expectedPrice, priceChanged, cancellationChanged, boardChanged, cancelPolicy, termsAndConditions,
+   *   payment: { provider, transactionId, secretKey, publishableKey, environment, scriptUrl }|null, sandbox }>}
    */
   async function prebook({ hotelId, rateId, checkIn, checkOut, adults = 2, children = 0, rooms = 1, childAges, usePaymentSdk = true, signal } = {}) {
     const id = str(hotelId, 80);
     const rid = str(rateId, 40);
     const stay = stayOf({ checkIn, checkOut, adults, children, rooms, childAges });
-    const lookup = () => offerRefs.get(refKey(id, stay, rid));
-    let ref = lookup();
+    const lookup = (r) => offerRefs.get(refKey(id, stay, r));
+    let ref = lookup(rid);
     const fromCache = Boolean(ref);
     if (!ref) {
       await ratesFor([id], stay, { signal, fresh: true });
-      ref = lookup();
+      ref = lookup(rid);
     }
     if (!ref) throw new LiveServiceError('liteapi', 'sold_out', { message: `LiteAPI rate ${rid} of ${id} is no longer offered` });
+    // What the guest saw and picked: the locked price is compared with it, and a re-search looks for the same terms.
+    const want = { rateId: rid, roomId: ref.roomId, boardType: ref.boardType, refundable: ref.refundable, total: ref.total };
     const lock = async (offerId) => {
       try {
         return await bookApi.request({ method: 'POST', path: LITEAPI.paths.prebook, body: { offerId, usePaymentSdk: Boolean(usePaymentSdk) }, signal, retry: false, timeoutMs: timeoutMs ?? 45000 });
@@ -881,17 +942,32 @@ export function createLiteApiSupplier({
         throw refine(err, 'prebook');
       }
     };
+    let locked = { rateId: rid, ref };
+    let retried = false;
     let res;
     try {
       res = await lock(ref.offerId);
     } catch (err) {
-      // Offers expire after a while: a remembered one gets one fresh search, and the same room/board/terms is locked.
-      if (!(fromCache && err instanceof LiveServiceError && err.code === 'sold_out')) throw err;
-      await ratesFor([id], stay, { signal, fresh: true });
-      const again = lookup();
-      if (!again || again.offerId === ref.offerId) throw err;
-      ref = again;
-      res = await lock(ref.offerId);
+      const priceMoved = err instanceof LiveServiceError && err.code === 'price_changed';
+      const expired = fromCache && err instanceof LiveServiceError && err.code === 'sold_out';
+      if (!priceMoved && !expired) throw err;
+      const fresh = (await ratesFor([id], stay, { signal, fresh: true })).get(id);
+      const pick = closestRate(fresh, want);
+      const next = pick ? lookup(pick.rate.rateId) : null;
+      if (!pick || !next) {
+        throw new LiveServiceError('liteapi', 'sold_out', { status: err.status, providerCode: err.providerCode, message: `LiteAPI ${id}: nothing bookable on a fresh search after: ${err.message}`, cause: err });
+      }
+      const changed = (cause) => priceChangedError({ hotelId: id, requestedRateId: rid, pick, oldPrice: want.total, cause });
+      // The same offer again would fail the same way.
+      if (next.offerId === ref.offerId) throw priceMoved ? changed(err) : err;
+      retried = true;
+      locked = { rateId: pick.rate.rateId, ref: next };
+      try {
+        res = await lock(next.offerId);
+      } catch (err2) {
+        if (err2 instanceof LiveServiceError && (err2.code === 'price_changed' || (priceMoved && err2.code === 'sold_out'))) throw changed(err2);
+        throw err2;
+      }
     }
     const d = unwrap(res.data);
     const prebookId = str(d?.prebookId, 200);
@@ -905,13 +981,18 @@ export function createLiteApiSupplier({
     return {
       prebookId,
       hotelId: str(d.hotelId, 80) || id,
-      rateId: rid,
+      rateId: locked.rateId,
+      requestedRateId: rid,
+      rateChanged: locked.rateId !== rid,
+      retried,
+      roomName: locked.ref.roomName || '',
+      rateName: locked.ref.rateName || '',
       price: price === null ? null : round2(price),
       currency: str(d.currency, 4) || 'USD',
-      expectedPrice: ref.total,
-      priceChanged: (price !== null && Math.abs(price - ref.total) >= 0.01) || pct !== 0,
-      cancellationChanged: d.cancellationChanged === true,
-      boardChanged: d.boardChanged === true,
+      expectedPrice: want.total,
+      priceChanged: (price !== null && Math.abs(price - want.total) >= 0.01) || pct !== 0,
+      cancellationChanged: d.cancellationChanged === true || locked.ref.refundable !== want.refundable,
+      boardChanged: d.boardChanged === true || locked.ref.boardType !== want.boardType,
       cancelPolicy: policies.length ? combinePolicies(policies) : null,
       termsAndConditions: plainText(d.termsAndConditions, 2000),
       // Everything the card form needs for this order: secretKey is per prebook (send it only to this guest's

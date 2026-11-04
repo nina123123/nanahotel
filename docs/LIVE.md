@@ -177,7 +177,7 @@ What it checks:
 | Service | Checks |
 | --- | --- |
 | AI (each provider with a key) | the model calls a test tool with sensible arguments; it answers using the tool's result; for Claude, whether Anthropic accepts the refusal-fallback option |
-| Hotels | hotels near Times Square (names, distances, photos); USD rates for 2 nights 30 days ahead; rooms and hotel details (check-in time, phone, photos); a price lock with a card-form session (sandbox, or with `SMOKE_LITEAPI_PREBOOK=1`) and that the card form key is set; with `SMOKE_LITEAPI_BOOK=1` in sandbox only: books, reads back and cancels a test booking |
+| Hotels | hotels near Times Square (names, distances, photos); USD rates for 2 nights 30 days ahead; rooms and hotel details (check-in time, phone, photos); a price lock with a card-form session (sandbox, or with `SMOKE_LITEAPI_PREBOOK=1`) — prices move all the time, so it tries up to 3 bookable rates (cheapest refundable first, different hotels first) and says which attempt worked — and that the card form key is set; with `SMOKE_LITEAPI_BOOK=1` in sandbox only: books, reads back and cancels a test booking |
 | Places | "Times Square" in New York is found within 1.5 km of where it really is |
 | Email | the key works and the `EMAIL_FROM` domain is verified; with `SMOKE_EMAIL_TO`, sends one test confirmation |
 | Rides | the Uber and Lyft links are well formed (offline) |
@@ -259,6 +259,21 @@ Errors from live connectors are `LiveServiceError { service, code, status, userM
 is for logs (provider text with keys scrubbed), `userMessage` is short English a guest can read. Logs carry
 method, path, status and time only — no bodies, query strings, guest names, emails or keys.
 
+### When the price moves between search and "Confirm booking"
+
+Hotel prices change by the minute. When LiteAPI refuses a price lock with *"provider price exceeds locked selling
+price, please search again"* (HTTP 409, code 2001 — seen live in the sandbox), `prebook` searches that hotel once
+more and locks the same room, board and refundability (else the closest rate) once more; never more than once.
+
+- It worked: the result has `retried: true`, the locked `price` next to `expectedPrice` (what the guest saw) with
+  `priceChanged`, and `rateChanged` / `boardChanged` / `cancellationChanged` when the closest rate differs from the
+  one picked (`rateId` is then the new rate, `requestedRateId` the old one; `roomName` / `rateName` describe it).
+  If any of these flags is set, show the guest the new terms before the card form.
+- It failed again: a `LiveServiceError` with code `price_changed`, `userMessage` "The price just changed to $508
+  for your stay. Please check it before you book." and `details: { hotelId, requestedRateId, rateId, rateChanged,
+  oldPrice, newPrice, currency, roomName, rateName }` — what the requote card needs. Nothing left at all:
+  `sold_out`.
+
 ### The payment form (front end) — VERIFY
 
 Assumption to check against LiteAPI's "Payment SDK" docs before shipping:
@@ -318,7 +333,8 @@ The build sandbox could not reach the providers' docs. Each assumption sits in o
   `checkout`, `timeout`, `roomMapping`) and answer (`roomTypes[].offerId`, `offerRetailRate`, `rates[]` with
   `boardType`, `retailRate.total`, `taxesAndFees[].included`, `cancellationPolicies` `refundableTag` RFN/NRFN and
   `cancelPolicyInfos[].cancelTime` = when that fee starts, with `timezone`); "no availability" = error code 2001,
-  possibly on HTTP 200; board codes RO/BB/HB/FB/AI; `POST /rates/prebook { offerId, usePaymentSdk: true }` →
+  possibly on HTTP 200 (code 2001 is also used, on a 409, for the price-change refusal above — confirmed live — so
+  the message decides); board codes RO/BB/HB/FB/AI; `POST /rates/prebook { offerId, usePaymentSdk: true }` →
   `prebookId`, `price`, `priceDifferencePercent`, `cancellationChanged`, `boardChanged`, `transactionId`,
   `secretKey`; `POST /rates/book` with `holder`, `payment: { method: 'TRANSACTION_ID', transactionId }`
   (sandbox: `ACC_CREDIT_CARD`), `guests[].occupancyNumber`, `clientReference`; `GET /bookings/{id}`;

@@ -5,7 +5,7 @@ import { createResendMailer, createDisabledMailer } from './email.js';
 import { buildRideLinks } from './rides.js';
 
 export { readLiveConfig, describeLiveConfig } from './config.js';
-export { createLiteApiSupplier, isLiteApiSandboxKey, LITEAPI, penaltyAt, lowestNightly, findRate, formatUsd } from './liteapi.js';
+export { createLiteApiSupplier, isLiteApiSandboxKey, LITEAPI, penaltyAt, lowestNightly, findRate, closestRate, formatUsd } from './liteapi.js';
 export { createGooglePlaces, createPlacesConnector, createSimGeocoder, GOOGLE_PLACES } from './places.js';
 export { createResendMailer, createDisabledMailer, buildBookingConfirmationEmail, buildReceiptEmail, RESEND } from './email.js';
 export { buildRideLinks, buildUberLink, buildLyftLink, RIDE_LINKS } from './rides.js';
