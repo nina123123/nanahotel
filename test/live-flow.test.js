@@ -188,6 +188,19 @@ test('quote → Confirm booking (price lock) → card form session → pay → b
   assert.ok(api.calls.some((c) => c.method === 'PUT' && c.path === '/v3.0/bookings/BKX7Q2'));
 });
 
+test('two taps on Confirm booking lock the price once and share the order', async (t) => {
+  const { base, tools, api } = await liveApp(t);
+  const quote = await quoteBreakfastRate(tools);
+  const [a, b] = await Promise.all([
+    call(base, 'POST', `/api/quotes/${quote.id}/confirm`, { body: {} }),
+    call(base, 'POST', `/api/quotes/${quote.id}/confirm`, { body: {} }),
+  ]);
+  assert.equal(a.status, 200, a.text);
+  assert.equal(b.status, 200, b.text);
+  assert.equal(a.json.order.id, b.json.order.id);
+  assert.equal(api.calls.filter((c) => c.path === '/v3.0/rates/prebook').length, 1);
+});
+
 test('a higher locked price is refused before any payment, and the next quote reads LiteAPI afresh', async (t) => {
   let rateCalls = 0;
   const { base, tools, api } = await liveApp(t, {

@@ -156,7 +156,19 @@ export function createLiveBookingService({ store, hotels, supplier, mailer = nul
     return live;
   }
 
-  async function confirmQuote({ userId, quoteId } = {}) {
+  // One price lock per quote at a time: a second tap (or tab) waits for the first instead of locking again, so the
+  // card form the guest pays in always belongs to the stored session.
+  const confirming = new Map();
+
+  function confirmQuote({ userId, quoteId } = {}) {
+    const key = `${str(userId, 100)}|${str(quoteId, 80)}`;
+    if (confirming.has(key)) return confirming.get(key);
+    const run = lockAndOrder({ userId, quoteId }).finally(() => confirming.delete(key));
+    confirming.set(key, run);
+    return run;
+  }
+
+  async function lockAndOrder({ userId, quoteId } = {}) {
     const u = requireUser(userId);
     const quote = base.getQuote(u, quoteId);
     // Not pending (missing, confirmed, expired, replaced): the simulator's answer, before anything is locked.
